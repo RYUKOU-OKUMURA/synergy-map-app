@@ -791,14 +791,21 @@ function MapWorkspace({
       {mapViewMode === "customer_journey" ? (
         <button
           className={`tray-tab ${trayOpen ? "tray-tab-open" : ""}`}
+          aria-expanded={trayOpen}
+          aria-label={trayOpen ? "抽出カードを閉じる" : "抽出カードを開く"}
           onClick={() => onTrayOpenChange(!trayOpen)}
           type="button"
         >
           抽出カード {workspace.extractedItems.length}
         </button>
       ) : null}
-      {mapViewMode === "customer_journey" && trayOpen ? (
-        <aside className="extraction-tray">
+      {mapViewMode === "customer_journey" ? (
+        <aside
+          className={`extraction-tray ${
+            trayOpen ? "extraction-tray-open" : "extraction-tray-closed"
+          }`}
+          aria-hidden={!trayOpen}
+        >
           <div className="panel-heading">
             <span>抽出カード</span>
             <small>{workspace.extractedItems.length}件</small>
@@ -829,12 +836,26 @@ function MapWorkspace({
       ) : null}
 
       {mapViewMode === "business_impact" && workspace.nodes.length > 0 ? (
-        <BusinessImpactPanel
-          onGenerate={onGenerateSuggestions}
-          onSelectSuggestion={onSelectSuggestion}
-          selectedSuggestionId={selectedSuggestionId}
-          workspace={workspace}
-        />
+        <>
+          <button
+            className={`tray-tab impact-panel-tab ${
+              trayOpen ? "impact-panel-tab-open" : ""
+            }`}
+            aria-expanded={trayOpen}
+            aria-label={trayOpen ? "事業インパクトを閉じる" : "事業インパクトを開く"}
+            onClick={() => onTrayOpenChange(!trayOpen)}
+            type="button"
+          >
+            事業インパクト {workspace.suggestions.length}
+          </button>
+          <BusinessImpactPanel
+            open={trayOpen}
+            onGenerate={onGenerateSuggestions}
+            onSelectSuggestion={onSelectSuggestion}
+            selectedSuggestionId={selectedSuggestionId}
+            workspace={workspace}
+          />
+        </>
       ) : null}
 
       <section className="map-stage">
@@ -918,11 +939,13 @@ function MapWorkspace({
 }
 
 function BusinessImpactPanel({
+  open,
   onGenerate,
   onSelectSuggestion,
   selectedSuggestionId,
   workspace,
 }: {
+  open: boolean;
   onGenerate: () => void;
   onSelectSuggestion: (suggestionId: string) => void;
   selectedSuggestionId: string | null;
@@ -948,7 +971,10 @@ function BusinessImpactPanel({
   );
 
   return (
-    <aside className="impact-panel">
+    <aside
+      className={`impact-panel ${open ? "impact-panel-open" : "impact-panel-closed"}`}
+      aria-hidden={!open}
+    >
       <div className="panel-heading">
         <span>事業インパクト</span>
         <small>{suggestions.length}施策</small>

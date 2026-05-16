@@ -324,7 +324,7 @@ button:disabled {
   position: absolute;
   top: 78px;
   left: 12px;
-  z-index: 20;
+  z-index: 22;
   writing-mode: vertical-rl;
   display: flex;
   min-width: 34px;
@@ -338,10 +338,19 @@ button:disabled {
   font-size: 12px;
   font-weight: 750;
   box-shadow: 0 8px 22px rgba(15, 23, 42, 0.12);
+  transition:
+    left 220ms ease,
+    border-color 180ms ease,
+    background 180ms ease,
+    box-shadow 180ms ease;
 }
 
 .tray-tab-open {
   left: 326px;
+}
+
+.impact-panel-tab-open {
+  left: 362px;
 }
 
 .extraction-tray {
@@ -357,6 +366,25 @@ button:disabled {
   border-radius: 8px;
   background: var(--surface);
   box-shadow: 0 14px 34px rgba(15, 23, 42, 0.14);
+  transition:
+    opacity 220ms ease,
+    transform 220ms ease,
+    visibility 220ms ease;
+  will-change: transform;
+}
+
+.extraction-tray-open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+  visibility: visible;
+}
+
+.extraction-tray-closed {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-316px);
+  visibility: hidden;
 }
 
 .impact-panel {
@@ -372,6 +400,25 @@ button:disabled {
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.97);
   box-shadow: 0 14px 34px rgba(15, 23, 42, 0.14);
+  transition:
+    opacity 220ms ease,
+    transform 220ms ease,
+    visibility 220ms ease;
+  will-change: transform;
+}
+
+.impact-panel-open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+  visibility: visible;
+}
+
+.impact-panel-closed {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-352px);
+  visibility: hidden;
 }
 
 .impact-summary {
