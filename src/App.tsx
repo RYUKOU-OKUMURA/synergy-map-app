@@ -111,6 +111,18 @@ type DeviceCodeLoginResult = {
   warnings: string[];
 };
 
+type CodexRuntimeInfo = {
+  commandStrategy: string;
+  resolvedPath: string | null;
+  realPath: string | null;
+  version: string | null;
+  targetTriple: string | null;
+  sidecarCandidateName: string | null;
+  frontendShellPermissions: string;
+  distributionDecision: string;
+  warnings: string[];
+};
+
 const sampleFiles = [
   "company-overview.pdf",
   "financial-summary.pdf",
@@ -138,6 +150,9 @@ function App() {
   );
   const [deviceCodeResult, setDeviceCodeResult] =
     useState<DeviceCodeLoginResult | null>(null);
+  const [codexRuntimeInfo, setCodexRuntimeInfo] = useState<CodexRuntimeInfo | null>(
+    null,
+  );
   const [liveDeviceCode, setLiveDeviceCode] = useState<{
     verificationUrl: string | null;
     userCode: string | null;
@@ -238,9 +253,10 @@ function App() {
 
     async function loadInitialProjects() {
       try {
-        const [projectRows, storage] = await Promise.all([
+        const [projectRows, storage, runtimeInfo] = await Promise.all([
           invoke<Project[]>("list_projects"),
           invoke<StorageInfo>("get_storage_info"),
+          invoke<CodexRuntimeInfo>("get_codex_runtime_info"),
         ]);
 
         if (!isMounted) {
@@ -249,6 +265,7 @@ function App() {
 
         setProjects(projectRows);
         setStorageInfo(storage);
+        setCodexRuntimeInfo(runtimeInfo);
       } catch (caughtError) {
         if (isMounted) {
           setError(String(caughtError));
@@ -580,6 +597,26 @@ function App() {
                       ? "ブラウザでURLを開き、コードを入力できます。"
                       : "")}
                 </div>
+              </div>
+            </div>
+
+            <div className="border-t border-[var(--app-border)] px-4 py-4">
+              <div className="grid grid-cols-[160px_1fr] gap-y-2 text-sm">
+                <div className="text-[var(--app-muted)]">実行方式</div>
+                <div className="font-medium">
+                  {codexRuntimeInfo?.commandStrategy ?? "確認中"}
+                </div>
+                <div className="text-[var(--app-muted)]">CLI</div>
+                <div className="truncate">
+                  {codexRuntimeInfo?.version ?? "未検出"} /{" "}
+                  {codexRuntimeInfo?.realPath ?? codexRuntimeInfo?.resolvedPath ?? "-"}
+                </div>
+                <div className="text-[var(--app-muted)]">sidecar候補</div>
+                <div>{codexRuntimeInfo?.sidecarCandidateName ?? "-"}</div>
+                <div className="text-[var(--app-muted)]">配布判断</div>
+                <div>{codexRuntimeInfo?.distributionDecision ?? "未判定"}</div>
+                <div className="text-[var(--app-muted)]">shell権限</div>
+                <div>{codexRuntimeInfo?.frontendShellPermissions ?? "-"}</div>
               </div>
             </div>
 

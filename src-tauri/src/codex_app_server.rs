@@ -1,4 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -55,6 +56,20 @@ pub struct DeviceCodeLoginResult {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRuntimeInfo {
+    pub command_strategy: String,
+    pub resolved_path: Option<String>,
+    pub real_path: Option<String>,
+    pub version: Option<String>,
+    pub target_triple: Option<String>,
+    pub sidecar_candidate_name: Option<String>,
+    pub frontend_shell_permissions: String,
+    pub distribution_decision: String,
+    pub warnings: Vec<String>,
+}
+
 enum WireMessage {
     Json(Value),
     ParseError(String),
@@ -70,7 +85,8 @@ struct CodexProcess {
 
 impl CodexProcess {
     fn spawn() -> Result<Self, String> {
-        let mut child = Command::new("codex")
+        let codex_command = find_on_path("codex").unwrap_or_else(|| PathBuf::from("codex"));
+        let mut child = Command::new(codex_command)
             .args(["app-server", "--listen", "stdio://"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -245,6 +261,46 @@ impl Drop for CodexProcess {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+pub fn inspect_runtime() -> CodexRuntimeInfo {
+    let mut warnings = Vec::new();
+    let resolved_path = find_on_path("codex").map(|path| path.display().to_string());
+    let real_path = resolved_path
+        .as_deref()
+        .and_then(|path| std::fs::canonicalize(path).ok())
+        .map(|path| path.display().to_string());
+    let version = command_stdout("codex", ["--version"]).or_else(|| {
+        warnings.push("PATH上のcodex CLIを実行できません。".to_string());
+        None
+    });
+    let target_triple = command_stdout("rustc", ["-Vv"]).and_then(|stdout| {
+        stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("host: "))
+            .map(ToString::to_string)
+    });
+
+    if target_triple.is_none() {
+        warnings.push("rustc -Vvからtarget tripleを取得できません。".to_string());
+    }
+
+    let sidecar_candidate_name = target_triple
+        .as_deref()
+        .map(|target| sidecar_candidate_name(target).display().to_string());
+
+    CodexRuntimeInfo {
+        command_strategy: "Phase 0はPATH上のcodex CLIをRust backendから固定引数で起動"
+            .to_string(),
+        resolved_path,
+        real_path,
+        version,
+        target_triple,
+        sidecar_candidate_name,
+        frontend_shell_permissions: "src-tauri/capabilities/default.jsonはcore:defaultのみ。frontend shell spawn権限は付与していない。".to_string(),
+        distribution_decision: "Phase 0判定は外部codex CLI前提。sidecar同梱はCodex CLIの自己完結バイナリ化とライセンス/更新方針をMVP-1開始前に再評価。".to_string(),
+        warnings,
     }
 }
 
@@ -719,4 +775,55 @@ fn push_device_code_event(
 
     let _ = app.emit(EVENT_NAME, &event);
     events.push(event);
+}
+
+fn command_stdout<const N: usize>(program: &str, args: [&str; N]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        None
+    } else {
+        Some(stdout)
+    }
+}
+
+fn find_on_path(command_name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let executable_names = executable_names(command_name);
+
+    std::env::split_paths(&path)
+        .flat_map(|directory| {
+            executable_names
+                .iter()
+                .map(move |name| directory.join(name))
+        })
+        .find(|path| path.is_file())
+}
+
+fn executable_names(command_name: &str) -> Vec<String> {
+    if cfg!(windows) {
+        vec![
+            format!("{command_name}.exe"),
+            format!("{command_name}.cmd"),
+            format!("{command_name}.bat"),
+            command_name.to_string(),
+        ]
+    } else {
+        vec![command_name.to_string()]
+    }
+}
+
+fn sidecar_candidate_name(target_triple: &str) -> PathBuf {
+    let file_name = if target_triple.contains("windows") {
+        format!("codex-app-server-{target_triple}.exe")
+    } else {
+        format!("codex-app-server-{target_triple}")
+    };
+
+    PathBuf::from("binaries").join(file_name)
 }

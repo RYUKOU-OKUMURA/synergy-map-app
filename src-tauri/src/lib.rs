@@ -11,7 +11,7 @@ use uuid::Uuid;
 mod codex_app_server;
 mod source_reader;
 
-use codex_app_server::{CodexSmokeResult, DeviceCodeLoginResult};
+use codex_app_server::{CodexRuntimeInfo, CodexSmokeResult, DeviceCodeLoginResult};
 use source_reader::{read_source_file, ReadSourceDraft};
 
 struct DbState {
@@ -376,6 +376,11 @@ fn run_codex_device_code_check(app: tauri::AppHandle) -> DeviceCodeLoginResult {
     codex_app_server::run_device_code_login_check(app)
 }
 
+#[tauri::command]
+fn get_codex_runtime_info() -> CodexRuntimeInfo {
+    codex_app_server::inspect_runtime()
+}
+
 fn import_source_path(
     db_path: &PathBuf,
     app_data_dir: &Path,
@@ -677,7 +682,8 @@ pub fn run() {
             import_sample_source,
             list_source_chunks,
             run_codex_smoke_test,
-            run_codex_device_code_check
+            run_codex_device_code_check,
+            get_codex_runtime_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
