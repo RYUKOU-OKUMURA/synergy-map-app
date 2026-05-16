@@ -89,16 +89,16 @@ struct AiSchemaPocResult {
 struct Migration {
     version: i64,
     name: &'static str,
-    checksum: &'static str,
     sql: &'static str,
 }
 
 const MIGRATIONS: &[Migration] = &[Migration {
     version: 1,
     name: "initial",
-    checksum: "0001_initial_v1",
     sql: include_str!("../migrations/0001_initial.sql"),
 }];
+
+const LEGACY_INITIAL_MIGRATION_CHECKSUM: &str = "0001_initial_v1";
 
 const PHASE0_SAMPLE_FILES: &[&str] = &[
     "company-overview.pdf",
@@ -122,6 +122,14 @@ fn now_rfc3339() -> Result<String, String> {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .map_err(|error| error.to_string())
+}
+
+fn hash_text(value: &str) -> String {
+    hex::encode(Sha256::digest(value.as_bytes()))
+}
+
+fn migration_checksum(migration: &Migration) -> String {
+    hash_text(migration.sql)
 }
 
 fn workspace_dir() -> PathBuf {
@@ -163,6 +171,7 @@ fn run_migrations(connection: &mut Connection) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
 
     for migration in MIGRATIONS {
+        let expected_checksum = migration_checksum(migration);
         let applied_migration = transaction
             .query_row(
                 "SELECT name, checksum FROM _migrations WHERE version = ?1",
@@ -173,14 +182,31 @@ fn run_migrations(connection: &mut Connection) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
 
         if let Some((name, checksum)) = applied_migration {
-            if name != migration.name || checksum != migration.checksum {
+            if name != migration.name {
                 return Err(format!(
                     "Migration drift detected for version {}.",
                     migration.version
                 ));
             }
 
-            continue;
+            if checksum == expected_checksum {
+                continue;
+            }
+
+            if is_legacy_migration_checksum(migration, &checksum) {
+                transaction
+                    .execute(
+                        "UPDATE _migrations SET checksum = ?1 WHERE version = ?2",
+                        params![expected_checksum, migration.version],
+                    )
+                    .map_err(|error| error.to_string())?;
+                continue;
+            }
+
+            return Err(format!(
+                "Migration drift detected for version {}.",
+                migration.version
+            ));
         }
 
         transaction
@@ -192,7 +218,7 @@ fn run_migrations(connection: &mut Connection) -> Result<(), String> {
                 params![
                     migration.version,
                     migration.name,
-                    migration.checksum,
+                    expected_checksum,
                     now_rfc3339()?
                 ],
             )
@@ -200,6 +226,12 @@ fn run_migrations(connection: &mut Connection) -> Result<(), String> {
     }
 
     transaction.commit().map_err(|error| error.to_string())
+}
+
+fn is_legacy_migration_checksum(migration: &Migration, checksum: &str) -> bool {
+    migration.version == 1
+        && migration.name == "initial"
+        && checksum == LEGACY_INITIAL_MIGRATION_CHECKSUM
 }
 
 fn ensure_migrations_checksum_column(connection: &Connection) -> Result<(), String> {
@@ -224,7 +256,11 @@ fn ensure_migrations_checksum_column(connection: &Connection) -> Result<(), Stri
         connection
             .execute(
                 "UPDATE _migrations SET checksum = ?1 WHERE version = ?2 AND name = ?3",
-                params![migration.checksum, migration.version, migration.name],
+                params![
+                    migration_checksum(migration),
+                    migration.version,
+                    migration.name
+                ],
             )
             .map_err(|error| error.to_string())?;
     }
@@ -568,7 +604,7 @@ fn save_ai_run(
     let run_dir = ai_runs_dir(app_data_dir, project_id).join(&id);
     let request_summary_path = run_dir.join("request-summary.json");
     let response_json_path = run_dir.join("response.json");
-    let input_hash = hex::encode(Sha256::digest(prompt.as_bytes()));
+    let input_hash = hash_text(prompt);
 
     let write_result = (|| -> Result<(), String> {
         fs::create_dir_all(&run_dir).map_err(|error| error.to_string())?;
@@ -741,6 +777,57 @@ mod tests {
             .expect("migration count should be readable");
 
         assert_eq!(migration_count, 1);
+
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn migration_checksum_is_derived_from_sql() {
+        let db_path = std::env::temp_dir().join(format!("synergy-map-test-{}.db", Uuid::new_v4()));
+
+        init_database(&db_path).expect("database should initialize");
+
+        let connection = open_connection(&db_path).expect("connection should open");
+        let checksum: String = connection
+            .query_row(
+                "SELECT checksum FROM _migrations WHERE version = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("migration checksum should be readable");
+
+        assert_eq!(checksum, migration_checksum(&MIGRATIONS[0]));
+        assert_ne!(checksum, LEGACY_INITIAL_MIGRATION_CHECKSUM);
+
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn legacy_initial_migration_checksum_is_upgraded() {
+        let db_path = std::env::temp_dir().join(format!("synergy-map-test-{}.db", Uuid::new_v4()));
+
+        init_database(&db_path).expect("database should initialize");
+        let connection = open_connection(&db_path).expect("connection should open");
+        connection
+            .execute(
+                "UPDATE _migrations SET checksum = ?1 WHERE version = 1",
+                [LEGACY_INITIAL_MIGRATION_CHECKSUM],
+            )
+            .expect("legacy checksum should update");
+        drop(connection);
+
+        init_database(&db_path).expect("legacy checksum should upgrade");
+
+        let connection = open_connection(&db_path).expect("connection should reopen");
+        let checksum: String = connection
+            .query_row(
+                "SELECT checksum FROM _migrations WHERE version = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("migration checksum should be readable");
+
+        assert_eq!(checksum, migration_checksum(&MIGRATIONS[0]));
 
         let _ = fs::remove_file(db_path);
     }
