@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -544,6 +544,7 @@ pub fn create_extracted_item(
             ],
         )
         .map_err(|error| error.to_string())?;
+    clear_map_outputs_in_transaction(&transaction, &project_id)?;
     record_snapshot_in_transaction(&transaction, &project_id, "human_edit_items")?;
     transaction.commit().map_err(|error| error.to_string())?;
 
@@ -594,6 +595,7 @@ pub fn update_extracted_item(
             ],
         )
         .map_err(|error| error.to_string())?;
+    clear_map_outputs_in_transaction(&transaction, &project_id)?;
     record_snapshot_in_transaction(&transaction, &project_id, "human_edit_items")?;
     transaction.commit().map_err(|error| error.to_string())?;
 
@@ -663,18 +665,7 @@ pub fn generate_map_from_items(
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    transaction
-        .execute(
-            "DELETE FROM edges WHERE project_id = ?1",
-            [project_id.as_str()],
-        )
-        .map_err(|error| error.to_string())?;
-    transaction
-        .execute(
-            "DELETE FROM nodes WHERE project_id = ?1",
-            [project_id.as_str()],
-        )
-        .map_err(|error| error.to_string())?;
+    clear_map_outputs_in_transaction(&transaction, &project_id)?;
     insert_map(&transaction, &project_id, &output)?;
     finalize_ai_run_in_transaction(&transaction, &ai_run_id, status)?;
     record_snapshot_in_transaction(&transaction, &project_id, "ai_generate_map")?;
@@ -732,6 +723,7 @@ pub fn update_map_node(
             ],
         )
         .map_err(|error| error.to_string())?;
+    clear_map_analysis_in_transaction(&transaction, &project_id)?;
     record_snapshot_in_transaction(&transaction, &project_id, "human_edit_map")?;
     transaction.commit().map_err(|error| error.to_string())?;
 
@@ -779,6 +771,7 @@ pub fn update_map_edge(
             ],
         )
         .map_err(|error| error.to_string())?;
+    clear_map_analysis_in_transaction(&transaction, &project_id)?;
     record_snapshot_in_transaction(&transaction, &project_id, "human_edit_map")?;
     transaction.commit().map_err(|error| error.to_string())?;
 
@@ -829,7 +822,9 @@ pub fn generate_suggestions_from_map(
     ensure_project_exists(&connection, &project_id)?;
     let workspace = load_workspace(&connection, &project_id)?;
 
-    if workspace.nodes.is_empty() {
+    let (active_nodes, active_edges) = active_map_scope(&workspace);
+
+    if active_nodes.is_empty() {
         return Err("シナジーマップがありません。先にマップを生成してください。".to_string());
     }
 
@@ -878,8 +873,8 @@ pub fn generate_suggestions_from_map(
             "mode": "map_summary",
             "fallbackUsed": analysis_fallback_used,
             "promptHash": prompt_hash.clone(),
-            "nodeCount": workspace.nodes.len(),
-            "edgeCount": workspace.edges.len(),
+            "nodeCount": active_nodes.len(),
+            "edgeCount": active_edges.len(),
         }),
         &analysis_json,
         analysis_error,
@@ -896,8 +891,8 @@ pub fn generate_suggestions_from_map(
             "mode": "map_summary",
             "fallbackUsed": suggestions_fallback_used,
             "promptHash": prompt_hash,
-            "nodeCount": workspace.nodes.len(),
-            "edgeCount": workspace.edges.len(),
+            "nodeCount": active_nodes.len(),
+            "edgeCount": active_edges.len(),
         }),
         &suggestions_json,
         suggestions_error,
@@ -977,9 +972,16 @@ pub fn export_csv_bundle(
     let dir =
         exports_dir(&app_data_dir, &project_id).join(format!("csv-{}", timestamp_for_file(&now)));
     fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-    write_nodes_csv(&dir.join("nodes.csv"), &workspace.nodes)?;
-    write_edges_csv(&dir.join("edges.csv"), &workspace.edges)?;
-    write_suggestions_csv(&dir.join("suggestions.csv"), &workspace.suggestions)?;
+    let nodes = exportable_nodes(&workspace.nodes);
+    let node_ids = nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<HashSet<_>>();
+    let edges = exportable_edges(&workspace.edges, &node_ids);
+    let suggestions = exportable_suggestions(&workspace.suggestions);
+    write_nodes_csv(&dir.join("nodes.csv"), &nodes)?;
+    write_edges_csv(&dir.join("edges.csv"), &edges)?;
+    write_suggestions_csv(&dir.join("suggestions.csv"), &suggestions)?;
     write_sources_csv(&dir.join("sources.csv"), &workspace.source_files)?;
     let job = insert_export_job(&connection, &project_id, "csv", &dir, &now)?;
 
@@ -1490,8 +1492,16 @@ fn build_extracted_items_output(chunks: &[ExtractionChunk]) -> Value {
             .push(chunk);
     }
 
+    let mut grouped_chunks = grouped.into_values().collect::<Vec<_>>();
+    grouped_chunks.sort_by(|left, right| {
+        left[0]
+            .source_file_id
+            .cmp(&right[0].source_file_id)
+            .then_with(|| left[0].file_name.cmp(&right[0].file_name))
+    });
+
     let mut items = Vec::new();
-    for source_chunks in grouped.values().take(12) {
+    for (item_index, source_chunks) in grouped_chunks.iter().take(12).enumerate() {
         let first = source_chunks[0];
         let merged = source_chunks
             .iter()
@@ -1500,7 +1510,7 @@ fn build_extracted_items_output(chunks: &[ExtractionChunk]) -> Value {
             .collect::<Vec<_>>()
             .join("\n");
         let item_type = infer_item_type(&merged, &first.file_name, &first.file_type);
-        let name = inferred_item_name(&item_type, &first.file_name, &merged);
+        let name = inferred_item_name(&item_type, item_index + 1);
         let sources = source_chunks
             .iter()
             .take(3)
@@ -1508,7 +1518,7 @@ fn build_extracted_items_output(chunks: &[ExtractionChunk]) -> Value {
                 json!({
                     "sourceChunkId": chunk.id,
                     "sourceFileId": chunk.source_file_id,
-                    "quote": truncate_chars(&chunk.content, 180),
+                    "quote": local_summary_only_quote(),
                 })
             })
             .collect::<Vec<_>>();
@@ -1516,7 +1526,7 @@ fn build_extracted_items_output(chunks: &[ExtractionChunk]) -> Value {
         items.push(json!({
             "name": name,
             "itemType": item_type,
-            "description": inferred_description(&merged),
+            "description": inferred_description(&item_type, source_chunks),
             "confidenceStatus": if merged.chars().count() > 120 { "estimated" } else { "needs_review" },
             "impactScore": inferred_impact_score(&merged),
             "subjectiveImportance": 2,
@@ -1543,7 +1553,7 @@ fn build_extracted_items_output(chunks: &[ExtractionChunk]) -> Value {
                     "sources": [{
                         "sourceChunkId": first.id,
                         "sourceFileId": first.source_file_id,
-                        "quote": truncate_chars(&first.content, 180),
+                        "quote": local_summary_only_quote(),
                     }]
                 }),
             );
@@ -1576,7 +1586,7 @@ fn extraction_prompt(chunks: &[ExtractionChunk]) -> String {
         "MVP-1のシナジーマップ用に、以下のsource chunks要約から抽出カードを生成してください。\
          事業、商品・サービス、集客チャネル、顧客接点、財務参考情報、データ資料に分類し、\
          confidenceStatusはconfirmed/estimated/needs_review、itemTypeはbusiness/service/channel/touchpoint/finance/data_sourceを使ってください。\
-         sourcesには根拠にしたsourceChunkId/sourceFileIdを入れてください。schemaVersionは{}です。\n\n{}",
+         sourcesには根拠にしたsourceChunkId/sourceFileIdを入れ、quoteには原文引用ではなく「ローカル要約のみ」と分かる短い説明を入れてください。schemaVersionは{}です。\n\n{}",
         SCHEMA_VERSION, summaries
     )
 }
@@ -1682,13 +1692,8 @@ fn infer_item_type(content: &str, file_name: &str, file_type: &str) -> String {
     }
 }
 
-fn inferred_item_name(item_type: &str, file_name: &str, content: &str) -> String {
-    let stem = Path::new(file_name)
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or(file_name)
-        .replace(['-', '_'], " ");
-    let prefix = match item_type {
+fn item_type_label(item_type: &str) -> &'static str {
+    match item_type {
         "business" => "事業",
         "service" => "商品・サービス",
         "channel" => "集客チャネル",
@@ -1696,29 +1701,33 @@ fn inferred_item_name(item_type: &str, file_name: &str, content: &str) -> String
         "finance" => "財務参考情報",
         "data_source" => "データ資料",
         _ => "抽出項目",
-    };
-    let candidate = content
-        .lines()
-        .map(str::trim)
-        .find(|line| line.chars().count() >= 4 && line.chars().count() <= 24)
-        .unwrap_or(&stem);
-
-    format!("{prefix}: {}", truncate_chars(candidate, 24))
+    }
 }
 
-fn inferred_description(content: &str) -> String {
-    let summary = content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .take(3)
-        .collect::<Vec<_>>()
-        .join(" / ");
+fn local_summary_only_quote() -> &'static str {
+    "原文引用は保存していません。ローカル要約と出典IDのみを利用しています。"
+}
 
-    if summary.is_empty() {
-        "資料から抽出した確認対象です。".to_string()
+fn inferred_item_name(item_type: &str, index: usize) -> String {
+    format!("{}候補 {}", item_type_label(item_type), index)
+}
+
+fn inferred_description(item_type: &str, chunks: &[&ExtractionChunk]) -> String {
+    let summaries = chunks
+        .iter()
+        .take(2)
+        .map(|chunk| summarize_chunk_for_ai(chunk))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let label = item_type_label(item_type);
+
+    if summaries.is_empty() {
+        format!("{label}としてローカル要約から抽出した確認対象です。")
     } else {
-        truncate_chars(&summary, 180)
+        truncate_chars(
+            &format!("{label}としてローカル要約から抽出した確認対象です。{summaries}"),
+            220,
+        )
     }
 }
 
@@ -1947,7 +1956,7 @@ fn load_items_for_map(connection: &Connection, project_id: &str) -> Result<Vec<M
     let items = load_extracted_items(connection, project_id)?;
     Ok(items
         .into_iter()
-        .filter(|item| item.adoption_status != "rejected")
+        .filter(|item| item.adoption_status == "accepted")
         .map(|item| MapItem {
             id: item.id,
             name: item.name,
@@ -2157,9 +2166,40 @@ fn insert_map(
     Ok(())
 }
 
+fn clear_map_analysis_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+) -> Result<(), String> {
+    for table_name in ["suggestions", "ai_comments"] {
+        transaction
+            .execute(
+                &format!("DELETE FROM {table_name} WHERE project_id = ?1"),
+                [project_id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn clear_map_outputs_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+) -> Result<(), String> {
+    clear_map_analysis_in_transaction(transaction, project_id)?;
+    transaction
+        .execute("DELETE FROM edges WHERE project_id = ?1", [project_id])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM nodes WHERE project_id = ?1", [project_id])
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
 fn build_analysis_output(workspace: &ProjectWorkspace) -> Value {
-    let node_names = workspace
-        .nodes
+    let (nodes, edges) = active_map_scope(workspace);
+    let node_names = nodes
         .iter()
         .take(4)
         .map(|node| node.label.clone())
@@ -2176,7 +2216,7 @@ fn build_analysis_output(workspace: &ProjectWorkspace) -> Value {
     json!({
         "schemaVersion": SCHEMA_VERSION,
         "summary": summary,
-        "strongFlows": workspace.edges.iter().filter(|edge| edge.strength.as_deref() == Some("strong")).take(3).map(|edge| edge.label.clone().unwrap_or_else(|| "強い導線".to_string())).collect::<Vec<_>>(),
+        "strongFlows": edges.iter().filter(|edge| edge.strength.as_deref() == Some("strong")).take(3).map(|edge| edge.label.clone().unwrap_or_else(|| "強い導線".to_string())).collect::<Vec<_>>(),
         "bottlenecks": ["商談後の継続接点とデータ活用の確認が必要です。"],
         "unconnectedSynergies": ["データ資料と集客チャネルを接続できる余地があります。"],
         "questions": ["継続契約につながる主要な接点はどこですか？", "売上CSVと顧客台帳は同じ顧客IDで接続できますか？"],
@@ -2190,14 +2230,13 @@ fn build_analysis_output(workspace: &ProjectWorkspace) -> Value {
 }
 
 fn analysis_prompt(workspace: &ProjectWorkspace) -> String {
-    let nodes = workspace
-        .nodes
+    let (active_nodes, active_edges) = active_map_scope(workspace);
+    let nodes = active_nodes
         .iter()
         .map(|node| format!("- node: {} ({})", node.label, node.node_type))
         .collect::<Vec<_>>()
         .join("\n");
-    let edges = workspace
-        .edges
+    let edges = active_edges
         .iter()
         .map(|edge| {
             format!(
@@ -2215,6 +2254,17 @@ fn analysis_prompt(workspace: &ProjectWorkspace) -> String {
         "MVP-1のシナジーマップから、現状の全体像、強い導線、詰まり、未接続シナジー候補、確認質問、簡易施策を日本語で短く生成してください。schemaVersionは{}です。\n\nNodes:\n{}\n\nEdges:\n{}",
         SCHEMA_VERSION, nodes, edges
     )
+}
+
+fn active_map_scope(workspace: &ProjectWorkspace) -> (Vec<&MapNodeRow>, Vec<&MapEdgeRow>) {
+    let nodes = exportable_nodes(&workspace.nodes);
+    let node_ids = nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<HashSet<_>>();
+    let edges = exportable_edges(&workspace.edges, &node_ids);
+
+    (nodes, edges)
 }
 
 fn build_suggestions_output(_workspace: &ProjectWorkspace) -> Value {
@@ -2616,6 +2666,18 @@ fn project_name(connection: &Connection, project_id: &str) -> Result<String, Str
 
 fn render_markdown(project_name: &str, workspace: &ProjectWorkspace) -> String {
     let mut body = String::new();
+    let nodes = exportable_nodes(&workspace.nodes);
+    let node_ids = nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<HashSet<_>>();
+    let node_labels = nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.label.as_str()))
+        .collect::<HashMap<_, _>>();
+    let edges = exportable_edges(&workspace.edges, &node_ids);
+    let extracted_items = exportable_extracted_items(&workspace.extracted_items);
+    let suggestions = exportable_suggestions(&workspace.suggestions);
 
     body.push_str(&format!("# {project_name} シナジーマップ\n\n"));
     body.push_str("## 概要\n\n");
@@ -2638,7 +2700,7 @@ fn render_markdown(project_name: &str, workspace: &ProjectWorkspace) -> String {
     }
 
     body.push_str("\n## 抽出カード\n\n");
-    for item in &workspace.extracted_items {
+    for item in extracted_items {
         body.push_str(&format!(
             "- **{}** / {} / {} / {}\n",
             item.name, item.item_type, item.confidence_status, item.adoption_status
@@ -2651,21 +2713,17 @@ fn render_markdown(project_name: &str, workspace: &ProjectWorkspace) -> String {
     body.push_str("\n## 顧客導線マップ要約\n\n");
     body.push_str(&format!(
         "- ノード: {}件\n- 導線: {}件\n\n",
-        workspace.nodes.len(),
-        workspace.edges.len()
+        nodes.len(),
+        edges.len()
     ));
-    for edge in &workspace.edges {
-        let source = workspace
-            .nodes
-            .iter()
-            .find(|node| node.id == edge.source_node_id)
-            .map(|node| node.label.as_str())
+    for edge in edges {
+        let source = node_labels
+            .get(edge.source_node_id.as_str())
+            .copied()
             .unwrap_or("source");
-        let target = workspace
-            .nodes
-            .iter()
-            .find(|node| node.id == edge.target_node_id)
-            .map(|node| node.label.as_str())
+        let target = node_labels
+            .get(edge.target_node_id.as_str())
+            .copied()
             .unwrap_or("target");
         body.push_str(&format!(
             "- {} -> {}: {}\n",
@@ -2681,7 +2739,7 @@ fn render_markdown(project_name: &str, workspace: &ProjectWorkspace) -> String {
     }
 
     body.push_str("\n## 施策カード\n\n");
-    for suggestion in &workspace.suggestions {
+    for suggestion in suggestions {
         body.push_str(&format!(
             "- **{}** [{}]: {}\n",
             suggestion.title, suggestion.priority, suggestion.description
@@ -2698,6 +2756,45 @@ fn render_markdown(project_name: &str, workspace: &ProjectWorkspace) -> String {
     }
 
     body
+}
+
+fn exportable_adoption(status: &str) -> bool {
+    status != "rejected"
+}
+
+fn exportable_nodes(nodes: &[MapNodeRow]) -> Vec<&MapNodeRow> {
+    nodes
+        .iter()
+        .filter(|node| exportable_adoption(&node.adoption_status))
+        .collect()
+}
+
+fn exportable_edges<'a>(
+    edges: &'a [MapEdgeRow],
+    node_ids: &HashSet<String>,
+) -> Vec<&'a MapEdgeRow> {
+    edges
+        .iter()
+        .filter(|edge| {
+            exportable_adoption(&edge.adoption_status)
+                && node_ids.contains(&edge.source_node_id)
+                && node_ids.contains(&edge.target_node_id)
+        })
+        .collect()
+}
+
+fn exportable_extracted_items(items: &[ExtractedItemRow]) -> Vec<&ExtractedItemRow> {
+    items
+        .iter()
+        .filter(|item| exportable_adoption(&item.adoption_status))
+        .collect()
+}
+
+fn exportable_suggestions(suggestions: &[SuggestionRow]) -> Vec<&SuggestionRow> {
+    suggestions
+        .iter()
+        .filter(|suggestion| exportable_adoption(&suggestion.adoption_status))
+        .collect()
 }
 
 fn timestamp_for_file(now: &str) -> String {
@@ -2764,7 +2861,7 @@ fn csv_writer(path: &Path) -> Result<csv::Writer<std::fs::File>, String> {
         .map_err(|error| error.to_string())
 }
 
-fn write_nodes_csv(path: &Path, nodes: &[MapNodeRow]) -> Result<(), String> {
+fn write_nodes_csv(path: &Path, nodes: &[&MapNodeRow]) -> Result<(), String> {
     let mut writer = csv_writer(path)?;
     writer
         .write_record([
@@ -2795,7 +2892,7 @@ fn write_nodes_csv(path: &Path, nodes: &[MapNodeRow]) -> Result<(), String> {
     writer.flush().map_err(|error| error.to_string())
 }
 
-fn write_edges_csv(path: &Path, edges: &[MapEdgeRow]) -> Result<(), String> {
+fn write_edges_csv(path: &Path, edges: &[&MapEdgeRow]) -> Result<(), String> {
     let mut writer = csv_writer(path)?;
     writer
         .write_record([
@@ -2828,7 +2925,7 @@ fn write_edges_csv(path: &Path, edges: &[MapEdgeRow]) -> Result<(), String> {
     writer.flush().map_err(|error| error.to_string())
 }
 
-fn write_suggestions_csv(path: &Path, suggestions: &[SuggestionRow]) -> Result<(), String> {
+fn write_suggestions_csv(path: &Path, suggestions: &[&SuggestionRow]) -> Result<(), String> {
     let mut writer = csv_writer(path)?;
     writer
         .write_record([
@@ -2880,4 +2977,27 @@ fn write_sources_csv(path: &Path, sources: &[SourceFileRow]) -> Result<(), Strin
             .map_err(|error| error.to_string())?;
     }
     writer.flush().map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_extraction_fallback_does_not_persist_source_text() {
+        let chunks = vec![ExtractionChunk {
+            id: "chunk-1".to_string(),
+            source_file_id: "source-file-1".to_string(),
+            file_name: "secret-client-plan.md".to_string(),
+            file_type: "markdown".to_string(),
+            content: "SECRET_CLIENT_CONTRACT_LINE\nSECRET_CLIENT_PRICE_TABLE".to_string(),
+        }];
+
+        let output = build_extracted_items_output(&chunks);
+        let serialized = output.to_string();
+
+        assert!(!serialized.contains("SECRET_CLIENT"));
+        assert!(!serialized.contains("secret-client-plan"));
+        assert!(serialized.contains(local_summary_only_quote()));
+    }
 }

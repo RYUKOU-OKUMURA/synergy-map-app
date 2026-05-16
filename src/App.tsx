@@ -24,6 +24,12 @@ import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 import { SynergyMapCanvas } from "@/features/map/SynergyMapCanvas";
 import { demoProject, demoWorkspace, emptyWorkspace } from "@/lib/demoWorkspace";
+import {
+  adoptionOptions,
+  categoryOptions,
+  confidenceOptions,
+  labelFor,
+} from "@/lib/mvp1Labels";
 import type {
   ExportResult,
   ExtractedItemRow,
@@ -62,27 +68,6 @@ const navItems: Array<{ id: ViewId; label: string; icon: typeof FolderKanban }> 
   { id: "history", label: "履歴", icon: History },
 ];
 
-const categoryOptions = [
-  ["business", "事業"],
-  ["service", "商品・サービス"],
-  ["channel", "集客チャネル"],
-  ["touchpoint", "顧客接点"],
-  ["finance", "財務参考情報"],
-  ["data_source", "データ資料"],
-];
-
-const confidenceOptions = [
-  ["confirmed", "確定"],
-  ["estimated", "推定"],
-  ["needs_review", "要確認"],
-];
-
-const adoptionOptions = [
-  ["accepted", "採用"],
-  ["pending", "保留"],
-  ["rejected", "却下"],
-];
-
 function hasTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -99,10 +84,6 @@ function formatTime(value: string | null | undefined) {
   } catch {
     return value;
   }
-}
-
-function labelFor(options: string[][], value: string | null | undefined) {
-  return options.find(([key]) => key === value)?.[1] ?? value ?? "-";
 }
 
 function App() {
@@ -478,18 +459,27 @@ function App() {
         ) {
           void runAction(
             async () => {
-              await invoke("import_source_files", {
-                projectId: activeProjectId,
-                paths: droppedPaths,
-              });
+              let importError: string | null = null;
+              try {
+                await invoke("import_source_files", {
+                  projectId: activeProjectId,
+                  paths: droppedPaths,
+                });
+              } catch (caughtError) {
+                importError = String(caughtError);
+              }
               return invoke<ProjectWorkspace>("get_project_workspace", {
                 projectId: activeProjectId,
-              });
+              }).then((nextWorkspace) => ({ importError, nextWorkspace }));
             },
-            (nextWorkspace) => {
+            ({ importError, nextWorkspace }) => {
               setWorkspace(nextWorkspace);
               setApprovedChunkSignature(null);
-              setNotice(`${droppedPaths.length}件の資料を投入しました。`);
+              if (importError) {
+                setError(importError);
+              } else {
+                setNotice(`${droppedPaths.length}件の資料を投入しました。`);
+              }
             },
           );
         }

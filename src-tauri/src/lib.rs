@@ -419,7 +419,7 @@ fn source_chunk_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceChun
         project_id: row.get("project_id")?,
         source_file_id: row.get("source_file_id")?,
         chunk_index: row.get("chunk_index")?,
-        content_path: row.get("content_path")?,
+        content_path: String::new(),
         content_hash: row.get("content_hash")?,
         page_number: row.get("page_number")?,
         sheet_name: row.get("sheet_name")?,
@@ -553,7 +553,7 @@ fn list_source_chunks(
     let connection = open_connection(&state.db_path)?;
     let mut statement = connection
         .prepare(
-            "SELECT id, project_id, source_file_id, chunk_index, content_path, content_hash,
+            "SELECT id, project_id, source_file_id, chunk_index, content_hash,
                     page_number, sheet_name, row_start, row_end, column_start, column_end,
                     heading_path, metadata_json, created_at
              FROM source_chunks
@@ -880,7 +880,7 @@ fn insert_source_chunks(
             project_id: project_id.to_string(),
             source_file_id: source_file_id.to_string(),
             chunk_index: chunk.chunk_index as i64,
-            content_path: content_path.display().to_string(),
+            content_path: String::new(),
             content_hash: chunk.content_hash.clone(),
             page_number: chunk.page_number,
             sheet_name: chunk.sheet_name.clone(),

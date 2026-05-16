@@ -1,0 +1,32 @@
+export type LabelOption = readonly [value: string, label: string];
+
+export const categoryOptions = [
+  ["business", "事業"],
+  ["service", "商品・サービス"],
+  ["channel", "集客チャネル"],
+  ["touchpoint", "顧客接点"],
+  ["finance", "財務参考情報"],
+  ["data_source", "データ資料"],
+] as const satisfies readonly LabelOption[];
+
+export const confidenceOptions = [
+  ["confirmed", "確定"],
+  ["estimated", "推定"],
+  ["needs_review", "要確認"],
+] as const satisfies readonly LabelOption[];
+
+export const adoptionOptions = [
+  ["accepted", "採用"],
+  ["pending", "保留"],
+  ["rejected", "却下"],
+] as const satisfies readonly LabelOption[];
+
+export const categoryLabels = Object.fromEntries(categoryOptions);
+export const confidenceLabels = Object.fromEntries(confidenceOptions);
+
+export function labelFor(
+  options: readonly LabelOption[],
+  value: string | null | undefined,
+) {
+  return options.find(([key]) => key === value)?.[1] ?? value ?? "-";
+}

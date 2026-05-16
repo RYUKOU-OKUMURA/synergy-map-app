@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo } from "react";
 
+import { categoryLabels, confidenceLabels } from "@/lib/mvp1Labels";
 import type { MapEdgeRow, MapNodeRow, SelectedMapElement } from "@/lib/mvp1Types";
 
 import "@xyflow/react/dist/style.css";
@@ -67,21 +68,6 @@ const nodeIcons = {
   touchpoint: Workflow,
   finance: Database,
   data_source: Database,
-};
-
-const categoryLabel = {
-  business: "事業",
-  service: "商品・サービス",
-  channel: "集客チャネル",
-  touchpoint: "顧客接点",
-  finance: "財務参考情報",
-  data_source: "データ資料",
-};
-
-const confidenceLabel = {
-  confirmed: "確定",
-  estimated: "推定",
-  needs_review: "要確認",
 };
 
 function parsePosition(positionJson: string) {
@@ -135,9 +121,8 @@ function toFlowEdges(edges: MapEdgeRow[]): FlowEdge[] {
 
 function SynergyNode({ data, selected }: NodeProps<FlowNode>) {
   const Icon = nodeIcons[data.nodeType as keyof typeof nodeIcons] ?? Workflow;
-  const category = categoryLabel[data.nodeType as keyof typeof categoryLabel] ?? "項目";
-  const confidence =
-    confidenceLabel[data.confidenceStatus as keyof typeof confidenceLabel] ?? "推定";
+  const category = categoryLabels[data.nodeType] ?? "項目";
+  const confidence = confidenceLabels[data.confidenceStatus ?? ""] ?? "推定";
 
   return (
     <div
