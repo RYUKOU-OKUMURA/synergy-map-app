@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { toPng } from "html-to-image";
 import {
   CheckCircle2,
+  CheckSquare,
   Database,
   Download,
   FileJson,
@@ -184,6 +185,7 @@ function App() {
   const [schemaPocResult, setSchemaPocResult] = useState<AiSchemaPocResult | null>(
     null,
   );
+  const [isAiSendConfirmed, setIsAiSendConfirmed] = useState(false);
   const flowExportRef = useRef<HTMLDivElement | null>(null);
 
   async function loadProjects() {
@@ -795,13 +797,35 @@ function App() {
                 </div>
               </div>
               <Button
-                disabled={isSchemaRunning || projects.length === 0}
+                disabled={
+                  isSchemaRunning || projects.length === 0 || !isAiSendConfirmed
+                }
                 onClick={handleAiSchemaPoc}
                 type="button"
               >
                 <FileJson size={16} aria-hidden="true" />
                 {isSchemaRunning ? "検証中" : "schema検証"}
               </Button>
+            </div>
+            <div className="border-b border-[var(--app-border)] px-4 py-4">
+              <label className="inline-flex items-center gap-2 text-sm font-medium">
+                <input
+                  checked={isAiSendConfirmed}
+                  className="size-4 accent-[var(--app-accent)]"
+                  onChange={(event) => setIsAiSendConfirmed(event.target.checked)}
+                  type="checkbox"
+                />
+                <CheckSquare size={16} aria-hidden="true" />
+                要約のみで送信
+              </label>
+              <div className="mt-3 grid grid-cols-[160px_1fr] gap-y-2 text-sm">
+                <div className="text-[var(--app-muted)]">送信範囲</div>
+                <div>Phase 0 sample summary</div>
+                <div className="text-[var(--app-muted)]">履歴保存</div>
+                <div>request summary / inputHash / response JSON path</div>
+                <div className="text-[var(--app-muted)]">本文ログ</div>
+                <div>保存しない</div>
+              </div>
             </div>
             <div className="grid grid-cols-[160px_1fr] gap-y-2 px-4 py-4 text-sm">
               <div className="text-[var(--app-muted)]">状態</div>
