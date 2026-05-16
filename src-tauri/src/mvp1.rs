@@ -149,6 +149,14 @@ pub struct SuggestionRow {
     adoption_status: String,
     rationale: Option<String>,
     related_node_ids_json: String,
+    expected_revenue_impact: String,
+    expected_profit_impact: String,
+    cost_level: String,
+    effort_level: String,
+    time_to_impact: String,
+    confidence_status: String,
+    impact_score: i64,
+    evidence: Option<String>,
     memo: Option<String>,
     created_at: String,
     updated_at: String,
@@ -211,6 +219,17 @@ pub struct VersionRow {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ViewLayoutRow {
+    id: String,
+    project_id: String,
+    view_id: String,
+    layout_json: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectWorkspace {
     source_files: Vec<SourceFileRow>,
     source_chunks: Vec<SourceChunkRow>,
@@ -222,6 +241,7 @@ pub struct ProjectWorkspace {
     ai_runs: Vec<AiRunRow>,
     export_jobs: Vec<ExportJobRow>,
     versions: Vec<VersionRow>,
+    view_layouts: Vec<ViewLayoutRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -485,7 +505,13 @@ pub fn run_extract_items(
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    for table_name in ["suggestions", "ai_comments", "edges", "nodes"] {
+    for table_name in [
+        "suggestions",
+        "ai_comments",
+        "edges",
+        "nodes",
+        "view_layouts",
+    ] {
         transaction
             .execute(
                 &format!("DELETE FROM {table_name} WHERE project_id = ?1"),
@@ -812,6 +838,113 @@ pub fn save_map_layout(
 }
 
 #[tauri::command]
+pub fn save_view_layout(
+    state: State<'_, DbState>,
+    project_id: String,
+    view_id: String,
+    positions: Vec<MapPositionInput>,
+) -> Result<ProjectWorkspace, String> {
+    let mut connection = open_connection(&state.db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+    ensure_allowed_view_id(&view_id)?;
+    let now = now_rfc3339()?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let layout_json = merged_view_layout_json(&transaction, &project_id, &view_id, &positions)?;
+
+    transaction
+        .execute(
+            "INSERT INTO view_layouts (
+                id, project_id, view_id, layout_json, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(project_id, view_id) DO UPDATE SET
+                layout_json = excluded.layout_json,
+                updated_at = excluded.updated_at",
+            params![
+                Uuid::new_v4().to_string(),
+                project_id,
+                view_id,
+                layout_json,
+                now,
+                now
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    record_snapshot_in_transaction(&transaction, &project_id, "human_edit_view_layout")?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    load_workspace(&connection, &project_id)
+}
+
+fn merged_view_layout_json(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+    view_id: &str,
+    positions: &[MapPositionInput],
+) -> Result<String, String> {
+    let existing_layout: Option<String> = transaction
+        .query_row(
+            "SELECT layout_json FROM view_layouts WHERE project_id = ?1 AND view_id = ?2",
+            params![project_id, view_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let mut merged_positions = existing_layout
+        .as_deref()
+        .map(parse_layout_position_map)
+        .transpose()?
+        .unwrap_or_default();
+
+    for position in positions {
+        merged_positions.insert(position.node_id.clone(), (position.x, position.y));
+    }
+
+    let mut sorted_positions = merged_positions.into_iter().collect::<Vec<_>>();
+    sorted_positions.sort_by(|left, right| left.0.cmp(&right.0));
+
+    Ok(json!({
+        "viewId": view_id,
+        "positions": sorted_positions
+            .into_iter()
+            .map(|(node_id, (x, y))| {
+                json!({
+                    "nodeId": node_id,
+                    "x": x,
+                    "y": y,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+    .to_string())
+}
+
+fn parse_layout_position_map(value: &str) -> Result<HashMap<String, (f64, f64)>, String> {
+    let parsed: Value = serde_json::from_str(value).map_err(|error| error.to_string())?;
+    let Some(positions) = parsed.get("positions").and_then(Value::as_array) else {
+        return Ok(HashMap::new());
+    };
+
+    let mut result = HashMap::new();
+    for position in positions {
+        let Some(node_id) = position.get("nodeId").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(x) = position.get("x").and_then(Value::as_f64) else {
+            continue;
+        };
+        let Some(y) = position.get("y").and_then(Value::as_f64) else {
+            continue;
+        };
+        result.insert(node_id.to_string(), (x, y));
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
 pub fn generate_suggestions_from_map(
     app: AppHandle,
     state: State<'_, DbState>,
@@ -829,9 +962,12 @@ pub fn generate_suggestions_from_map(
     }
 
     let prompt = analysis_prompt(&workspace);
+    let suggestions_prompt = business_impact_prompt(&workspace);
     let prompt_hash = hash_text(&prompt);
+    let suggestions_prompt_hash = hash_text(&suggestions_prompt);
     let analysis_result = try_structured_codex(app.clone(), &prompt, ai_analysis_json_schema());
-    let suggestions_result = try_structured_codex(app, &prompt, suggestion_cards_json_schema());
+    let suggestions_result =
+        try_structured_codex(app, &suggestions_prompt, suggestion_cards_json_schema());
     let (analysis_json, analysis_model, analysis_status, analysis_error, analysis_fallback_used) =
         match analysis_result {
             Ok(value) => (value, CODEX_MODEL, "completed", None, false),
@@ -890,9 +1026,10 @@ pub fn generate_suggestions_from_map(
         json!({
             "mode": "map_summary",
             "fallbackUsed": suggestions_fallback_used,
-            "promptHash": prompt_hash,
+            "promptHash": suggestions_prompt_hash,
             "nodeCount": active_nodes.len(),
             "edgeCount": active_edges.len(),
+            "view": "business_impact",
         }),
         &suggestions_json,
         suggestions_error,
@@ -914,7 +1051,13 @@ pub fn generate_suggestions_from_map(
         )
         .map_err(|error| error.to_string())?;
     insert_ai_comments(&transaction, &project_id, &analysis_run_id, &analysis)?;
-    insert_suggestions(&transaction, &project_id, &suggestions_run_id, &suggestions)?;
+    insert_suggestions(
+        &transaction,
+        &project_id,
+        &suggestions_run_id,
+        &suggestions,
+        &workspace,
+    )?;
     finalize_ai_run_in_transaction(&transaction, &analysis_run_id, analysis_status)?;
     finalize_ai_run_in_transaction(&transaction, &suggestions_run_id, suggestions_status)?;
     record_snapshot_in_transaction(&transaction, &project_id, "ai_generate_suggestions")?;
@@ -923,7 +1066,7 @@ pub fn generate_suggestions_from_map(
     let message = if analysis_fallback_used || suggestions_fallback_used {
         "Codex AI実行に失敗した一部出力をローカルドラフトで補完しました。".to_string()
     } else {
-        "AIコメントと施策カードを生成しました。".to_string()
+        "AIコメントと事業インパクト施策を生成しました。".to_string()
     };
 
     Ok(MvpRunResult {
@@ -932,6 +1075,124 @@ pub fn generate_suggestions_from_map(
         message,
         workspace: load_workspace(&connection, &project_id)?,
     })
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn update_suggestion(
+    state: State<'_, DbState>,
+    project_id: String,
+    suggestion_id: String,
+    title: String,
+    description: String,
+    priority: String,
+    adoption_status: String,
+    rationale: Option<String>,
+    expected_revenue_impact: String,
+    expected_profit_impact: String,
+    cost_level: String,
+    effort_level: String,
+    time_to_impact: String,
+    confidence_status: String,
+    impact_score: i64,
+    evidence: Option<String>,
+    memo: Option<String>,
+) -> Result<ProjectWorkspace, String> {
+    let mut connection = open_connection(&state.db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+    ensure_non_empty_input("title", &title)?;
+    ensure_non_empty_input("description", &description)?;
+    ensure_allowed_input("priority", &priority, &["high", "medium", "low"])?;
+    ensure_allowed_input(
+        "adoption_status",
+        &adoption_status,
+        &["accepted", "pending", "rejected"],
+    )?;
+    ensure_allowed_input(
+        "expected_revenue_impact",
+        &expected_revenue_impact,
+        &["high", "medium", "low", "unknown"],
+    )?;
+    ensure_allowed_input(
+        "expected_profit_impact",
+        &expected_profit_impact,
+        &["high", "medium", "low", "unknown"],
+    )?;
+    ensure_allowed_input(
+        "cost_level",
+        &cost_level,
+        &["low", "medium", "high", "unknown"],
+    )?;
+    ensure_allowed_input(
+        "effort_level",
+        &effort_level,
+        &["low", "medium", "high", "unknown"],
+    )?;
+    ensure_allowed_input(
+        "time_to_impact",
+        &time_to_impact,
+        &["short", "mid", "long", "unknown"],
+    )?;
+    ensure_allowed_input(
+        "confidence_status",
+        &confidence_status,
+        &["confirmed", "estimated", "needs_review"],
+    )?;
+    ensure_score_input("impact_score", impact_score, 0, 100)?;
+    let now = now_rfc3339()?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    let updated_count = transaction
+        .execute(
+            "UPDATE suggestions
+             SET title = ?1,
+                 description = ?2,
+                 priority = ?3,
+                 adoption_status = ?4,
+                 rationale = ?5,
+                 expected_revenue_impact = ?6,
+                 expected_profit_impact = ?7,
+                 cost_level = ?8,
+                 effort_level = ?9,
+                 time_to_impact = ?10,
+                 confidence_status = ?11,
+                 impact_score = ?12,
+                 evidence = ?13,
+                 memo = ?14,
+                 updated_at = ?15
+             WHERE id = ?16 AND project_id = ?17",
+            params![
+                title,
+                description,
+                priority,
+                adoption_status,
+                empty_to_none(rationale),
+                expected_revenue_impact,
+                expected_profit_impact,
+                cost_level,
+                effort_level,
+                time_to_impact,
+                confidence_status,
+                impact_score.clamp(0, 100),
+                empty_to_none(evidence),
+                empty_to_none(memo),
+                now,
+                suggestion_id,
+                project_id
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    if updated_count == 0 {
+        return Err("Suggestion was not found.".to_string());
+    }
+
+    record_snapshot_in_transaction(&transaction, &project_id, "human_edit_business_impact")?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    load_workspace(&connection, &project_id)
 }
 
 #[tauri::command]
@@ -1003,6 +1264,38 @@ fn empty_to_none(value: Option<String>) -> Option<String> {
     })
 }
 
+fn ensure_allowed_view_id(view_id: &str) -> Result<(), String> {
+    if matches!(view_id, "customer_journey" | "business_impact") {
+        Ok(())
+    } else {
+        Err(format!("Unsupported view_id: {view_id}"))
+    }
+}
+
+fn ensure_non_empty_input(field: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        Err(format!("{field} is required."))
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_allowed_input(field: &str, value: &str, allowed: &[&str]) -> Result<(), String> {
+    if allowed.iter().any(|allowed_value| allowed_value == &value) {
+        Ok(())
+    } else {
+        Err(format!("{field} has unsupported value: {value}"))
+    }
+}
+
+fn ensure_score_input(field: &str, value: i64, min: i64, max: i64) -> Result<(), String> {
+    if (min..=max).contains(&value) {
+        Ok(())
+    } else {
+        Err(format!("{field} must be between {min} and {max}."))
+    }
+}
+
 fn load_workspace(connection: &Connection, project_id: &str) -> Result<ProjectWorkspace, String> {
     Ok(ProjectWorkspace {
         source_files: load_source_files(connection, project_id)?,
@@ -1015,6 +1308,7 @@ fn load_workspace(connection: &Connection, project_id: &str) -> Result<ProjectWo
         ai_runs: load_ai_runs(connection, project_id)?,
         export_jobs: load_export_jobs(connection, project_id)?,
         versions: load_versions(connection, project_id)?,
+        view_layouts: load_view_layouts(connection, project_id)?,
     })
 }
 
@@ -1266,10 +1560,15 @@ fn load_suggestions(
     let mut statement = connection
         .prepare(
             "SELECT id, project_id, ai_run_id, title, description, priority,
-                    adoption_status, rationale, related_node_ids_json, memo, created_at, updated_at
+                    adoption_status, rationale, related_node_ids_json,
+                    expected_revenue_impact, expected_profit_impact, cost_level,
+                    effort_level, time_to_impact, confidence_status, impact_score,
+                    evidence, memo, created_at, updated_at
              FROM suggestions
              WHERE project_id = ?1
-             ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, created_at DESC",
+             ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+                      impact_score DESC,
+                      created_at DESC",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
@@ -1284,9 +1583,46 @@ fn load_suggestions(
                 adoption_status: row.get(6)?,
                 rationale: row.get(7)?,
                 related_node_ids_json: row.get(8)?,
-                memo: row.get(9)?,
-                created_at: row.get(10)?,
-                updated_at: row.get(11)?,
+                expected_revenue_impact: row.get(9)?,
+                expected_profit_impact: row.get(10)?,
+                cost_level: row.get(11)?,
+                effort_level: row.get(12)?,
+                time_to_impact: row.get(13)?,
+                confidence_status: row.get(14)?,
+                impact_score: row.get(15)?,
+                evidence: row.get(16)?,
+                memo: row.get(17)?,
+                created_at: row.get(18)?,
+                updated_at: row.get(19)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn load_view_layouts(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Vec<ViewLayoutRow>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, project_id, view_id, layout_json, created_at, updated_at
+             FROM view_layouts
+             WHERE project_id = ?1
+             ORDER BY view_id ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([project_id], |row| {
+            Ok(ViewLayoutRow {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                view_id: row.get(2)?,
+                layout_json: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -2193,6 +2529,12 @@ fn clear_map_outputs_in_transaction(
     transaction
         .execute("DELETE FROM nodes WHERE project_id = ?1", [project_id])
         .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM view_layouts WHERE project_id = ?1",
+            [project_id],
+        )
+        .map_err(|error| error.to_string())?;
 
     Ok(())
 }
@@ -2256,6 +2598,101 @@ fn analysis_prompt(workspace: &ProjectWorkspace) -> String {
     )
 }
 
+fn business_impact_prompt(workspace: &ProjectWorkspace) -> String {
+    let (active_nodes, active_edges) = active_map_scope(workspace);
+    let nodes = active_nodes
+        .iter()
+        .map(|node| {
+            format!(
+                "- label: {}\n  type: {}\n  confidence: {}\n  influence: {}\n  summary: {}",
+                node.label,
+                node.node_type,
+                node.confidence_status.as_deref().unwrap_or("estimated"),
+                node.influence_level.as_deref().unwrap_or("2"),
+                node.description.as_deref().unwrap_or("説明なし")
+            ) + &format!(
+                "\n  sourceTrace: {}",
+                source_trace_for_node(node, workspace)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let edges = active_edges
+        .iter()
+        .map(|edge| {
+            let source = active_nodes
+                .iter()
+                .find(|node| node.id.as_str() == edge.source_node_id.as_str())
+                .map(|node| node.label.as_str())
+                .unwrap_or("source");
+            let target = active_nodes
+                .iter()
+                .find(|node| node.id.as_str() == edge.target_node_id.as_str())
+                .map(|node| node.label.as_str())
+                .unwrap_or("target");
+            format!(
+                "- {} -> {} / label: {} / flow: {} / strength: {} / evidence: {}",
+                source,
+                target,
+                edge.label.as_deref().unwrap_or("導線"),
+                edge.flow_type.as_deref().unwrap_or("unknown"),
+                edge.strength.as_deref().unwrap_or("normal"),
+                edge.evidence.as_deref().unwrap_or("資料要約からの推定")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "顧客導線マップで見えた課題・施策について、事業インパクトビュー用の施策カードを日本語で生成してください。\
+         目的は「どこに手を入れると売上・利益・工数に効きそうか」を根拠付きで見える化し、提案や会議で優先順位を説明できる状態にすることです。\
+         施策ごとに、売上影響、利益影響、費用、工数、効果発生までの時間、確度、0-100のimpactScore、根拠、関連ノードラベルを必ず返してください。\
+         evidenceには、関連ノードのsourceTraceに含まれるsourceChunkIdやsourceFile名を使って、どの資料根拠からの判断か分かる短い説明を含めてください。\
+         不確実な情報はunknownまたはneeds_reviewにしてください。schemaVersionは{}です。\n\nNodes:\n{}\n\nEdges:\n{}",
+        SCHEMA_VERSION, nodes, edges
+    )
+}
+
+fn source_trace_for_node(node: &MapNodeRow, workspace: &ProjectWorkspace) -> String {
+    let Some(extracted_item_id) = node.extracted_item_id.as_deref() else {
+        return "sourceなし".to_string();
+    };
+    let Some(item) = workspace
+        .extracted_items
+        .iter()
+        .find(|item| item.id == extracted_item_id)
+    else {
+        return "sourceなし".to_string();
+    };
+    let traces = item
+        .sources
+        .iter()
+        .take(4)
+        .map(|source| {
+            format!(
+                "sourceChunkId={}, sourceFile={}, page={}, sheet={}, rowStart={}",
+                source.source_chunk_id.as_deref().unwrap_or("-"),
+                source.source_file_name.as_deref().unwrap_or("-"),
+                source
+                    .page_number
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                source.sheet_name.as_deref().unwrap_or("-"),
+                source
+                    .row_start
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if traces.is_empty() {
+        "sourceなし".to_string()
+    } else {
+        traces.join("; ")
+    }
+}
+
 fn active_map_scope(workspace: &ProjectWorkspace) -> (Vec<&MapNodeRow>, Vec<&MapEdgeRow>) {
     let nodes = exportable_nodes(&workspace.nodes);
     let node_ids = nodes
@@ -2267,7 +2704,25 @@ fn active_map_scope(workspace: &ProjectWorkspace) -> (Vec<&MapNodeRow>, Vec<&Map
     (nodes, edges)
 }
 
-fn build_suggestions_output(_workspace: &ProjectWorkspace) -> Value {
+fn build_suggestions_output(workspace: &ProjectWorkspace) -> Value {
+    let (nodes, _) = active_map_scope(workspace);
+    let labels = nodes
+        .iter()
+        .map(|node| node.label.clone())
+        .collect::<Vec<_>>();
+    let first = labels
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "主要導線".to_string());
+    let second = labels
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "顧客接点".to_string());
+    let third = labels
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "データ資料".to_string());
+
     json!({
         "schemaVersion": SCHEMA_VERSION,
         "cards": [
@@ -2275,19 +2730,46 @@ fn build_suggestions_output(_workspace: &ProjectWorkspace) -> Value {
                 "title": "問い合わせ後フォロー導線の整理",
                 "action": "Web問い合わせから初回商談までの担当、期限、記録先を確認する。",
                 "priority": "high",
-                "rationale": "顧客接点の詰まりを最初に解消しやすい。"
+                "rationale": "顧客接点の詰まりを最初に解消しやすい。",
+                "expectedRevenueImpact": "high",
+                "expectedProfitImpact": "medium",
+                "costLevel": "low",
+                "effortLevel": "low",
+                "timeToImpact": "short",
+                "confidenceStatus": "estimated",
+                "impactScore": 82,
+                "evidence": "顧客導線上の問い合わせから商談までの接続を強化する施策です。",
+                "relatedNodeLabels": [first, second]
             },
             {
                 "title": "顧客台帳と売上CSVの突合",
                 "action": "顧客ID、会社名、メールアドレスのどれで紐づくか確認する。",
                 "priority": "medium",
-                "rationale": "データ資料を施策判断に使える状態にするため。"
+                "rationale": "データ資料を施策判断に使える状態にするため。",
+                "expectedRevenueImpact": "medium",
+                "expectedProfitImpact": "high",
+                "costLevel": "medium",
+                "effortLevel": "medium",
+                "timeToImpact": "mid",
+                "confidenceStatus": "needs_review",
+                "impactScore": 68,
+                "evidence": "財務参考情報やデータ資料がマップにある場合、施策の優先度判断に使える可能性があります。",
+                "relatedNodeLabels": [third]
             },
             {
                 "title": "展示会リードの再接触条件",
                 "action": "再接触すべきリード条件と除外条件をヒアリングする。",
                 "priority": "medium",
-                "rationale": "未接続チャネルを既存サービスへつなげるため。"
+                "rationale": "未接続チャネルを既存サービスへつなげるため。",
+                "expectedRevenueImpact": "medium",
+                "expectedProfitImpact": "medium",
+                "costLevel": "low",
+                "effortLevel": "medium",
+                "timeToImpact": "mid",
+                "confidenceStatus": "estimated",
+                "impactScore": 61,
+                "evidence": "未接続の集客チャネルを既存サービスや商談導線へつなげる仮説です。",
+                "relatedNodeLabels": labels.iter().take(3).cloned().collect::<Vec<_>>()
             }
         ]
     })
@@ -2358,16 +2840,21 @@ fn insert_suggestions(
     project_id: &str,
     ai_run_id: &str,
     output: &crate::ai_schema::SuggestionCardsOutput,
+    workspace: &ProjectWorkspace,
 ) -> Result<(), String> {
     let now = now_rfc3339()?;
 
     for card in &output.cards {
+        let related_node_ids_json = related_node_ids_json_for_suggestion(card, workspace)?;
         transaction
             .execute(
                 "INSERT INTO suggestions (
                     id, project_id, ai_run_id, title, description, priority,
-                    adoption_status, rationale, related_node_ids_json, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, '[]', ?8, ?9)",
+                    adoption_status, rationale, related_node_ids_json,
+                    expected_revenue_impact, expected_profit_impact, cost_level,
+                    effort_level, time_to_impact, confidence_status, impact_score,
+                    evidence, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     Uuid::new_v4().to_string(),
                     project_id,
@@ -2376,6 +2863,15 @@ fn insert_suggestions(
                     card.action,
                     card.priority,
                     card.rationale,
+                    related_node_ids_json,
+                    card.expected_revenue_impact,
+                    card.expected_profit_impact,
+                    card.cost_level,
+                    card.effort_level,
+                    card.time_to_impact,
+                    card.confidence_status,
+                    card.impact_score,
+                    card.evidence,
                     now,
                     now
                 ],
@@ -2384,6 +2880,35 @@ fn insert_suggestions(
     }
 
     Ok(())
+}
+
+fn related_node_ids_json_for_suggestion(
+    card: &crate::ai_schema::SuggestionCard,
+    workspace: &ProjectWorkspace,
+) -> Result<String, String> {
+    let active_nodes = exportable_nodes(&workspace.nodes);
+    let mut matched_ids = Vec::new();
+
+    for label in &card.related_node_labels {
+        if let Some(node) = active_nodes.iter().find(|node| {
+            node.label == *label || node.label.contains(label) || label.contains(&node.label)
+        }) {
+            if !matched_ids.contains(&node.id) {
+                matched_ids.push(node.id.clone());
+            }
+        }
+    }
+
+    if matched_ids.is_empty() {
+        let text = format!("{} {} {}", card.title, card.action, card.rationale);
+        for node in &active_nodes {
+            if text.contains(&node.label) && !matched_ids.contains(&node.id) {
+                matched_ids.push(node.id.clone());
+            }
+        }
+    }
+
+    serde_json::to_string(&matched_ids).map_err(|error| error.to_string())
 }
 
 fn pending_ai_run_status(final_status: &str) -> &'static str {
@@ -2562,8 +3087,23 @@ fn record_snapshot_in_transaction(
                 "priority",
                 "adoption_status",
                 "rationale",
+                "related_node_ids_json",
+                "expected_revenue_impact",
+                "expected_profit_impact",
+                "cost_level",
+                "effort_level",
+                "time_to_impact",
+                "confidence_status",
+                "impact_score",
+                "evidence",
                 "memo",
             ],
+            project_id,
+        )?,
+        "viewLayouts": snapshot_table(
+            transaction,
+            "view_layouts",
+            &["id", "view_id", "layout_json", "updated_at"],
             project_id,
         )?,
         "aiComments": snapshot_table(
@@ -2586,6 +3126,7 @@ fn record_snapshot_in_transaction(
             "edges": count_table(transaction, "edges", project_id)?,
             "suggestions": count_table(transaction, "suggestions", project_id)?,
             "aiComments": count_table(transaction, "ai_comments", project_id)?,
+            "viewLayouts": count_table(transaction, "view_layouts", project_id)?,
         }
     });
 
@@ -2738,6 +3279,40 @@ fn render_markdown(project_name: &str, workspace: &ProjectWorkspace) -> String {
         body.push_str(&format!("- **{}**: {}\n", comment.title, comment.body));
     }
 
+    body.push_str("\n## 事業インパクトビュー\n\n");
+    if suggestions.is_empty() {
+        body.push_str("事業インパクト施策は未生成です。\n\n");
+    } else {
+        body.push_str("| 施策 | 優先度 | 売上影響 | 利益影響 | 費用 | 工数 | 確度 | スコア |\n");
+        body.push_str("|---|---|---|---|---|---|---|---:|\n");
+        for suggestion in &suggestions {
+            body.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                markdown_cell(&suggestion.title),
+                suggestion.priority,
+                suggestion.expected_revenue_impact,
+                suggestion.expected_profit_impact,
+                suggestion.cost_level,
+                suggestion.effort_level,
+                suggestion.confidence_status,
+                suggestion.impact_score
+            ));
+        }
+        body.push('\n');
+        for suggestion in &suggestions {
+            body.push_str(&format!(
+                "- **{}**: {}\n",
+                suggestion.title, suggestion.description
+            ));
+            if let Some(evidence) = suggestion.evidence.as_deref() {
+                body.push_str(&format!("  - 根拠: {}\n", evidence));
+            }
+            if let Some(rationale) = suggestion.rationale.as_deref() {
+                body.push_str(&format!("  - 判断理由: {}\n", rationale));
+            }
+        }
+    }
+
     body.push_str("\n## 施策カード\n\n");
     for suggestion in suggestions {
         body.push_str(&format!(
@@ -2756,6 +3331,10 @@ fn render_markdown(project_name: &str, workspace: &ProjectWorkspace) -> String {
     }
 
     body
+}
+
+fn markdown_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace('\n', " ")
 }
 
 fn exportable_adoption(status: &str) -> bool {
@@ -2935,6 +3514,16 @@ fn write_suggestions_csv(path: &Path, suggestions: &[&SuggestionRow]) -> Result<
             "priority",
             "adoption_status",
             "rationale",
+            "related_node_ids",
+            "expected_revenue_impact",
+            "expected_profit_impact",
+            "cost_level",
+            "effort_level",
+            "time_to_impact",
+            "confidence_status",
+            "impact_score",
+            "evidence",
+            "memo",
         ])
         .map_err(|error| error.to_string())?;
     for suggestion in suggestions {
@@ -2946,6 +3535,16 @@ fn write_suggestions_csv(path: &Path, suggestions: &[&SuggestionRow]) -> Result<
                 suggestion.priority.as_str(),
                 suggestion.adoption_status.as_str(),
                 suggestion.rationale.as_deref().unwrap_or(""),
+                suggestion.related_node_ids_json.as_str(),
+                suggestion.expected_revenue_impact.as_str(),
+                suggestion.expected_profit_impact.as_str(),
+                suggestion.cost_level.as_str(),
+                suggestion.effort_level.as_str(),
+                suggestion.time_to_impact.as_str(),
+                suggestion.confidence_status.as_str(),
+                &suggestion.impact_score.to_string(),
+                suggestion.evidence.as_deref().unwrap_or(""),
+                suggestion.memo.as_deref().unwrap_or(""),
             ])
             .map_err(|error| error.to_string())?;
     }

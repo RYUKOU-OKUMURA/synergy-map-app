@@ -2,33 +2,46 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   Archive,
+  BarChart3,
   Clock3,
   Database,
   Download,
   FileText,
   FolderKanban,
+  Gauge,
   History,
   Layers3,
   ListChecks,
-  Map,
+  Map as MapIcon,
   MessageSquareText,
   Plus,
   Save,
   Sparkles,
+  Target,
   Trash2,
+  TrendingUp,
   Upload,
 } from "lucide-react";
 import type * as React from "react";
 import { useEffect, useMemo, useState } from "react";
 
 import "./App.css";
-import { SynergyMapCanvas } from "@/features/map/SynergyMapCanvas";
+import {
+  SynergyMapCanvas,
+  type MapViewMode,
+  type NodeImpactStats,
+  type NodePositionOverrides,
+} from "@/features/map/SynergyMapCanvas";
 import { demoProject, demoWorkspace, emptyWorkspace } from "@/lib/demoWorkspace";
 import {
   adoptionOptions,
   categoryOptions,
   confidenceOptions,
+  costLevelOptions,
+  impactLevelOptions,
   labelFor,
+  priorityOptions,
+  timeToImpactOptions,
 } from "@/lib/mvp1Labels";
 import type {
   ExportResult,
@@ -39,6 +52,8 @@ import type {
   Project,
   ProjectWorkspace,
   SelectedMapElement,
+  SuggestionRow,
+  ViewLayoutRow,
 } from "@/lib/mvp1Types";
 
 type ViewId =
@@ -62,7 +77,7 @@ const navItems: Array<{ id: ViewId; label: string; icon: typeof FolderKanban }> 
   { id: "projects", label: "案件", icon: FolderKanban },
   { id: "sources", label: "資料", icon: Upload },
   { id: "extract", label: "抽出", icon: ListChecks },
-  { id: "map", label: "マップ", icon: Map },
+  { id: "map", label: "マップ", icon: MapIcon },
   { id: "suggestions", label: "施策", icon: MessageSquareText },
   { id: "export", label: "出力", icon: Download },
   { id: "history", label: "履歴", icon: History },
@@ -98,9 +113,11 @@ function App() {
   const [workspace, setWorkspace] = useState<ProjectWorkspace>(
     isTauriRuntime ? emptyWorkspace : demoWorkspace,
   );
+  const [mapViewMode, setMapViewMode] = useState<MapViewMode>("customer_journey");
   const [selectedMapElement, setSelectedMapElement] =
     useState<SelectedMapElement>(null);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
   const [isTrayOpen, setIsTrayOpen] = useState(true);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
@@ -154,6 +171,14 @@ function App() {
     [selectedMapElement, workspace.edges],
   );
 
+  const selectedSuggestion = useMemo(
+    () =>
+      workspace.suggestions.find(
+        (suggestion) => suggestion.id === selectedSuggestionId,
+      ) ?? null,
+    [selectedSuggestionId, workspace.suggestions],
+  );
+
   const saveStatus = workspace.versions[0]
     ? `保存済み ${formatTime(workspace.versions[0].createdAt)}`
     : "保存済み";
@@ -196,6 +221,7 @@ function App() {
         setSelectedProjectId(project.id);
         setWorkspace(nextWorkspace);
         setExcludedChunkIds([]);
+        setSelectedSuggestionId(null);
         setApprovedChunkSignature(null);
         setView("sources");
         setNotice("新規案件を作成しました。");
@@ -221,6 +247,7 @@ function App() {
         setProjects(nextProjects);
         setWorkspace(nextWorkspace);
         setSelectedProjectId(projectId);
+        setSelectedSuggestionId(null);
         setApprovedChunkSignature(null);
         setNotice("案件情報を保存しました。");
       },
@@ -253,6 +280,7 @@ function App() {
         setWorkspace(nextWorkspace);
         setSelectedItemId(null);
         setSelectedMapElement(null);
+        setSelectedSuggestionId(null);
         setExcludedChunkIds([]);
         setApprovedChunkSignature(null);
         setView("projects");
@@ -279,6 +307,7 @@ function App() {
           setWorkspace(result.workspace);
           setNotice(result.message);
           setSelectedMapElement(null);
+          setSelectedSuggestionId(null);
           setIsDrawerOpen(false);
           setView("extract");
         },
@@ -325,6 +354,7 @@ function App() {
         setNotice(result.message);
         setSelectedItemId(result.workspace.extractedItems[0]?.id ?? null);
         setSelectedMapElement(null);
+        setSelectedSuggestionId(null);
         setIsDrawerOpen(false);
       },
     );
@@ -355,6 +385,7 @@ function App() {
         invoke<MvpRunResult>("generate_map_from_items", { projectId: activeProjectId }),
       (result) => {
         setWorkspace(result.workspace);
+        setSelectedSuggestionId(null);
         setNotice(result.message);
         setView("map");
       },
@@ -388,14 +419,22 @@ function App() {
   }
 
   async function handleSavePositions(
+    viewMode: MapViewMode,
     positions: Array<{ nodeId: string; x: number; y: number }>,
   ) {
     if (!activeProjectId || !isTauriRuntime) return;
     try {
-      const nextWorkspace = await invoke<ProjectWorkspace>("save_map_layout", {
-        projectId: activeProjectId,
-        positions,
-      });
+      const nextWorkspace =
+        viewMode === "customer_journey"
+          ? await invoke<ProjectWorkspace>("save_map_layout", {
+              projectId: activeProjectId,
+              positions,
+            })
+          : await invoke<ProjectWorkspace>("save_view_layout", {
+              projectId: activeProjectId,
+              viewId: viewMode,
+              positions,
+            });
       setWorkspace(nextWorkspace);
     } catch (caughtError) {
       setError(String(caughtError));
@@ -566,19 +605,36 @@ function App() {
           {view === "map" ? (
             <MapWorkspace
               drawerOpen={isDrawerOpen}
+              mapViewMode={mapViewMode}
               onDrawerOpenChange={setIsDrawerOpen}
               onGenerateMap={handleGenerateMap}
               onGenerateSuggestions={handleGenerateSuggestions}
+              onMapViewModeChange={(nextMode) => {
+                setMapViewMode(nextMode);
+                setSelectedMapElement(null);
+                setSelectedItemId(null);
+                setSelectedSuggestionId(null);
+              }}
               onSavePositions={handleSavePositions}
               onSelectItem={(itemId) => {
                 setSelectedItemId(itemId);
                 setSelectedMapElement(null);
+                setSelectedSuggestionId(null);
               }}
               onSelectMapElement={(selection) => {
                 setSelectedMapElement(selection);
-                if (selection) setSelectedItemId(null);
+                if (selection) {
+                  setSelectedItemId(null);
+                  setSelectedSuggestionId(null);
+                }
+              }}
+              onSelectSuggestion={(suggestionId) => {
+                setSelectedSuggestionId(suggestionId);
+                setSelectedItemId(null);
+                setSelectedMapElement(null);
               }}
               selectedMapElement={selectedMapElement}
+              selectedSuggestionId={selectedSuggestionId}
               trayOpen={isTrayOpen}
               onTrayOpenChange={setIsTrayOpen}
               workspace={workspace}
@@ -592,6 +648,7 @@ function App() {
               onDeleteProject={handleDeleteProject}
               onSelectProject={(projectId) => {
                 setSelectedProjectId(projectId);
+                setSelectedSuggestionId(null);
                 setExcludedChunkIds([]);
                 setApprovedChunkSignature(null);
                 setView("sources");
@@ -621,7 +678,11 @@ function App() {
                 );
                 setApprovedChunkSignature(null);
               }}
-              onSelectItem={setSelectedItemId}
+              onSelectItem={(itemId) => {
+                setSelectedItemId(itemId);
+                setSelectedSuggestionId(null);
+                setSelectedMapElement(null);
+              }}
               selectedItemId={selectedItemId}
               selectedChunkIds={selectedChunkIds}
               workspace={workspace}
@@ -630,6 +691,12 @@ function App() {
           {view === "suggestions" ? (
             <SuggestionsView
               onGenerate={handleGenerateSuggestions}
+              onSelectSuggestion={(suggestionId) => {
+                setSelectedSuggestionId(suggestionId);
+                setSelectedItemId(null);
+                setSelectedMapElement(null);
+              }}
+              selectedSuggestionId={selectedSuggestionId}
               workspace={workspace}
             />
           ) : null}
@@ -646,6 +713,8 @@ function App() {
           node={selectedNode}
           onWorkspaceChange={setWorkspace}
           projectId={activeProject?.id ?? null}
+          suggestion={selectedSuggestion}
+          workspace={workspace}
         />
       </section>
     </main>
@@ -658,39 +727,77 @@ function StatusChip({ children }: { children: React.ReactNode }) {
 
 function MapWorkspace({
   drawerOpen,
+  mapViewMode,
   onDrawerOpenChange,
   onGenerateMap,
   onGenerateSuggestions,
+  onMapViewModeChange,
   onSavePositions,
   onSelectItem,
   onSelectMapElement,
+  onSelectSuggestion,
   selectedMapElement,
+  selectedSuggestionId,
   trayOpen,
   onTrayOpenChange,
   workspace,
 }: {
   drawerOpen: boolean;
+  mapViewMode: MapViewMode;
   onDrawerOpenChange: (open: boolean) => void;
   onGenerateMap: () => void;
   onGenerateSuggestions: () => void;
-  onSavePositions: (positions: Array<{ nodeId: string; x: number; y: number }>) => void;
+  onMapViewModeChange: (mode: MapViewMode) => void;
+  onSavePositions: (
+    viewMode: MapViewMode,
+    positions: Array<{ nodeId: string; x: number; y: number }>,
+  ) => void;
   onSelectItem: (itemId: string) => void;
   onSelectMapElement: (selection: SelectedMapElement) => void;
+  onSelectSuggestion: (suggestionId: string) => void;
   selectedMapElement: SelectedMapElement;
+  selectedSuggestionId: string | null;
   trayOpen: boolean;
   onTrayOpenChange: (open: boolean) => void;
   workspace: ProjectWorkspace;
 }) {
+  const impactStats = useMemo(() => buildNodeImpactStats(workspace), [workspace]);
+  const impactPositions = useMemo(
+    () => buildImpactPositionOverrides(workspace, impactStats),
+    [impactStats, workspace],
+  );
+
   return (
     <div className="map-workbench">
-      <button
-        className={`tray-tab ${trayOpen ? "tray-tab-open" : ""}`}
-        onClick={() => onTrayOpenChange(!trayOpen)}
-        type="button"
-      >
-        抽出カード {workspace.extractedItems.length}
-      </button>
-      {trayOpen ? (
+      <div className="map-view-switch" role="tablist" aria-label="マップ表示">
+        <button
+          className={mapViewMode === "customer_journey" ? "active" : ""}
+          onClick={() => onMapViewModeChange("customer_journey")}
+          type="button"
+        >
+          <MapIcon size={14} aria-hidden="true" />
+          顧客導線
+        </button>
+        <button
+          className={mapViewMode === "business_impact" ? "active" : ""}
+          onClick={() => onMapViewModeChange("business_impact")}
+          type="button"
+        >
+          <BarChart3 size={14} aria-hidden="true" />
+          事業インパクト
+        </button>
+      </div>
+
+      {mapViewMode === "customer_journey" ? (
+        <button
+          className={`tray-tab ${trayOpen ? "tray-tab-open" : ""}`}
+          onClick={() => onTrayOpenChange(!trayOpen)}
+          type="button"
+        >
+          抽出カード {workspace.extractedItems.length}
+        </button>
+      ) : null}
+      {mapViewMode === "customer_journey" && trayOpen ? (
         <aside className="extraction-tray">
           <div className="panel-heading">
             <span>抽出カード</span>
@@ -721,18 +828,32 @@ function MapWorkspace({
         </aside>
       ) : null}
 
+      {mapViewMode === "business_impact" && workspace.nodes.length > 0 ? (
+        <BusinessImpactPanel
+          onGenerate={onGenerateSuggestions}
+          onSelectSuggestion={onSelectSuggestion}
+          selectedSuggestionId={selectedSuggestionId}
+          workspace={workspace}
+        />
+      ) : null}
+
       <section className="map-stage">
         {workspace.nodes.length > 0 ? (
           <SynergyMapCanvas
             edges={workspace.edges}
+            impactStats={impactStats}
             nodes={workspace.nodes}
-            onPositionsChange={onSavePositions}
+            onPositionsChange={(positions) => onSavePositions(mapViewMode, positions)}
             onSelect={onSelectMapElement}
+            positionOverrides={
+              mapViewMode === "business_impact" ? impactPositions : undefined
+            }
             selected={selectedMapElement}
+            viewMode={mapViewMode}
           />
         ) : (
           <div className="empty-map">
-            <Map size={32} aria-hidden="true" />
+            <MapIcon size={32} aria-hidden="true" />
             <h2>シナジーマップ未生成</h2>
             <p>抽出カードを確認したら、顧客導線マップを生成します。</p>
             <button className="primary-button" onClick={onGenerateMap} type="button">
@@ -779,7 +900,9 @@ function MapWorkspace({
               type="button"
             >
               <Sparkles size={15} aria-hidden="true" />
-              AIコメント生成
+              {mapViewMode === "business_impact"
+                ? "インパクト評価生成"
+                : "AIコメント生成"}
             </button>
             {workspace.aiComments.map((comment) => (
               <div className="comment-line" key={comment.id}>
@@ -792,6 +915,272 @@ function MapWorkspace({
       </div>
     </div>
   );
+}
+
+function BusinessImpactPanel({
+  onGenerate,
+  onSelectSuggestion,
+  selectedSuggestionId,
+  workspace,
+}: {
+  onGenerate: () => void;
+  onSelectSuggestion: (suggestionId: string) => void;
+  selectedSuggestionId: string | null;
+  workspace: ProjectWorkspace;
+}) {
+  const suggestions = useMemo(
+    () =>
+      workspace.suggestions
+        .filter((suggestion) => suggestion.adoptionStatus !== "rejected")
+        .sort((left, right) => right.impactScore - left.impactScore),
+    [workspace.suggestions],
+  );
+  const quickWins = suggestions.filter(
+    (suggestion) =>
+      levelRank(suggestion.expectedRevenueImpact) >= 2 &&
+      levelRank(suggestion.effortLevel) <= 1,
+  );
+  const highImpact = suggestions.filter(
+    (suggestion) => levelRank(suggestion.expectedRevenueImpact) >= 2,
+  );
+  const highConfidence = suggestions.filter(
+    (suggestion) => suggestion.confidenceStatus === "confirmed",
+  );
+
+  return (
+    <aside className="impact-panel">
+      <div className="panel-heading">
+        <span>事業インパクト</span>
+        <small>{suggestions.length}施策</small>
+      </div>
+      <div className="impact-summary">
+        <div>
+          <TrendingUp size={16} aria-hidden="true" />
+          <strong>{highImpact.length}</strong>
+          <span>売上影響大</span>
+        </div>
+        <div>
+          <Gauge size={16} aria-hidden="true" />
+          <strong>{quickWins.length}</strong>
+          <span>効果大・工数小</span>
+        </div>
+        <div>
+          <Target size={16} aria-hidden="true" />
+          <strong>{highConfidence.length}</strong>
+          <span>根拠強め</span>
+        </div>
+      </div>
+      <div className="impact-panel-actions">
+        <button className="primary-button" onClick={onGenerate} type="button">
+          <Sparkles size={15} aria-hidden="true" />
+          評価生成
+        </button>
+      </div>
+      <div className="impact-matrix">
+        {[
+          ["quick", "効果大・工数小", quickWins],
+          [
+            "invest",
+            "効果大・工数大",
+            suggestions.filter(
+              (suggestion) =>
+                levelRank(suggestion.expectedRevenueImpact) >= 2 &&
+                levelRank(suggestion.effortLevel) >= 2,
+            ),
+          ],
+          [
+            "small",
+            "効果小・工数小",
+            suggestions.filter(
+              (suggestion) =>
+                levelRank(suggestion.expectedRevenueImpact) <= 1 &&
+                levelRank(suggestion.effortLevel) <= 1,
+            ),
+          ],
+          [
+            "defer",
+            "効果小・工数大",
+            suggestions.filter(
+              (suggestion) =>
+                levelRank(suggestion.expectedRevenueImpact) <= 1 &&
+                levelRank(suggestion.effortLevel) >= 2,
+            ),
+          ],
+        ].map(([id, label, items]) => (
+          <div className={`impact-quadrant impact-quadrant-${id}`} key={String(id)}>
+            <strong>{label as string}</strong>
+            {(items as SuggestionRow[]).slice(0, 3).map((suggestion) => (
+              <button
+                className={`impact-pill ${
+                  selectedSuggestionId === suggestion.id ? "impact-pill-active" : ""
+                }`}
+                key={suggestion.id}
+                onClick={() => onSelectSuggestion(suggestion.id)}
+                type="button"
+              >
+                {suggestion.title}
+              </button>
+            ))}
+          </div>
+        ))}
+      </div>
+      <div className="impact-list">
+        {suggestions.map((suggestion) => (
+          <button
+            className={`impact-row ${
+              selectedSuggestionId === suggestion.id ? "impact-row-active" : ""
+            }`}
+            key={suggestion.id}
+            onClick={() => onSelectSuggestion(suggestion.id)}
+            type="button"
+          >
+            <div className="impact-row-head">
+              <strong>{suggestion.title}</strong>
+              <span>{suggestion.impactScore}</span>
+            </div>
+            <div className="impact-metrics">
+              <span>
+                売上 {labelFor(impactLevelOptions, suggestion.expectedRevenueImpact)}
+              </span>
+              <span>
+                利益 {labelFor(impactLevelOptions, suggestion.expectedProfitImpact)}
+              </span>
+              <span>費用 {labelFor(costLevelOptions, suggestion.costLevel)}</span>
+              <span>工数 {labelFor(costLevelOptions, suggestion.effortLevel)}</span>
+            </div>
+            <small>{suggestion.evidence ?? suggestion.rationale ?? "根拠未設定"}</small>
+          </button>
+        ))}
+        {suggestions.length === 0 ? (
+          <div className="empty-panel">
+            マップ生成後に事業インパクト評価を生成します。
+          </div>
+        ) : null}
+      </div>
+    </aside>
+  );
+}
+
+function buildNodeImpactStats(workspace: ProjectWorkspace): NodeImpactStats {
+  const stats: NodeImpactStats = {};
+  for (const suggestion of workspace.suggestions) {
+    if (suggestion.adoptionStatus === "rejected") continue;
+    for (const nodeId of parseRelatedNodeIds(suggestion.relatedNodeIdsJson)) {
+      const current = stats[nodeId];
+      stats[nodeId] = {
+        score: Math.max(current?.score ?? 0, suggestion.impactScore),
+        revenueImpact: highestLevel(
+          current?.revenueImpact ?? "unknown",
+          suggestion.expectedRevenueImpact,
+        ),
+        profitImpact: highestLevel(
+          current?.profitImpact ?? "unknown",
+          suggestion.expectedProfitImpact,
+        ),
+        costLevel: lowestOperationalLevel(
+          current?.costLevel ?? "unknown",
+          suggestion.costLevel,
+        ),
+        effortLevel: lowestOperationalLevel(
+          current?.effortLevel ?? "unknown",
+          suggestion.effortLevel,
+        ),
+        confidenceStatus: strongestConfidence(
+          current?.confidenceStatus ?? "needs_review",
+          suggestion.confidenceStatus,
+        ),
+        sourceCount: (current?.sourceCount ?? 0) + 1,
+      };
+    }
+  }
+  return stats;
+}
+
+function buildImpactPositionOverrides(
+  workspace: ProjectWorkspace,
+  impactStats: NodeImpactStats,
+): NodePositionOverrides {
+  const saved = parseViewLayoutPositions(
+    workspace.viewLayouts.find((layout) => layout.viewId === "business_impact") ?? null,
+  );
+  const result: NodePositionOverrides = {};
+  const laneCounts = new Map<string, number>();
+
+  for (const node of workspace.nodes) {
+    if (saved[node.id]) {
+      result[node.id] = saved[node.id];
+      continue;
+    }
+    const stats = impactStats[node.id];
+    const impact = levelRank(stats?.revenueImpact ?? node.influenceLevel ?? "medium");
+    const effort = levelRank(stats?.effortLevel ?? "medium");
+    const lane = `${impact}-${effort}`;
+    const index = laneCounts.get(lane) ?? 0;
+    laneCounts.set(lane, index + 1);
+    result[node.id] = {
+      x: 330 + effort * 245,
+      y: 80 + (3 - Math.max(1, impact)) * 135 + index * 86,
+    };
+  }
+
+  return result;
+}
+
+function parseViewLayoutPositions(layout: ViewLayoutRow | null): NodePositionOverrides {
+  if (!layout) return {};
+  try {
+    const parsed = JSON.parse(layout.layoutJson) as {
+      positions?: Array<{ nodeId?: string; x?: number; y?: number }>;
+    };
+    return Object.fromEntries(
+      (parsed.positions ?? [])
+        .filter(
+          (position) =>
+            typeof position.nodeId === "string" &&
+            typeof position.x === "number" &&
+            typeof position.y === "number",
+        )
+        .map((position) => [
+          position.nodeId as string,
+          { x: position.x as number, y: position.y as number },
+        ]),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function parseRelatedNodeIds(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function levelRank(value: string): number {
+  if (value === "high" || value === "3") return 3;
+  if (value === "medium" || value === "2") return 2;
+  if (value === "low" || value === "1") return 1;
+  return 0;
+}
+
+function highestLevel(current: string, next: string) {
+  return levelRank(next) > levelRank(current) ? next : current;
+}
+
+function lowestOperationalLevel(current: string, next: string) {
+  if (current === "unknown") return next;
+  if (next === "unknown") return current;
+  return levelRank(next) < levelRank(current) ? next : current;
+}
+
+function strongestConfidence(current: string, next: string) {
+  const ranks: Record<string, number> = { needs_review: 0, estimated: 1, confirmed: 2 };
+  return (ranks[next] ?? 0) > (ranks[current] ?? 0) ? next : current;
 }
 
 function ProjectsView({
@@ -1071,37 +1460,77 @@ function ExtractView({
 
 function SuggestionsView({
   onGenerate,
+  onSelectSuggestion,
+  selectedSuggestionId,
   workspace,
 }: {
   onGenerate: () => void;
+  onSelectSuggestion: (suggestionId: string) => void;
+  selectedSuggestionId: string | null;
   workspace: ProjectWorkspace;
 }) {
+  const suggestions = useMemo(
+    () =>
+      [...workspace.suggestions].sort(
+        (left, right) =>
+          right.impactScore - left.impactScore ||
+          priorityRank(left.priority) - priorityRank(right.priority),
+      ),
+    [workspace.suggestions],
+  );
+
   return (
     <section className="page-panel">
       <div className="page-header">
         <div>
-          <h1>施策</h1>
-          <p>マップから簡易施策と確認質問を生成します。</p>
+          <h1>事業インパクト施策</h1>
+          <p>売上・利益・費用・工数への効き方を根拠付きで確認します。</p>
         </div>
         <button className="primary-button" onClick={onGenerate} type="button">
           <Sparkles size={15} aria-hidden="true" />
-          施策生成
+          評価生成
         </button>
       </div>
       <div className="cards-grid">
-        {workspace.suggestions.map((suggestion) => (
-          <article className="review-card" key={suggestion.id}>
+        {suggestions.map((suggestion) => (
+          <button
+            className={`review-card impact-review-card ${
+              selectedSuggestionId === suggestion.id ? "review-card-selected" : ""
+            }`}
+            key={suggestion.id}
+            onClick={() => onSelectSuggestion(suggestion.id)}
+            type="button"
+          >
             <div className="card-row">
               <strong>{suggestion.title}</strong>
-              <span className="status-chip">{suggestion.priority}</span>
+              <span className="status-chip">
+                {labelFor(priorityOptions, suggestion.priority)}
+              </span>
             </div>
             <p>{suggestion.description}</p>
-            <small>{suggestion.rationale}</small>
-          </article>
+            <div className="impact-metrics">
+              <span>
+                売上 {labelFor(impactLevelOptions, suggestion.expectedRevenueImpact)}
+              </span>
+              <span>
+                利益 {labelFor(impactLevelOptions, suggestion.expectedProfitImpact)}
+              </span>
+              <span>費用 {labelFor(costLevelOptions, suggestion.costLevel)}</span>
+              <span>工数 {labelFor(costLevelOptions, suggestion.effortLevel)}</span>
+              <span>時期 {labelFor(timeToImpactOptions, suggestion.timeToImpact)}</span>
+            </div>
+            <small>{suggestion.evidence ?? suggestion.rationale}</small>
+          </button>
         ))}
       </div>
     </section>
   );
+}
+
+function priorityRank(value: string) {
+  if (value === "high") return 0;
+  if (value === "medium") return 1;
+  return 2;
 }
 
 function ExportView({
@@ -1189,6 +1618,8 @@ function InspectorPanel({
   node,
   onWorkspaceChange,
   projectId,
+  suggestion,
+  workspace,
 }: {
   edge: MapEdgeRow | null;
   isTauriRuntime: boolean;
@@ -1196,8 +1627,10 @@ function InspectorPanel({
   node: MapNodeRow | null;
   onWorkspaceChange: (workspace: ProjectWorkspace) => void;
   projectId: string | null;
+  suggestion: SuggestionRow | null;
+  workspace: ProjectWorkspace;
 }) {
-  if (!item && !node && !edge) {
+  if (!item && !node && !edge && !suggestion) {
     return (
       <aside className="inspector">
         <div className="panel-heading">
@@ -1264,16 +1697,213 @@ function InspectorPanel({
     onWorkspaceChange(nextWorkspace);
   }
 
+  async function submitSuggestion(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!suggestion || !projectId || !isTauriRuntime) return;
+    const form = new FormData(event.currentTarget);
+    const nextWorkspace = await invoke<ProjectWorkspace>("update_suggestion", {
+      projectId,
+      suggestionId: suggestion.id,
+      title: String(form.get("title") ?? ""),
+      description: String(form.get("description") ?? ""),
+      priority: String(form.get("priority") ?? "medium"),
+      adoptionStatus: String(form.get("adoptionStatus") ?? "pending"),
+      rationale: String(form.get("rationale") ?? ""),
+      expectedRevenueImpact: String(form.get("expectedRevenueImpact") ?? "medium"),
+      expectedProfitImpact: String(form.get("expectedProfitImpact") ?? "medium"),
+      costLevel: String(form.get("costLevel") ?? "medium"),
+      effortLevel: String(form.get("effortLevel") ?? "medium"),
+      timeToImpact: String(form.get("timeToImpact") ?? "mid"),
+      confidenceStatus: String(form.get("confidenceStatus") ?? "estimated"),
+      impactScore: Number(form.get("impactScore") ?? 50),
+      evidence: String(form.get("evidence") ?? ""),
+      memo: String(form.get("memo") ?? ""),
+    });
+    onWorkspaceChange(nextWorkspace);
+  }
+
   return (
     <aside className="inspector">
       <div className="panel-heading">
-        <span>{item ? "抽出カード" : node ? "ノード" : "導線"}</span>
+        <span>
+          {item ? "抽出カード" : node ? "ノード" : edge ? "導線" : "事業インパクト"}
+        </span>
         <small>編集</small>
       </div>
       {item ? <ItemForm item={item} onSubmit={submitItem} /> : null}
       {node ? <NodeForm node={node} onSubmit={submitNode} /> : null}
       {edge ? <EdgeForm edge={edge} onSubmit={submitEdge} /> : null}
+      {suggestion ? (
+        <SuggestionForm
+          suggestion={suggestion}
+          workspace={workspace}
+          onSubmit={submitSuggestion}
+        />
+      ) : null}
     </aside>
+  );
+}
+
+function SuggestionForm({
+  onSubmit,
+  suggestion,
+  workspace,
+}: {
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
+  suggestion: SuggestionRow;
+  workspace: ProjectWorkspace;
+}) {
+  return (
+    <form className="inspector-form" key={suggestion.id} onSubmit={onSubmit}>
+      <Field label="施策名">
+        <input defaultValue={suggestion.title} name="title" />
+      </Field>
+      <Field label="やること">
+        <textarea defaultValue={suggestion.description} name="description" />
+      </Field>
+      <FormGrid>
+        <Field label="優先度">
+          <select defaultValue={suggestion.priority} name="priority">
+            {priorityOptions.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="状態">
+          <select defaultValue={suggestion.adoptionStatus} name="adoptionStatus">
+            {adoptionOptions.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </FormGrid>
+      <FormGrid>
+        <Field label="売上影響">
+          <select
+            defaultValue={suggestion.expectedRevenueImpact}
+            name="expectedRevenueImpact"
+          >
+            {impactLevelOptions.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="利益影響">
+          <select
+            defaultValue={suggestion.expectedProfitImpact}
+            name="expectedProfitImpact"
+          >
+            {impactLevelOptions.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </FormGrid>
+      <FormGrid>
+        <Field label="費用">
+          <select defaultValue={suggestion.costLevel} name="costLevel">
+            {costLevelOptions.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="工数">
+          <select defaultValue={suggestion.effortLevel} name="effortLevel">
+            {costLevelOptions.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </FormGrid>
+      <FormGrid>
+        <Field label="時期">
+          <select defaultValue={suggestion.timeToImpact} name="timeToImpact">
+            {timeToImpactOptions.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="確度">
+          <select defaultValue={suggestion.confidenceStatus} name="confidenceStatus">
+            {confidenceOptions.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </FormGrid>
+      <Field label="インパクトスコア">
+        <input
+          defaultValue={suggestion.impactScore}
+          max={100}
+          min={0}
+          name="impactScore"
+          type="number"
+        />
+      </Field>
+      <Field label="判断理由">
+        <textarea defaultValue={suggestion.rationale ?? ""} name="rationale" />
+      </Field>
+      <Field label="根拠">
+        <textarea defaultValue={suggestion.evidence ?? ""} name="evidence" />
+      </Field>
+      <Field label="メモ">
+        <textarea defaultValue={suggestion.memo ?? ""} name="memo" />
+      </Field>
+      <SuggestionSources suggestion={suggestion} workspace={workspace} />
+      <button className="primary-button" type="submit">
+        保存
+      </button>
+    </form>
+  );
+}
+
+function SuggestionSources({
+  suggestion,
+  workspace,
+}: {
+  suggestion: SuggestionRow;
+  workspace: ProjectWorkspace;
+}) {
+  const relatedNodeIds = parseRelatedNodeIds(suggestion.relatedNodeIdsJson);
+  const relatedNodes = workspace.nodes.filter((node) =>
+    relatedNodeIds.includes(node.id),
+  );
+  const relatedItems = workspace.extractedItems.filter((item) =>
+    relatedNodes.some((node) => node.extractedItemId === item.id),
+  );
+  const sources = relatedItems.flatMap((item) => item.sources);
+
+  return (
+    <div className="source-list">
+      <span>根拠ノード・source</span>
+      {relatedNodes.length === 0 ? <small>関連ノード未設定</small> : null}
+      {relatedNodes.map((node) => (
+        <small key={node.id}>{node.label}</small>
+      ))}
+      {sources.map((source) => (
+        <small key={source.id}>
+          {source.sourceFileName ?? "source"}
+          {source.pageNumber ? ` p.${source.pageNumber}` : ""}
+          {source.rowStart ? ` row ${source.rowStart}` : ""}
+        </small>
+      ))}
+    </div>
   );
 }
 

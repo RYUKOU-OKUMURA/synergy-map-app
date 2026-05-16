@@ -31,6 +31,23 @@ import type { MapEdgeRow, MapNodeRow, SelectedMapElement } from "@/lib/mvp1Types
 
 import "@xyflow/react/dist/style.css";
 
+export type MapViewMode = "customer_journey" | "business_impact";
+
+export type NodePositionOverrides = Record<string, { x: number; y: number }>;
+
+export type NodeImpactStats = Record<
+  string,
+  {
+    score: number;
+    revenueImpact: string;
+    profitImpact: string;
+    costLevel: string;
+    effortLevel: string;
+    confidenceStatus: string;
+    sourceCount: number;
+  }
+>;
+
 type SynergyNodeData = {
   label: string;
   nodeType: string;
@@ -39,6 +56,8 @@ type SynergyNodeData = {
   impactScore: number;
   informationRichness: number;
   sourceCount: number;
+  businessImpact: NodeImpactStats[string] | null;
+  viewMode: MapViewMode;
 };
 
 type SynergyEdgeData = {
@@ -46,6 +65,7 @@ type SynergyEdgeData = {
   edgeType: string;
   strength: string;
   confidenceStatus: string | null;
+  viewMode: MapViewMode;
 };
 
 type FlowNode = Node<SynergyNodeData, "synergy">;
@@ -53,12 +73,15 @@ type FlowEdge = Edge<SynergyEdgeData, "synergy">;
 
 type SynergyMapCanvasProps = {
   edges: MapEdgeRow[];
+  impactStats?: NodeImpactStats;
   nodes: MapNodeRow[];
   onPositionsChange: (
     positions: Array<{ nodeId: string; x: number; y: number }>,
   ) => void;
   onSelect: (selection: SelectedMapElement) => void;
+  positionOverrides?: NodePositionOverrides;
   selected: SelectedMapElement;
+  viewMode?: MapViewMode;
 };
 
 const nodeIcons = {
@@ -82,13 +105,25 @@ function parsePosition(positionJson: string) {
   }
 }
 
-function toFlowNodes(nodes: MapNodeRow[]): FlowNode[] {
+const levelLabels: Record<string, string> = {
+  high: "大",
+  medium: "中",
+  low: "小",
+  unknown: "不明",
+};
+
+function toFlowNodes(
+  nodes: MapNodeRow[],
+  viewMode: MapViewMode,
+  positionOverrides: NodePositionOverrides,
+  impactStats: NodeImpactStats,
+): FlowNode[] {
   return nodes
     .filter((node) => node.adoptionStatus !== "rejected")
     .map((node) => ({
       id: node.id,
       type: "synergy",
-      position: parsePosition(node.positionJson),
+      position: positionOverrides[node.id] ?? parsePosition(node.positionJson),
       data: {
         label: node.label,
         nodeType: node.nodeType,
@@ -97,11 +132,13 @@ function toFlowNodes(nodes: MapNodeRow[]): FlowNode[] {
         impactScore: Number(node.influenceLevel ?? 2),
         informationRichness: Number(node.informationRichness ?? 50),
         sourceCount: node.extractedItemId ? 1 : 0,
+        businessImpact: impactStats[node.id] ?? null,
+        viewMode,
       },
     }));
 }
 
-function toFlowEdges(edges: MapEdgeRow[]): FlowEdge[] {
+function toFlowEdges(edges: MapEdgeRow[], viewMode: MapViewMode): FlowEdge[] {
   return edges
     .filter((edge) => edge.adoptionStatus !== "rejected")
     .map((edge) => ({
@@ -115,6 +152,7 @@ function toFlowEdges(edges: MapEdgeRow[]): FlowEdge[] {
         edgeType: edge.edgeType,
         strength: edge.strength ?? "normal",
         confidenceStatus: edge.confidenceStatus,
+        viewMode,
       },
     }));
 }
@@ -128,7 +166,9 @@ function SynergyNode({ data, selected }: NodeProps<FlowNode>) {
     <div
       className={`map-node map-node-${data.nodeType} ${
         selected ? "map-node-selected" : ""
-      } map-node-impact-${data.impactScore}`}
+      } map-node-impact-${data.impactScore} map-node-view-${data.viewMode} ${
+        data.businessImpact ? "map-node-has-business-impact" : ""
+      }`}
     >
       <Handle className="map-handle" position={Position.Left} type="target" />
       <div className="map-node-stripe" />
@@ -145,6 +185,19 @@ function SynergyNode({ data, selected }: NodeProps<FlowNode>) {
           </div>
           <div className="map-node-title">{data.label}</div>
           <div className="map-node-description">{data.description ?? "説明未設定"}</div>
+          {data.viewMode === "business_impact" ? (
+            <div className="impact-node-metrics">
+              <span>
+                売上 {levelLabels[data.businessImpact?.revenueImpact ?? "unknown"]}
+              </span>
+              <span>
+                利益 {levelLabels[data.businessImpact?.profitImpact ?? "unknown"]}
+              </span>
+              <span>
+                工数 {levelLabels[data.businessImpact?.effortLevel ?? "unknown"]}
+              </span>
+            </div>
+          ) : null}
           <div className="richness-bar" aria-label="情報充実度">
             <span
               style={{
@@ -163,6 +216,7 @@ function SynergyEdge(props: EdgeProps<FlowEdge>) {
   const [edgePath, labelX, labelY] = getBezierPath(props);
   const edgeType = props.data?.edgeType ?? "normal";
   const strength = props.data?.strength ?? "normal";
+  const viewMode = props.data?.viewMode ?? "customer_journey";
   const showWarning = edgeType === "bottleneck";
   const halo = strength === "strong";
 
@@ -173,7 +227,7 @@ function SynergyEdge(props: EdgeProps<FlowEdge>) {
         id={props.id}
         markerEnd={props.markerEnd}
         path={edgePath}
-        className={`map-edge map-edge-${edgeType} map-edge-strength-${strength}`}
+        className={`map-edge map-edge-${edgeType} map-edge-strength-${strength} map-edge-view-${viewMode}`}
       />
       <EdgeLabelRenderer>
         <div
@@ -202,15 +256,26 @@ const edgeTypes = {
   synergy: SynergyEdge,
 };
 
+const EMPTY_IMPACT_STATS: NodeImpactStats = {};
+const EMPTY_POSITION_OVERRIDES: NodePositionOverrides = {};
+
 export function SynergyMapCanvas({
   edges,
+  impactStats,
   nodes,
   onPositionsChange,
   onSelect,
+  positionOverrides,
   selected,
+  viewMode = "customer_journey",
 }: SynergyMapCanvasProps) {
-  const initialNodes = useMemo(() => toFlowNodes(nodes), [nodes]);
-  const initialEdges = useMemo(() => toFlowEdges(edges), [edges]);
+  const resolvedImpactStats = impactStats ?? EMPTY_IMPACT_STATS;
+  const resolvedPositionOverrides = positionOverrides ?? EMPTY_POSITION_OVERRIDES;
+  const initialNodes = useMemo(
+    () => toFlowNodes(nodes, viewMode, resolvedPositionOverrides, resolvedImpactStats),
+    [nodes, resolvedImpactStats, resolvedPositionOverrides, viewMode],
+  );
+  const initialEdges = useMemo(() => toFlowEdges(edges, viewMode), [edges, viewMode]);
   const [flowNodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [flowEdges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
 

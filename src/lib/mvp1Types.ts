@@ -122,6 +122,14 @@ export type SuggestionRow = {
   adoptionStatus: string;
   rationale: string | null;
   relatedNodeIdsJson: string;
+  expectedRevenueImpact: string;
+  expectedProfitImpact: string;
+  costLevel: string;
+  effortLevel: string;
+  timeToImpact: string;
+  confidenceStatus: string;
+  impactScore: number;
+  evidence: string | null;
   memo: string | null;
   createdAt: string;
   updatedAt: string;
@@ -174,6 +182,15 @@ export type VersionRow = {
   createdAt: string;
 };
 
+export type ViewLayoutRow = {
+  id: string;
+  projectId: string;
+  viewId: string;
+  layoutJson: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ProjectWorkspace = {
   sourceFiles: SourceFileRow[];
   sourceChunks: SourceChunkRow[];
@@ -185,6 +202,7 @@ export type ProjectWorkspace = {
   aiRuns: AiRunRow[];
   exportJobs: ExportJobRow[];
   versions: VersionRow[];
+  viewLayouts: ViewLayoutRow[];
 };
 
 export type MvpRunResult = {

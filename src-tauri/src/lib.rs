@@ -113,6 +113,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "mvp1",
         sql: include_str!("../migrations/0002_mvp1.sql"),
     },
+    Migration {
+        version: 3,
+        name: "business_impact_view",
+        sql: include_str!("../migrations/0003_business_impact_view.sql"),
+    },
 ];
 
 const LEGACY_INITIAL_MIGRATION_CHECKSUM: &str = "0001_initial_v1";
@@ -937,7 +942,9 @@ pub fn run() {
             mvp1::update_map_node,
             mvp1::update_map_edge,
             mvp1::save_map_layout,
+            mvp1::save_view_layout,
             mvp1::generate_suggestions_from_map,
+            mvp1::update_suggestion,
             mvp1::export_markdown,
             mvp1::export_csv_bundle
         ])

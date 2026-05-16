@@ -21,8 +21,36 @@ export const adoptionOptions = [
   ["rejected", "却下"],
 ] as const satisfies readonly LabelOption[];
 
+export const priorityOptions = [
+  ["high", "高"],
+  ["medium", "中"],
+  ["low", "低"],
+] as const satisfies readonly LabelOption[];
+
+export const impactLevelOptions = [
+  ["high", "大"],
+  ["medium", "中"],
+  ["low", "小"],
+  ["unknown", "不明"],
+] as const satisfies readonly LabelOption[];
+
+export const costLevelOptions = [
+  ["low", "小"],
+  ["medium", "中"],
+  ["high", "大"],
+  ["unknown", "不明"],
+] as const satisfies readonly LabelOption[];
+
+export const timeToImpactOptions = [
+  ["short", "短期"],
+  ["mid", "中期"],
+  ["long", "長期"],
+  ["unknown", "不明"],
+] as const satisfies readonly LabelOption[];
+
 export const categoryLabels = Object.fromEntries(categoryOptions);
 export const confidenceLabels = Object.fromEntries(confidenceOptions);
+export const impactLevelLabels = Object.fromEntries(impactLevelOptions);
 
 export function labelFor(
   options: readonly LabelOption[],

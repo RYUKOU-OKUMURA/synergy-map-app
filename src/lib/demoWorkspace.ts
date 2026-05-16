@@ -25,6 +25,7 @@ export const emptyWorkspace: ProjectWorkspace = {
   aiRuns: [],
   exportJobs: [],
   versions: [],
+  viewLayouts: [],
 };
 
 export const demoWorkspace: ProjectWorkspace = {
@@ -271,7 +272,52 @@ export const demoWorkspace: ProjectWorkspace = {
       updatedAt: now,
     },
   ],
-  suggestions: [],
+  suggestions: [
+    {
+      id: "suggestion-follow",
+      projectId: demoProject.id,
+      aiRunId: "run-2",
+      title: "問い合わせ後フォロー導線の整理",
+      description: "Web問い合わせから初回商談までの担当、期限、記録先を確認する。",
+      priority: "high",
+      adoptionStatus: "pending",
+      rationale: "顧客接点の詰まりを最初に解消しやすい。",
+      relatedNodeIdsJson: '["node-channel","node-touch"]',
+      expectedRevenueImpact: "high",
+      expectedProfitImpact: "medium",
+      costLevel: "low",
+      effortLevel: "low",
+      timeToImpact: "short",
+      confidenceStatus: "estimated",
+      impactScore: 82,
+      evidence: "問い合わせから商談までの接続が売上入口に近い。",
+      memo: null,
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: "suggestion-data",
+      projectId: demoProject.id,
+      aiRunId: "run-2",
+      title: "顧客台帳と売上CSVの突合",
+      description: "顧客ID、会社名、メールアドレスのどれで紐づくか確認する。",
+      priority: "medium",
+      adoptionStatus: "pending",
+      rationale: "データ資料を施策判断に使える状態にするため。",
+      relatedNodeIdsJson: '["node-data","node-service"]',
+      expectedRevenueImpact: "medium",
+      expectedProfitImpact: "high",
+      costLevel: "medium",
+      effortLevel: "medium",
+      timeToImpact: "mid",
+      confidenceStatus: "needs_review",
+      impactScore: 68,
+      evidence: "売上CSVが継続契約と売上推移の根拠として存在する。",
+      memo: null,
+      createdAt: now,
+      updatedAt: now,
+    },
+  ],
   aiComments: [
     {
       id: "comment-1",
@@ -287,4 +333,15 @@ export const demoWorkspace: ProjectWorkspace = {
   aiRuns: [],
   exportJobs: [],
   versions: [],
+  viewLayouts: [
+    {
+      id: "layout-impact",
+      projectId: demoProject.id,
+      viewId: "business_impact",
+      layoutJson:
+        '{"viewId":"business_impact","positions":[{"nodeId":"node-channel","x":360,"y":90},{"nodeId":"node-touch","x":360,"y":220},{"nodeId":"node-service","x":620,"y":180},{"nodeId":"node-data","x":620,"y":350},{"nodeId":"node-business","x":880,"y":170}]}',
+      createdAt: now,
+      updatedAt: now,
+    },
+  ],
 };

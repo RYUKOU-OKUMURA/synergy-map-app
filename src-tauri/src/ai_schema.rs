@@ -103,6 +103,15 @@ pub struct SuggestionCard {
     pub action: String,
     pub priority: String,
     pub rationale: String,
+    pub expected_revenue_impact: String,
+    pub expected_profit_impact: String,
+    pub cost_level: String,
+    pub effort_level: String,
+    pub time_to_impact: String,
+    pub confidence_status: String,
+    pub impact_score: i64,
+    pub evidence: String,
+    pub related_node_labels: Vec<String>,
 }
 
 pub fn extracted_items_json_schema() -> Value {
@@ -324,12 +333,57 @@ pub fn suggestion_cards_json_schema() -> Value {
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["title", "action", "priority", "rationale"],
+                    "required": [
+                        "title",
+                        "action",
+                        "priority",
+                        "rationale",
+                        "expectedRevenueImpact",
+                        "expectedProfitImpact",
+                        "costLevel",
+                        "effortLevel",
+                        "timeToImpact",
+                        "confidenceStatus",
+                        "impactScore",
+                        "evidence",
+                        "relatedNodeLabels"
+                    ],
                     "properties": {
                         "title": { "type": "string", "minLength": 1 },
                         "action": { "type": "string", "minLength": 1 },
                         "priority": { "type": "string", "enum": ["high", "medium", "low"] },
-                        "rationale": { "type": "string" }
+                        "rationale": { "type": "string", "minLength": 1 },
+                        "expectedRevenueImpact": {
+                            "type": "string",
+                            "enum": ["high", "medium", "low", "unknown"]
+                        },
+                        "expectedProfitImpact": {
+                            "type": "string",
+                            "enum": ["high", "medium", "low", "unknown"]
+                        },
+                        "costLevel": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high", "unknown"]
+                        },
+                        "effortLevel": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high", "unknown"]
+                        },
+                        "timeToImpact": {
+                            "type": "string",
+                            "enum": ["short", "mid", "long", "unknown"]
+                        },
+                        "confidenceStatus": {
+                            "type": "string",
+                            "enum": ["confirmed", "estimated", "needs_review"]
+                        },
+                        "impactScore": { "type": "integer", "minimum": 0, "maximum": 100 },
+                        "evidence": { "type": "string", "minLength": 1 },
+                        "relatedNodeLabels": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "maxItems": 6
+                        }
                     }
                 }
             }
@@ -450,7 +504,40 @@ pub fn validate_suggestion_cards_json(value: &Value) -> Result<SuggestionCardsOu
     for card in &output.cards {
         ensure_non_empty("card.title", &card.title)?;
         ensure_non_empty("card.action", &card.action)?;
+        ensure_non_empty("card.rationale", &card.rationale)?;
+        ensure_non_empty("card.evidence", &card.evidence)?;
         ensure_allowed("card.priority", &card.priority, &["high", "medium", "low"])?;
+        ensure_allowed(
+            "card.expected_revenue_impact",
+            &card.expected_revenue_impact,
+            &["high", "medium", "low", "unknown"],
+        )?;
+        ensure_allowed(
+            "card.expected_profit_impact",
+            &card.expected_profit_impact,
+            &["high", "medium", "low", "unknown"],
+        )?;
+        ensure_allowed(
+            "card.cost_level",
+            &card.cost_level,
+            &["low", "medium", "high", "unknown"],
+        )?;
+        ensure_allowed(
+            "card.effort_level",
+            &card.effort_level,
+            &["low", "medium", "high", "unknown"],
+        )?;
+        ensure_allowed(
+            "card.time_to_impact",
+            &card.time_to_impact,
+            &["short", "mid", "long", "unknown"],
+        )?;
+        ensure_allowed(
+            "card.confidence_status",
+            &card.confidence_status,
+            &["confirmed", "estimated", "needs_review"],
+        )?;
+        ensure_score("impact_score", card.impact_score, 0, 100)?;
     }
 
     Ok(output)
@@ -534,5 +621,59 @@ mod tests {
         let error = validate_ai_analysis_json(&value).expect_err("version should fail");
 
         assert!(error.contains("Unsupported schema_version"));
+    }
+
+    #[test]
+    fn valid_business_impact_suggestion_deserializes() {
+        let value = json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "cards": [{
+                "title": "問い合わせ後フォロー導線の整理",
+                "action": "担当、期限、記録先を決める。",
+                "priority": "high",
+                "rationale": "売上入口に近い詰まりを解消するため。",
+                "expectedRevenueImpact": "high",
+                "expectedProfitImpact": "medium",
+                "costLevel": "low",
+                "effortLevel": "low",
+                "timeToImpact": "short",
+                "confidenceStatus": "estimated",
+                "impactScore": 82,
+                "evidence": "sourceChunkId=chunk-1 の顧客接点情報から推定。",
+                "relatedNodeLabels": ["Web問い合わせ", "初回商談"]
+            }]
+        });
+
+        let output = validate_suggestion_cards_json(&value).expect("suggestion should validate");
+
+        assert_eq!(output.cards[0].impact_score, 82);
+        assert_eq!(output.cards[0].related_node_labels.len(), 2);
+    }
+
+    #[test]
+    fn business_impact_suggestion_rejects_invalid_score() {
+        let value = json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "cards": [{
+                "title": "問い合わせ後フォロー導線の整理",
+                "action": "担当、期限、記録先を決める。",
+                "priority": "high",
+                "rationale": "売上入口に近い詰まりを解消するため。",
+                "expectedRevenueImpact": "high",
+                "expectedProfitImpact": "medium",
+                "costLevel": "low",
+                "effortLevel": "low",
+                "timeToImpact": "short",
+                "confidenceStatus": "estimated",
+                "impactScore": 120,
+                "evidence": "sourceChunkId=chunk-1 の顧客接点情報から推定。",
+                "relatedNodeLabels": ["Web問い合わせ"]
+            }]
+        });
+
+        let error =
+            validate_suggestion_cards_json(&value).expect_err("score outside range should fail");
+
+        assert!(error.contains("impact_score"));
     }
 }
