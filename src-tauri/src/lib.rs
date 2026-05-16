@@ -8,8 +8,10 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+mod codex_app_server;
 mod source_reader;
 
+use codex_app_server::{CodexSmokeResult, DeviceCodeLoginResult};
 use source_reader::{read_source_file, ReadSourceDraft};
 
 struct DbState {
@@ -359,6 +361,21 @@ fn list_source_chunks(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn run_codex_smoke_test(app: tauri::AppHandle) -> CodexSmokeResult {
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+
+    codex_app_server::run_smoke_test(app, &cwd.display().to_string())
+}
+
+#[tauri::command]
+fn run_codex_device_code_check(app: tauri::AppHandle) -> DeviceCodeLoginResult {
+    codex_app_server::run_device_code_login_check(app)
+}
+
 fn import_source_path(
     db_path: &PathBuf,
     app_data_dir: &Path,
@@ -658,7 +675,9 @@ pub fn run() {
             list_projects,
             get_storage_info,
             import_sample_source,
-            list_source_chunks
+            list_source_chunks,
+            run_codex_smoke_test,
+            run_codex_device_code_check
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

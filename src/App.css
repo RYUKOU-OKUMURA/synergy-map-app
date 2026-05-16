@@ -91,6 +91,12 @@ a {
   color: #8f3128;
 }
 
+.status-pill-neutral {
+  border-color: #d8d6ca;
+  background: #f7f6ef;
+  color: #5e5a45;
+}
+
 .error-banner {
   border: 1px solid #e4b8b8;
   border-radius: 0.5rem;

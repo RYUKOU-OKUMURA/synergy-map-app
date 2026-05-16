@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   CheckCircle2,
   Database,
@@ -27,7 +28,7 @@ const gateItems = [
   },
   {
     label: "Codex接続",
-    value: "P0-5で検証",
+    value: "P0-5/P0-6",
     icon: Sparkles,
   },
   {
@@ -74,6 +75,42 @@ type ImportSourceResult = {
   chunks: SourceChunk[];
 };
 
+type CodexUiEvent = {
+  kind: string;
+  label: string;
+  detail: string | null;
+  verificationUrl: string | null;
+  userCode: string | null;
+};
+
+type CodexSmokeResult = {
+  ok: boolean;
+  userAgent: string | null;
+  platformOs: string | null;
+  authenticated: boolean;
+  accountType: string | null;
+  requiresOpenaiAuth: boolean;
+  threadId: string | null;
+  turnId: string | null;
+  assistantText: string;
+  events: CodexUiEvent[];
+  stderr: string[];
+  errors: string[];
+};
+
+type DeviceCodeLoginResult = {
+  ok: boolean;
+  loginId: string | null;
+  verificationUrl: string | null;
+  userCode: string | null;
+  completionSuccess: boolean | null;
+  cancelStatus: string | null;
+  events: CodexUiEvent[];
+  stderr: string[];
+  errors: string[];
+  warnings: string[];
+};
+
 const sampleFiles = [
   "company-overview.pdf",
   "financial-summary.pdf",
@@ -93,6 +130,18 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [isCodexRunning, setIsCodexRunning] = useState(false);
+  const [isDeviceChecking, setIsDeviceChecking] = useState(false);
+  const [codexEvents, setCodexEvents] = useState<CodexUiEvent[]>([]);
+  const [codexSmokeResult, setCodexSmokeResult] = useState<CodexSmokeResult | null>(
+    null,
+  );
+  const [deviceCodeResult, setDeviceCodeResult] =
+    useState<DeviceCodeLoginResult | null>(null);
+  const [liveDeviceCode, setLiveDeviceCode] = useState<{
+    verificationUrl: string | null;
+    userCode: string | null;
+  }>({ verificationUrl: null, userCode: null });
 
   async function loadProjects() {
     const [projectRows, storage] = await Promise.all([
@@ -150,6 +199,40 @@ function App() {
     }
   }
 
+  async function handleCodexSmokeTest() {
+    setIsCodexRunning(true);
+    setError(null);
+    setCodexEvents([]);
+    setCodexSmokeResult(null);
+    setLiveDeviceCode({ verificationUrl: null, userCode: null });
+
+    try {
+      const result = await invoke<CodexSmokeResult>("run_codex_smoke_test");
+      setCodexSmokeResult(result);
+    } catch (caughtError) {
+      setError(String(caughtError));
+    } finally {
+      setIsCodexRunning(false);
+    }
+  }
+
+  async function handleDeviceCodeCheck() {
+    setIsDeviceChecking(true);
+    setError(null);
+    setCodexEvents([]);
+    setDeviceCodeResult(null);
+    setLiveDeviceCode({ verificationUrl: null, userCode: null });
+
+    try {
+      const result = await invoke<DeviceCodeLoginResult>("run_codex_device_code_check");
+      setDeviceCodeResult(result);
+    } catch (caughtError) {
+      setError(String(caughtError));
+    } finally {
+      setIsDeviceChecking(false);
+    }
+  }
+
   useEffect(() => {
     let isMounted = true;
 
@@ -180,6 +263,29 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const unlisten = listen<CodexUiEvent>("codex-app-server-event", (event) => {
+      setCodexEvents((currentEvents) => [...currentEvents.slice(-31), event.payload]);
+      if (event.payload.verificationUrl || event.payload.userCode) {
+        setLiveDeviceCode({
+          verificationUrl: event.payload.verificationUrl,
+          userCode: event.payload.userCode,
+        });
+      }
+    });
+
+    return () => {
+      void unlisten.then((dispose) => {
+        dispose();
+      });
+    };
+  }, []);
+
+  const isCodexBusy = isCodexRunning || isDeviceChecking;
+  const visibleVerificationUrl =
+    deviceCodeResult?.verificationUrl ?? liveDeviceCode.verificationUrl;
+  const visibleUserCode = deviceCodeResult?.userCode ?? liveDeviceCode.userCode;
+
   return (
     <main className="min-h-screen bg-[var(--app-bg)] text-[var(--app-fg)]">
       <div className="grid min-h-screen grid-cols-[248px_1fr]">
@@ -207,6 +313,10 @@ function App() {
               <ShieldCheck size={16} aria-hidden="true" />
               技術ゲート
             </a>
+            <a className="nav-item" href="#codex">
+              <Sparkles size={16} aria-hidden="true" />
+              Codex接続
+            </a>
           </nav>
         </aside>
 
@@ -222,19 +332,21 @@ function App() {
                 command経由で検証します。
               </p>
             </div>
-            <Button disabled={isCreating} onClick={handleCreateProject} type="button">
-              <Plus size={16} aria-hidden="true" />
-              {isCreating ? "作成中" : "新規案件"}
-            </Button>
-            <Button
-              disabled={isImporting || projects.length === 0}
-              onClick={handleImportSamples}
-              type="button"
-              variant="outline"
-            >
-              <Upload size={16} aria-hidden="true" />
-              {isImporting ? "読取中" : "サンプル読取"}
-            </Button>
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button disabled={isCreating} onClick={handleCreateProject} type="button">
+                <Plus size={16} aria-hidden="true" />
+                {isCreating ? "作成中" : "新規案件"}
+              </Button>
+              <Button
+                disabled={isImporting || projects.length === 0}
+                onClick={handleImportSamples}
+                type="button"
+                variant="outline"
+              >
+                <Upload size={16} aria-hidden="true" />
+                {isImporting ? "読取中" : "サンプル読取"}
+              </Button>
+            </div>
           </header>
 
           <div className="mt-6 grid grid-cols-4 gap-3">
@@ -349,6 +461,149 @@ function App() {
             ) : (
               <div className="px-4 py-8 text-center text-sm text-[var(--app-muted)]">
                 サンプル読取を実行すると、source chunksと出典情報を確認できます。
+              </div>
+            )}
+          </div>
+
+          <div
+            className="mt-6 overflow-hidden rounded-md border border-[var(--app-border)] bg-white"
+            id="codex"
+          >
+            <div className="flex items-center justify-between gap-4 border-b border-[var(--app-border)] bg-[var(--app-surface)] px-4 py-3">
+              <div>
+                <div className="text-xs font-semibold text-[var(--app-muted)]">
+                  Codex App Server
+                </div>
+                <div className="mt-1 text-sm font-medium">
+                  stdio / device-code flow 検証
+                </div>
+              </div>
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button
+                  disabled={isCodexBusy}
+                  onClick={handleCodexSmokeTest}
+                  type="button"
+                >
+                  <Sparkles size={16} aria-hidden="true" />
+                  {isCodexRunning ? "送信中" : "短い依頼を送る"}
+                </Button>
+                <Button
+                  disabled={isCodexBusy}
+                  onClick={handleDeviceCodeCheck}
+                  type="button"
+                  variant="outline"
+                >
+                  <ShieldCheck size={16} aria-hidden="true" />
+                  {isDeviceChecking ? "確認中" : "ログイン手順確認"}
+                </Button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-[1fr_1fr] gap-0 border-b border-[var(--app-border)]">
+              <div className="border-r border-[var(--app-border)] px-4 py-4">
+                <div className="text-xs font-semibold text-[var(--app-muted)]">
+                  turn結果
+                </div>
+                <div className="mt-3 flex items-center gap-2 text-sm">
+                  <span
+                    className={
+                      codexSmokeResult?.ok
+                        ? "status-pill"
+                        : "status-pill status-pill-neutral"
+                    }
+                  >
+                    {codexSmokeResult
+                      ? codexSmokeResult.ok
+                        ? "OK"
+                        : "要確認"
+                      : "未実行"}
+                  </span>
+                  <span className="text-[var(--app-muted)]">
+                    {codexSmokeResult?.accountType ?? "account未確認"}
+                  </span>
+                </div>
+                <div className="mt-3 text-sm font-medium">
+                  {codexSmokeResult?.assistantText || "-"}
+                </div>
+                <div className="mt-2 truncate text-xs text-[var(--app-muted)]">
+                  {codexSmokeResult?.errors[0] ??
+                    codexSmokeResult?.userAgent ??
+                    "userAgent未取得"}
+                </div>
+              </div>
+
+              <div className="px-4 py-4">
+                <div className="text-xs font-semibold text-[var(--app-muted)]">
+                  device-code
+                </div>
+                <div className="mt-3 flex items-center gap-2 text-sm">
+                  <span
+                    className={
+                      deviceCodeResult?.ok
+                        ? "status-pill"
+                        : "status-pill status-pill-neutral"
+                    }
+                  >
+                    {deviceCodeResult
+                      ? deviceCodeResult.ok
+                        ? "発行確認"
+                        : "要確認"
+                      : "未実行"}
+                  </span>
+                  <span className="text-[var(--app-muted)]">
+                    {deviceCodeResult?.cancelStatus
+                      ? `cancel: ${deviceCodeResult.cancelStatus}`
+                      : deviceCodeResult?.completionSuccess === true
+                        ? "login completed"
+                        : "待機なし"}
+                  </span>
+                </div>
+                <div className="mt-3 text-sm font-medium">{visibleUserCode ?? "-"}</div>
+                {visibleVerificationUrl ? (
+                  <a
+                    className="mt-2 block truncate text-xs font-medium text-[var(--app-accent)]"
+                    href={visibleVerificationUrl}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    {visibleVerificationUrl}
+                  </a>
+                ) : (
+                  <div className="mt-2 text-xs text-[var(--app-muted)]">
+                    verificationUrl未取得
+                  </div>
+                )}
+                <div className="mt-2 truncate text-xs text-[var(--app-muted)]">
+                  {deviceCodeResult?.errors[0] ??
+                    deviceCodeResult?.warnings[0] ??
+                    (liveDeviceCode.userCode
+                      ? "ブラウザでURLを開き、コードを入力できます。"
+                      : "")}
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-[160px_1fr_1fr] border-b border-[var(--app-border)] bg-[var(--app-surface)] px-4 py-3 text-xs font-semibold text-[var(--app-muted)]">
+              <div>種別</div>
+              <div>イベント</div>
+              <div>詳細</div>
+            </div>
+            {codexEvents.length > 0 ? (
+              codexEvents.map((event, index) => (
+                <div
+                  className="grid grid-cols-[160px_1fr_1fr] items-center border-b border-[var(--app-border)] px-4 py-3 text-sm last:border-b-0"
+                  key={`${event.kind}-${event.label}-${index}`}
+                >
+                  <div className="text-[var(--app-muted)]">{event.kind}</div>
+                  <div className="font-medium">{event.label}</div>
+                  <div className="truncate text-[var(--app-muted)]">
+                    {event.userCode ?? event.detail ?? "-"}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="px-4 py-8 text-center text-sm text-[var(--app-muted)]">
+                検証ボタンを実行するとJSONL通信イベントがここに流れます。
               </div>
             )}
           </div>
