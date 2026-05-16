@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   Database,
   Download,
+  FileJson,
   FileText,
   FolderKanban,
   Network,
@@ -127,6 +128,17 @@ type CodexRuntimeInfo = {
   warnings: string[];
 };
 
+type AiSchemaPocResult = {
+  ok: boolean;
+  aiRunId: string | null;
+  schemaName: string;
+  schemaVersion: string;
+  responseSummary: string | null;
+  requestSummaryPath: string | null;
+  responseJsonPath: string | null;
+  errors: string[];
+};
+
 const sampleFiles = [
   "company-overview.pdf",
   "financial-summary.pdf",
@@ -168,6 +180,10 @@ function App() {
     height: number;
     bytes: number;
   } | null>(null);
+  const [isSchemaRunning, setIsSchemaRunning] = useState(false);
+  const [schemaPocResult, setSchemaPocResult] = useState<AiSchemaPocResult | null>(
+    null,
+  );
   const flowExportRef = useRef<HTMLDivElement | null>(null);
 
   async function loadProjects() {
@@ -299,6 +315,30 @@ function App() {
     }
   }
 
+  async function handleAiSchemaPoc() {
+    const project = projects[0];
+
+    if (!project) {
+      setError("先に新規案件を作成してください。");
+      return;
+    }
+
+    setIsSchemaRunning(true);
+    setError(null);
+    setSchemaPocResult(null);
+
+    try {
+      const result = await invoke<AiSchemaPocResult>("run_ai_schema_poc", {
+        projectId: project.id,
+      });
+      setSchemaPocResult(result);
+    } catch (caughtError) {
+      setError(String(caughtError));
+    } finally {
+      setIsSchemaRunning(false);
+    }
+  }
+
   useEffect(() => {
     let isMounted = true;
 
@@ -388,6 +428,10 @@ function App() {
             <a className="nav-item" href="#map">
               <Network size={16} aria-hidden="true" />
               マップ出力
+            </a>
+            <a className="nav-item" href="#schema">
+              <FileJson size={16} aria-hidden="true" />
+              Schema検証
             </a>
           </nav>
         </aside>
@@ -734,6 +778,56 @@ function App() {
                 <div>品質条件</div>
                 <div>2x pixel ratio、背景色固定、余白込みのA4横向き埋め込み想定</div>
               </div>
+            </div>
+          </div>
+
+          <div
+            className="mt-6 overflow-hidden rounded-md border border-[var(--app-border)] bg-white"
+            id="schema"
+          >
+            <div className="flex items-center justify-between gap-4 border-b border-[var(--app-border)] bg-[var(--app-surface)] px-4 py-3">
+              <div>
+                <div className="text-xs font-semibold text-[var(--app-muted)]">
+                  AI Output Schema
+                </div>
+                <div className="mt-1 text-sm font-medium">
+                  AiAnalysisOutput / phase0.v1
+                </div>
+              </div>
+              <Button
+                disabled={isSchemaRunning || projects.length === 0}
+                onClick={handleAiSchemaPoc}
+                type="button"
+              >
+                <FileJson size={16} aria-hidden="true" />
+                {isSchemaRunning ? "検証中" : "schema検証"}
+              </Button>
+            </div>
+            <div className="grid grid-cols-[160px_1fr] gap-y-2 px-4 py-4 text-sm">
+              <div className="text-[var(--app-muted)]">状態</div>
+              <div>
+                <span
+                  className={
+                    schemaPocResult?.ok
+                      ? "status-pill"
+                      : "status-pill status-pill-neutral"
+                  }
+                >
+                  {schemaPocResult
+                    ? schemaPocResult.ok
+                      ? "保存済み"
+                      : "要確認"
+                    : "未実行"}
+                </span>
+              </div>
+              <div className="text-[var(--app-muted)]">ai_run</div>
+              <div>{schemaPocResult?.aiRunId ?? "-"}</div>
+              <div className="text-[var(--app-muted)]">summary</div>
+              <div>
+                {schemaPocResult?.responseSummary ?? schemaPocResult?.errors[0] ?? "-"}
+              </div>
+              <div className="text-[var(--app-muted)]">response</div>
+              <div className="truncate">{schemaPocResult?.responseJsonPath ?? "-"}</div>
             </div>
           </div>
         </section>

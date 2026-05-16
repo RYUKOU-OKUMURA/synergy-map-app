@@ -10,7 +10,7 @@
 
 未判定。
 
-P0-9までの主要リスクのうち、Codex App Server stdio接続、SQLite保存、資料読み取り、React Flow画像化、Typst日本語PDFはmacOS PoCで検証済み。device-code flowはURL/code発行とキャンセルまで確認済みだが、実ログイン完了通知は未確認。sidecar同梱は調査済みで、Phase 0 / MVP-1初期は外部CLI前提にする一次判断。
+P0-10までの主要リスクのうち、Codex App Server stdio接続、SQLite保存、資料読み取り、React Flow画像化、Typst日本語PDF、AI出力schema検証はmacOS PoCで検証済み。device-code flowはURL/code発行とキャンセルまで確認済みだが、実ログイン完了通知は未確認。sidecar同梱は調査済みで、Phase 0 / MVP-1初期は外部CLI前提にする一次判断。
 
 ## 検証ログ
 
@@ -25,6 +25,7 @@ P0-9までの主要リスクのうち、Codex App Server stdio接続、SQLite保
 | P0-7 sidecar検証              | 完了     | Tauri sidecar配置方式、macOS / Windows候補名、frontend shell権限、署名・更新・version追従課題を記録。現在のCodex CLIはNode scriptのため、Phase 0 / MVP-1初期は外部CLI前提。Windows実機確認はP0-12。 |
 | P0-8 React Flow画像化         | 完了     | React Flowのサンプルマップ、custom node / edge、PNG出力を実装。Playwrightで`2188x840px`のPNG出力を確認。 |
 | P0-9 Typst日本語PDF           | 完了     | `typst 0.14.2`で日本語本文、表、React Flow画像を含む2ページPDFを生成。macOSでは`BIZ UDGothic`で文字化けなし。Windowsフォント実機確認はP0-12。 |
+| P0-10 AI出力schema検証        | 完了     | `AiAnalysisOutput`のJSON SchemaをCodex App Server `outputSchema`へ渡し、`phase0.v1`応答を確認。serde検証後だけ`ai_runs`へrequest summary / response JSON pathを保存。 |
 
 ## 検証コマンド
 
@@ -50,6 +51,8 @@ P0-9までの主要リスクのうち、Codex App Server stdio接続、SQLite保
 - `brew install typst`: `typst 0.14.2`を導入。
 - `typst compile reports/phase-0/phase-0-report.typ reports/phase-0/phase-0-report.pdf`: 成功。
 - `typst compile --format png --ppi 144 reports/phase-0/phase-0-report.typ /tmp/phase-0-report-{n}.png`: 2ページをPNG化し、日本語本文とマップ画像を目視確認。
+- Node probe: `codex app-server --listen stdio://`へ`AiAnalysisOutput` JSON Schema付きturnを送り、`turn/completed`、`schemaVersion: phase0.v1`、opportunity 2件を確認。
+- `cargo test`: `save_ai_run_records_paths_without_full_prompt`と`invalid_schema_output_is_rejected_before_save`を追加し、request summaryが全文promptを含まないこと、schema不一致時に`ai_runs`が増えないことを確認。
 
 ## Go条件
 
@@ -63,4 +66,4 @@ P0-9までの主要リスクのうち、Codex App Server stdio接続、SQLite保
 
 ## 次の実装対象
 
-P0-10 AI出力schema検証、P0-11 情報管理・ログ方針、P0-12 macOS / Windows確認を優先する。
+P0-11 情報管理・ログ方針、P0-12 macOS / Windows確認を優先する。

@@ -70,6 +70,17 @@ pub struct CodexRuntimeInfo {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexStructuredOutputResult {
+    pub ok: bool,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub assistant_text: String,
+    pub response_json: Option<Value>,
+    pub errors: Vec<String>,
+}
+
 enum WireMessage {
     Json(Value),
     ParseError(String),
@@ -382,6 +393,141 @@ pub fn run_smoke_test(app: AppHandle, cwd: &str) -> CodexSmokeResult {
         assistant_text,
         events,
         stderr,
+        errors,
+    }
+}
+
+pub fn run_structured_output_turn(
+    app: AppHandle,
+    cwd: &str,
+    prompt: &str,
+    output_schema: Value,
+) -> CodexStructuredOutputResult {
+    let mut events = Vec::new();
+    let mut assistant_text = String::new();
+    let mut errors = Vec::new();
+    let mut thread_id = None;
+    let mut turn_id = None;
+
+    let mut process = match CodexProcess::spawn() {
+        Ok(process) => process,
+        Err(error) => {
+            return CodexStructuredOutputResult {
+                ok: false,
+                thread_id,
+                turn_id,
+                assistant_text,
+                response_json: None,
+                errors: vec![error],
+            };
+        }
+    };
+
+    let result = (|| -> Result<Value, String> {
+        process.request(
+            "initialize",
+            json!({
+                "clientInfo": {
+                    "name": "synergy-map-phase0",
+                    "title": "Synergy Map Phase 0",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+                "capabilities": {
+                    "experimentalApi": true,
+                },
+            }),
+            REQUEST_TIMEOUT,
+            &app,
+            &mut events,
+            &mut assistant_text,
+        )?;
+        process.notification("initialized")?;
+
+        let thread = process.request(
+            "thread/start",
+            json!({
+                "cwd": cwd,
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
+                "ephemeral": true,
+                "experimentalRawEvents": false,
+                "persistExtendedHistory": false,
+            }),
+            REQUEST_TIMEOUT,
+            &app,
+            &mut events,
+            &mut assistant_text,
+        )?;
+        thread_id = thread
+            .get("thread")
+            .and_then(|thread| thread.get("id"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let thread_id_ref = thread_id
+            .as_deref()
+            .ok_or_else(|| "thread/start response did not include thread.id.".to_string())?;
+
+        let turn = process.request(
+            "turn/start",
+            json!({
+                "threadId": thread_id_ref,
+                "input": [{
+                    "type": "text",
+                    "text": prompt,
+                    "text_elements": [],
+                }],
+                "approvalPolicy": "never",
+                "sandboxPolicy": {
+                    "type": "readOnly",
+                    "networkAccess": false,
+                },
+                "outputSchema": output_schema,
+            }),
+            REQUEST_TIMEOUT,
+            &app,
+            &mut events,
+            &mut assistant_text,
+        )?;
+        turn_id = turn
+            .get("turn")
+            .and_then(|turn| turn.get("id"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+
+        let turn_completed = process.wait_for_notification(
+            "turn/completed",
+            TURN_TIMEOUT,
+            &app,
+            &mut events,
+            &mut assistant_text,
+        )?;
+        let turn_status = turn_completed
+            .get("turn")
+            .and_then(|turn| turn.get("status"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        if turn_status != "completed" {
+            return Err(format!("turn/completed returned status {turn_status}."));
+        }
+
+        serde_json::from_str::<Value>(assistant_text.trim())
+            .map_err(|error| format!("Structured assistant message was not valid JSON: {error}"))
+    })();
+
+    let response_json = match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            errors.push(error);
+            None
+        }
+    };
+
+    CodexStructuredOutputResult {
+        ok: errors.is_empty() && response_json.is_some(),
+        thread_id,
+        turn_id,
+        assistant_text,
+        response_json,
         errors,
     }
 }
