@@ -1,24 +1,33 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tauri::{Manager, State};
+use tauri::{DragDropEvent, Manager, State, WindowEvent};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 mod ai_schema;
 mod codex_app_server;
+mod mvp1;
 mod source_reader;
 
 use ai_schema::{ai_analysis_json_schema, validate_ai_analysis_json, SCHEMA_VERSION};
 use codex_app_server::{CodexRuntimeInfo, CodexSmokeResult, DeviceCodeLoginResult};
 use source_reader::{read_source_file, ReadSourceDraft};
 
-struct DbState {
+pub(crate) struct DbState {
     db_path: PathBuf,
+}
+
+#[derive(Default)]
+struct DropImportState {
+    pending_paths: Mutex<HashMap<PathBuf, Instant>>,
 }
 
 #[derive(Serialize)]
@@ -29,6 +38,7 @@ struct Project {
     client_name: Option<String>,
     industry: Option<String>,
     description: Option<String>,
+    memo: Option<String>,
     created_at: String,
     updated_at: String,
     archived_at: Option<String>,
@@ -92,11 +102,18 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial",
-    sql: include_str!("../migrations/0001_initial.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial",
+        sql: include_str!("../migrations/0001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "mvp1",
+        sql: include_str!("../migrations/0002_mvp1.sql"),
+    },
+];
 
 const LEGACY_INITIAL_MIGRATION_CHECKSUM: &str = "0001_initial_v1";
 
@@ -117,6 +134,7 @@ const AI_RUN_TYPE: &str = "phase0_schema_poc";
 const AI_RUN_MODEL: &str = "codex-app-server";
 const AI_REQUEST_SUMMARY: &str =
     "Phase 0 sample map analysis request. Full source chunks are not included.";
+const DROP_IMPORT_TTL: Duration = Duration::from_secs(20);
 
 fn now_rfc3339() -> Result<String, String> {
     OffsetDateTime::now_utc()
@@ -126,6 +144,17 @@ fn now_rfc3339() -> Result<String, String> {
 
 fn hash_text(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
+}
+
+fn empty_to_none(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
 }
 
 fn migration_checksum(migration: &Migration) -> String {
@@ -284,6 +313,7 @@ fn row_to_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         client_name: row.get("client_name")?,
         industry: row.get("industry")?,
         description: row.get("description")?,
+        memo: row.get("memo")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         archived_at: row.get("archived_at")?,
@@ -293,7 +323,7 @@ fn row_to_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
 fn get_project_by_id(connection: &Connection, id: &str) -> Result<Project, String> {
     connection
         .query_row(
-            "SELECT id, name, client_name, industry, description, created_at, updated_at, archived_at
+            "SELECT id, name, client_name, industry, description, memo, created_at, updated_at, archived_at
              FROM projects
              WHERE id = ?1",
             [id],
@@ -308,6 +338,79 @@ fn project_dir(app_data_dir: &Path, project_id: &str) -> PathBuf {
 
 fn source_chunks_dir(app_data_dir: &Path, project_id: &str) -> PathBuf {
     project_dir(app_data_dir, project_id).join("extracted")
+}
+
+fn source_files_dir(app_data_dir: &Path, project_id: &str) -> PathBuf {
+    project_dir(app_data_dir, project_id).join("sources")
+}
+
+fn file_hash(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    Ok(hex::encode(Sha256::digest(&bytes)))
+}
+
+fn sanitized_file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("source")
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            value => value,
+        })
+        .collect()
+}
+
+fn is_supported_source_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "pdf" | "csv" | "xlsx" | "xls" | "ods" | "md" | "markdown" | "txt" | "text"
+    )
+}
+
+fn canonical_import_path(path: &Path) -> Result<PathBuf, String> {
+    fs::canonicalize(path).map_err(|error| error.to_string())
+}
+
+fn register_dropped_paths(drop_state: &DropImportState, paths: &[PathBuf]) {
+    let Ok(mut pending_paths) = drop_state.pending_paths.lock() else {
+        return;
+    };
+    let now = Instant::now();
+
+    for path in paths {
+        if let Ok(canonical_path) = canonical_import_path(path) {
+            pending_paths.insert(canonical_path, now);
+        }
+    }
+}
+
+fn consume_dropped_paths(
+    drop_state: &DropImportState,
+    paths: &[String],
+) -> Result<Vec<PathBuf>, String> {
+    let mut pending_paths = drop_state
+        .pending_paths
+        .lock()
+        .map_err(|_| "Drop import state is unavailable.".to_string())?;
+    let mut canonical_paths = Vec::with_capacity(paths.len());
+    let now = Instant::now();
+
+    pending_paths.retain(|_, registered_at| now.duration_since(*registered_at) <= DROP_IMPORT_TTL);
+
+    for path in paths {
+        let canonical_path = canonical_import_path(Path::new(path))?;
+        if pending_paths.remove(&canonical_path).is_none() {
+            return Err("Files must be imported from the current drag-and-drop event.".to_string());
+        }
+        canonical_paths.push(canonical_path);
+    }
+
+    Ok(canonical_paths)
 }
 
 fn source_chunk_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceChunk> {
@@ -331,7 +434,14 @@ fn source_chunk_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceChun
 }
 
 #[tauri::command]
-fn create_project(state: State<'_, DbState>, name: String) -> Result<Project, String> {
+fn create_project(
+    state: State<'_, DbState>,
+    name: String,
+    client_name: Option<String>,
+    industry: Option<String>,
+    description: Option<String>,
+    memo: Option<String>,
+) -> Result<Project, String> {
     let trimmed_name = name.trim();
 
     if trimmed_name.is_empty() {
@@ -344,8 +454,19 @@ fn create_project(state: State<'_, DbState>, name: String) -> Result<Project, St
 
     connection
         .execute(
-            "INSERT INTO projects (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-            params![id, trimmed_name, now, now],
+            "INSERT INTO projects (
+                id, name, client_name, industry, description, memo, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                trimmed_name,
+                empty_to_none(client_name),
+                empty_to_none(industry),
+                empty_to_none(description),
+                empty_to_none(memo),
+                now,
+                now
+            ],
         )
         .map_err(|error| error.to_string())?;
 
@@ -357,7 +478,7 @@ fn list_projects(state: State<'_, DbState>) -> Result<Vec<Project>, String> {
     let connection = open_connection(&state.db_path)?;
     let mut statement = connection
         .prepare(
-            "SELECT id, name, client_name, industry, description, created_at, updated_at, archived_at
+            "SELECT id, name, client_name, industry, description, memo, created_at, updated_at, archived_at
              FROM projects
              WHERE archived_at IS NULL
              ORDER BY updated_at DESC",
@@ -399,6 +520,29 @@ fn import_sample_source(
         .join(sample_file_name);
 
     import_source_path(&state.db_path, app_data_dir, &project_id, &sample_path)
+}
+
+#[tauri::command]
+fn import_source_files(
+    state: State<'_, DbState>,
+    drop_state: State<'_, DropImportState>,
+    project_id: String,
+    paths: Vec<String>,
+) -> Result<Vec<ImportSourceResult>, String> {
+    let app_data_dir = app_data_dir_from_db(&state.db_path)?;
+
+    if paths.is_empty() {
+        return Err("Import paths are required.".to_string());
+    }
+
+    let source_paths = consume_dropped_paths(&drop_state, &paths)?;
+
+    source_paths
+        .iter()
+        .map(|source_path| {
+            import_source_path(&state.db_path, app_data_dir, &project_id, source_path)
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -493,9 +637,27 @@ fn import_source_path(
     let mut connection = open_connection(db_path)?;
 
     get_project_by_id(&connection, project_id)?;
+    if !source_path.is_file() {
+        return Err(format!(
+            "Source file was not found: {}",
+            source_path.display()
+        ));
+    }
+    if !is_supported_source_path(source_path) {
+        return Err(
+            "Unsupported source file type. PDF, CSV, XLSX, Markdown, Textのみ対応します。"
+                .to_string(),
+        );
+    }
 
-    let draft = read_source_file(source_path);
     let source_file_id = Uuid::new_v4().to_string();
+    let copied_file_dir = source_files_dir(app_data_dir, project_id).join(&source_file_id);
+    fs::create_dir_all(&copied_file_dir).map_err(|error| error.to_string())?;
+    let copied_source_path = copied_file_dir.join(sanitized_file_name(source_path));
+    fs::copy(source_path, &copied_source_path).map_err(|error| error.to_string())?;
+    let source_hash = file_hash(&copied_source_path)?;
+
+    let draft = read_source_file(&copied_source_path);
     let now = now_rfc3339()?;
     let file_name = draft.file_name.clone();
     let file_type = draft.file_type.clone();
@@ -512,14 +674,15 @@ fn import_source_path(
         transaction
             .execute(
                 "INSERT INTO source_files (
-                    id, project_id, file_name, file_type, local_path, status, metadata_json, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    id, project_id, file_name, file_type, local_path, file_hash, status, metadata_json, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     source_file_id,
                     project_id,
                     file_name,
                     file_type,
-                    source_path.display().to_string(),
+                    copied_source_path.display().to_string(),
+                    source_hash,
                     status,
                     serde_json::json!({ "error": error }).to_string(),
                     now,
@@ -552,6 +715,7 @@ fn import_source_path(
 
     if result.is_err() {
         let _ = fs::remove_dir_all(&chunks_dir);
+        let _ = fs::remove_dir_all(&copied_file_dir);
     }
 
     result
@@ -736,12 +900,19 @@ fn insert_source_chunks(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .on_window_event(|window, event| {
+            if let WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
+                let drop_state = window.state::<DropImportState>();
+                register_dropped_paths(&drop_state, paths);
+            }
+        })
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             let db_path = app_data_dir.join("synergy-map.db");
 
             init_database(&db_path).map_err(Box::<dyn std::error::Error>::from)?;
             app.manage(DbState { db_path });
+            app.manage(DropImportState::default());
 
             Ok(())
         })
@@ -750,11 +921,25 @@ pub fn run() {
             list_projects,
             get_storage_info,
             import_sample_source,
+            import_source_files,
             list_source_chunks,
             run_codex_smoke_test,
             run_codex_device_code_check,
             get_codex_runtime_info,
-            run_ai_schema_poc
+            run_ai_schema_poc,
+            mvp1::get_project_workspace,
+            mvp1::update_project,
+            mvp1::delete_project,
+            mvp1::run_extract_items,
+            mvp1::create_extracted_item,
+            mvp1::update_extracted_item,
+            mvp1::generate_map_from_items,
+            mvp1::update_map_node,
+            mvp1::update_map_edge,
+            mvp1::save_map_layout,
+            mvp1::generate_suggestions_from_map,
+            mvp1::export_markdown,
+            mvp1::export_csv_bundle
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -776,7 +961,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
             .expect("migration count should be readable");
 
-        assert_eq!(migration_count, 1);
+        assert_eq!(migration_count, MIGRATIONS.len() as i64);
 
         let _ = fs::remove_file(db_path);
     }
@@ -924,7 +1109,7 @@ mod tests {
 
         let mut statement = connection
             .prepare(
-                "SELECT id, name, client_name, industry, description, created_at, updated_at, archived_at
+                "SELECT id, name, client_name, industry, description, memo, created_at, updated_at, archived_at
                  FROM projects
                  WHERE archived_at IS NULL
                  ORDER BY updated_at DESC",
@@ -985,6 +1170,10 @@ mod tests {
         let response_json = serde_json::json!({
             "schemaVersion": SCHEMA_VERSION,
             "summary": "ECと店舗接点の連携余地がある。",
+            "strongFlows": ["ECから継続購入"],
+            "bottlenecks": ["初回商談後の接点"],
+            "unconnectedSynergies": ["顧客台帳とEC"],
+            "questions": ["継続率を確認できますか？"],
             "opportunities": [{
                 "title": "会員連携",
                 "rationale": "店舗とECの購買履歴を統合できる。",
@@ -1037,6 +1226,10 @@ mod tests {
         let invalid_response = serde_json::json!({
             "schemaVersion": "phase0.old",
             "summary": "summary",
+            "strongFlows": [],
+            "bottlenecks": [],
+            "unconnectedSynergies": [],
+            "questions": [],
             "opportunities": [{
                 "title": "title",
                 "rationale": "why",
