@@ -97,6 +97,16 @@ pnpm tauri dev
 pnpm build
 pnpm lint
 pnpm format:check
+(cd src-tauri && cargo test)
 ```
 
 Phase 0の現時点では、`pnpm tauri dev`でSynergy Mapのデスクトップウィンドウが起動し、React画面に案件一覧プレースホルダーが表示される。
+
+## Local Data
+
+Phase 0のSQLite DBはTauriのapp data directoryに保存する。
+
+- macOS確認済み: `/Users/ryukouokumura/Library/Application Support/com.synergymap.app/synergy-map.db`
+- Windows想定: `%APPDATA%\\com.synergymap.app\\synergy-map.db`
+
+frontendにはfilesystem権限を渡さず、DB操作はTauri command経由に限定する。

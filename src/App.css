@@ -85,6 +85,15 @@ a {
   font-weight: 600;
 }
 
+.error-banner {
+  border: 1px solid #e4b8b8;
+  border-radius: 0.5rem;
+  background: #fff4f2;
+  color: #8f3128;
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+}
+
 button {
   cursor: pointer;
 }
