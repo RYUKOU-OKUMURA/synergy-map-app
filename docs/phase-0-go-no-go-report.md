@@ -10,7 +10,7 @@
 
 未判定。
 
-P0-7までの主要リスクのうち、Codex App Server stdio接続、SQLite保存、資料読み取りはmacOS PoCで検証済み。device-code flowはURL/code発行とキャンセルまで確認済みだが、実ログイン完了通知は未確認。sidecar同梱は調査済みで、Phase 0 / MVP-1初期は外部CLI前提にする一次判断。React Flow画像化、Typst日本語PDFは未検証。
+P0-8までの主要リスクのうち、Codex App Server stdio接続、SQLite保存、資料読み取り、React Flow画像化はmacOS PoCで検証済み。device-code flowはURL/code発行とキャンセルまで確認済みだが、実ログイン完了通知は未確認。sidecar同梱は調査済みで、Phase 0 / MVP-1初期は外部CLI前提にする一次判断。Typst日本語PDFは未検証。
 
 ## 検証ログ
 
@@ -23,6 +23,7 @@ P0-7までの主要リスクのうち、Codex App Server stdio接続、SQLite保
 | P0-5 Codex stdio接続          | 完了     | Rustから`codex app-server --listen stdio://`を起動し、JSONLで`initialize` / `account/read` / `thread/start` / `turn/start`を実行。UIへstreaming eventを表示。 |
 | P0-6 device-code flow         | 部分完了 | `account/login/start`の`chatgptDeviceCode`で`verificationUrl` / `userCode`を取得し、Tauri eventでログイン待機中にUIへ流す実装を追加。キャンセルは確認済み。認証完了通知の実受信は未確認。 |
 | P0-7 sidecar検証              | 完了     | Tauri sidecar配置方式、macOS / Windows候補名、frontend shell権限、署名・更新・version追従課題を記録。現在のCodex CLIはNode scriptのため、Phase 0 / MVP-1初期は外部CLI前提。Windows実機確認はP0-12。 |
+| P0-8 React Flow画像化         | 完了     | React Flowのサンプルマップ、custom node / edge、PNG出力を実装。Playwrightで`2188x840px`のPNG出力を確認。 |
 
 ## 検証コマンド
 
@@ -43,6 +44,8 @@ P0-7までの主要リスクのうち、Codex App Server stdio接続、SQLite保
 - `which codex`: `/Users/ryukouokumura/.nvm/versions/node/v24.13.0/bin/codex`
 - `codex --version`: `codex-cli 0.130.0`
 - `@openai/codex` package確認: version `0.130.0`、license `Apache-2.0`、bin `bin/codex.js`、node engine `>=16`
+- Playwright `http://localhost:1420/`: React Flowマップが非blankで表示され、5ノードの位置とテキストを確認。
+- Playwright UI操作: `PNG出力`で`phase-0-synergy-map.png`を生成。画像サイズは`2188x840px`、成果物は`reports/phase-0/phase-0-synergy-map.png`。
 
 ## Go条件
 
@@ -51,9 +54,9 @@ P0-7までの主要リスクのうち、Codex App Server stdio接続、SQLite保
 | Codex App ServerをTauri backendからstdioで安定起動できる      | 暫定Go | macOS PoCではstdio起動、JSONL request/notification、stream event、timeout/error処理、turn完了まで確認。長時間常駐・再利用はMVP-1で設計が必要。                             |
 | ChatGPT device-code flowがWindowsユーザーに説明できるUXになる | 条件付き | URL/code発行とキャンセルは確認。待機中のURL/code表示は実装済み。実ログイン完了通知、Windowsブラウザ導線、非エンジニア向け説明文はP0-6/P0-12残タスク。                                                   |
 | PDF / Excelの読み取り品質が実務最低ラインを超える             | 暫定Go | 合成サンプルではテキストPDF、表PDF、結合セルありExcel、複数シートExcelを読み取り可能。ただしExcelの結合セル範囲・セル番地・ヘッダー対応保持と実資料品質は追加検証が必要。 |
-| React FlowのマップをPDFに埋め込める品質で画像化できる         | 未検証 | P0-8 / P0-9で検証する。                                                                                                                                                   |
+| React FlowのマップをPDFに埋め込める品質で画像化できる         | 暫定Go | React Flowサンプルマップを固定export surfaceから`2188x840px` PNGとして出力。背景色と余白込みでA4横向きPDFへの埋め込み検証に進める品質。最終判定はP0-9の実PDF埋め込み後。 |
 | Codex App Serverを製品配布時にsidecar同梱できる見込みがある   | 条件付き | Tauri sidecar機構は利用可能。ただし現在のCodex CLIはNode scriptのため、単一sidecar binaryとしての同梱は未成立。Phase 0 / MVP-1初期は外部CLI前提で進める。                 |
 
 ## 次の実装対象
 
-P0-7 Codex App Server sidecar検証、P0-8 React Flowマップ画像化、P0-9 Typst日本語PDFを優先する。
+P0-9 Typst日本語PDF、P0-10 AI出力schema検証を優先する。

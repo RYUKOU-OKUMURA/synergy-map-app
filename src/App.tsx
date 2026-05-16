@@ -1,19 +1,23 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { toPng } from "html-to-image";
 import {
   CheckCircle2,
   Database,
+  Download,
   FileText,
   FolderKanban,
+  Network,
   Upload,
   Plus,
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import "./App.css";
 import { Button } from "@/components/ui/button";
+import { SynergyMapFlow } from "@/components/SynergyMapFlow";
 
 const gateItems = [
   {
@@ -157,6 +161,14 @@ function App() {
     verificationUrl: string | null;
     userCode: string | null;
   }>({ verificationUrl: null, userCode: null });
+  const [isExportingMap, setIsExportingMap] = useState(false);
+  const [mapExportInfo, setMapExportInfo] = useState<{
+    fileName: string;
+    width: number;
+    height: number;
+    bytes: number;
+  } | null>(null);
+  const flowExportRef = useRef<HTMLDivElement | null>(null);
 
   async function loadProjects() {
     const [projectRows, storage] = await Promise.all([
@@ -248,6 +260,45 @@ function App() {
     }
   }
 
+  async function handleExportMapImage() {
+    const exportElement = flowExportRef.current;
+
+    if (!exportElement) {
+      setError("マップの描画対象が見つかりません。");
+      return;
+    }
+
+    setIsExportingMap(true);
+    setError(null);
+
+    try {
+      const pixelRatio = 2;
+      const dataUrl = await toPng(exportElement, {
+        backgroundColor: "#f8faf6",
+        cacheBust: true,
+        pixelRatio,
+      });
+      const link = document.createElement("a");
+      const fileName = "phase-0-synergy-map.png";
+
+      link.href = dataUrl;
+      link.download = fileName;
+      link.click();
+
+      const base64 = dataUrl.split(",")[1] ?? "";
+      setMapExportInfo({
+        fileName,
+        width: Math.round(exportElement.offsetWidth * pixelRatio),
+        height: Math.round(exportElement.offsetHeight * pixelRatio),
+        bytes: Math.round((base64.length * 3) / 4),
+      });
+    } catch (caughtError) {
+      setError(String(caughtError));
+    } finally {
+      setIsExportingMap(false);
+    }
+  }
+
   useEffect(() => {
     let isMounted = true;
 
@@ -333,6 +384,10 @@ function App() {
             <a className="nav-item" href="#codex">
               <Sparkles size={16} aria-hidden="true" />
               Codex接続
+            </a>
+            <a className="nav-item" href="#map">
+              <Network size={16} aria-hidden="true" />
+              マップ出力
             </a>
           </nav>
         </aside>
@@ -643,6 +698,43 @@ function App() {
                 検証ボタンを実行するとJSONL通信イベントがここに流れます。
               </div>
             )}
+          </div>
+
+          <div
+            className="mt-6 overflow-hidden rounded-md border border-[var(--app-border)] bg-white"
+            id="map"
+          >
+            <div className="flex items-center justify-between gap-4 border-b border-[var(--app-border)] bg-[var(--app-surface)] px-4 py-3">
+              <div>
+                <div className="text-xs font-semibold text-[var(--app-muted)]">
+                  React Flow
+                </div>
+                <div className="mt-1 text-sm font-medium">PDF埋め込み用マップ画像</div>
+              </div>
+              <Button
+                disabled={isExportingMap}
+                onClick={handleExportMapImage}
+                type="button"
+              >
+                <Download size={16} aria-hidden="true" />
+                {isExportingMap ? "出力中" : "PNG出力"}
+              </Button>
+            </div>
+            <div className="p-4">
+              <div ref={flowExportRef}>
+                <SynergyMapFlow />
+              </div>
+              <div className="mt-3 grid grid-cols-[120px_1fr] gap-y-2 text-xs text-[var(--app-muted)]">
+                <div>出力</div>
+                <div>
+                  {mapExportInfo
+                    ? `${mapExportInfo.fileName} / ${mapExportInfo.width}x${mapExportInfo.height}px / ${mapExportInfo.bytes.toLocaleString("ja-JP")} bytes`
+                    : "未出力"}
+                </div>
+                <div>品質条件</div>
+                <div>2x pixel ratio、背景色固定、余白込みのA4横向き埋め込み想定</div>
+              </div>
+            </div>
           </div>
         </section>
       </div>

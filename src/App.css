@@ -106,6 +106,125 @@ a {
   font-size: 0.875rem;
 }
 
+.flow-export-surface {
+  width: 1094px;
+  max-width: 100%;
+  height: 420px;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  border-radius: 0.5rem;
+  background: #f8faf6;
+}
+
+.flow-export-header {
+  display: flex;
+  height: 72px;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--app-border);
+  padding: 0 1.25rem;
+}
+
+.flow-export-kicker {
+  color: var(--app-muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.flow-export-title {
+  margin-top: 0.125rem;
+  color: var(--app-fg);
+  font-size: 1.125rem;
+  font-weight: 700;
+}
+
+.flow-export-meta {
+  color: var(--app-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.flow-canvas {
+  width: 100%;
+  height: 348px;
+}
+
+.flow-node {
+  display: grid;
+  width: 216px;
+  min-height: 78px;
+  grid-template-columns: 40px 1fr;
+  align-items: center;
+  gap: 0.75rem;
+  border: 1px solid #cfd8ce;
+  border-radius: 0.5rem;
+  background: #ffffff;
+  box-shadow: 0 10px 24px rgb(37 54 40 / 8%);
+  color: var(--app-fg);
+  padding: 0.875rem;
+}
+
+.flow-node-customer {
+  border-left: 5px solid #2f6f4e;
+}
+
+.flow-node-channel {
+  border-left: 5px solid #386d7c;
+}
+
+.flow-node-company {
+  border-left: 5px solid #756b3a;
+}
+
+.flow-node-revenue {
+  border-left: 5px solid #8b4b3b;
+}
+
+.flow-node-icon {
+  display: flex;
+  width: 2.5rem;
+  height: 2.5rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.375rem;
+  background: #eef4ee;
+  color: var(--app-accent);
+}
+
+.flow-node-title {
+  font-size: 0.9375rem;
+  font-weight: 700;
+}
+
+.flow-node-subtitle {
+  margin-top: 0.125rem;
+  color: var(--app-muted);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.flow-handle {
+  width: 0.5rem;
+  height: 0.5rem;
+  border: 2px solid #ffffff;
+  background: #2f6f4e;
+}
+
+.flow-edge-label {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  border: 1px solid #d4ded1;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #415247;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  padding: 0.25rem 0.5rem;
+  pointer-events: all;
+}
+
 button {
   cursor: pointer;
 }
