@@ -68,7 +68,7 @@ Phase 0では、MVP-1へ進む前の技術検証としてTauriデスクトップ
 | rustc     | `rustc 1.90.0 (1159e78c4 2025-09-14)`      |
 | Cargo     | `cargo 1.90.0 (840b83a10 2025-07-30)`      |
 | Codex CLI | `codex-cli 0.130.0`                        |
-| Typst CLI | 未インストール: `typst: command not found` |
+| Typst CLI | `typst 0.14.2`                            |
 
 ### macOS Prerequisites
 
