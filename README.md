@@ -49,7 +49,54 @@ Obsidian Vault の構想メモは背景資料として扱う。
 
 ```text
 synergy-map-app/
-├── docs/      # 要件、画面設計、技術メモ
-├── samples/   # サンプル入力資料、生成例
-└── src/       # 実装コード
+├── docs/       # 要件、画面設計、技術メモ
+├── samples/    # サンプル入力資料、生成例
+├── src/        # React frontend
+└── src-tauri/  # Tauri / Rust backend
 ```
+
+## Development Environment
+
+Phase 0では、MVP-1へ進む前の技術検証としてTauriデスクトップPoCを起動する。
+
+確認日: 2026-05-16
+
+| Tool      | Result                                     |
+| --------- | ------------------------------------------ |
+| Node.js   | `v24.13.0`                                 |
+| pnpm      | `10.30.1`                                  |
+| rustc     | `rustc 1.90.0 (1159e78c4 2025-09-14)`      |
+| Cargo     | `cargo 1.90.0 (840b83a10 2025-07-30)`      |
+| Codex CLI | `codex-cli 0.130.0`                        |
+| Typst CLI | 未インストール: `typst: command not found` |
+
+### macOS Prerequisites
+
+Tauri v2公式Prerequisitesでは、macOS desktop開発にXcodeまたはXcode Command Line Toolsが必要とされている。
+
+この環境では`pnpm tauri dev`が起動済みのため、Phase 0のP0-2に必要なmacOS側のTauri前提は満たしている。
+
+Reference: [Tauri v2 Prerequisites](https://v2.tauri.app/start/prerequisites/)
+
+### Windows Prerequisites
+
+WindowsでPhase 0を検証する前に、以下を確認する。
+
+- Microsoft C++ Build Toolsを入れ、`Desktop development with C++`を有効にする。
+- Microsoft Edge WebView2 Runtimeを確認する。Windows 10 version 1803以降では通常インストール済み。
+- RustはMSVC toolchainを使う。必要に応じて`rustup default stable-msvc`を実行する。
+- MSI installerを作る場合は、VBSCRIPT optional featureの有効状態を確認する。
+- Node.jsとpnpmを利用できる状態にする。
+
+## Local Commands
+
+```bash
+pnpm install
+pnpm dev
+pnpm tauri dev
+pnpm build
+pnpm lint
+pnpm format:check
+```
+
+Phase 0の現時点では、`pnpm tauri dev`でSynergy Mapのデスクトップウィンドウが起動し、React画面に案件一覧プレースホルダーが表示される。
