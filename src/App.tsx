@@ -4,6 +4,7 @@ import {
   Database,
   FileText,
   FolderKanban,
+  Upload,
   Plus,
   ShieldCheck,
   Sparkles,
@@ -52,11 +53,46 @@ type StorageInfo = {
   appDataDir: string;
 };
 
+type SourceChunk = {
+  id: string;
+  chunkIndex: number;
+  contentPath: string;
+  pageNumber: number | null;
+  sheetName: string | null;
+  rowStart: number | null;
+  rowEnd: number | null;
+  headingPath: string | null;
+};
+
+type ImportSourceResult = {
+  sourceFileId: string;
+  fileName: string;
+  fileType: string;
+  status: string;
+  error: string | null;
+  chunkCount: number;
+  chunks: SourceChunk[];
+};
+
+const sampleFiles = [
+  "company-overview.pdf",
+  "financial-summary.pdf",
+  "table-layout.pdf",
+  "scanned-placeholder.pdf",
+  "sample-workbook.xlsx",
+  "channels-utf8.csv",
+  "channels-shift-jis.csv",
+  "hearing-memo.md",
+  "long-hearing-note.txt",
+];
+
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
+  const [importResults, setImportResults] = useState<ImportSourceResult[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
 
   async function loadProjects() {
     const [projectRows, storage] = await Promise.all([
@@ -81,6 +117,36 @@ function App() {
       setError(String(caughtError));
     } finally {
       setIsCreating(false);
+    }
+  }
+
+  async function handleImportSamples() {
+    const project = projects[0];
+
+    if (!project) {
+      setError("先に新規案件を作成してください。");
+      return;
+    }
+
+    setIsImporting(true);
+    setError(null);
+
+    try {
+      const results = [];
+
+      for (const sampleFileName of sampleFiles) {
+        const result = await invoke<ImportSourceResult>("import_sample_source", {
+          projectId: project.id,
+          sampleFileName,
+        });
+        results.push(result);
+      }
+
+      setImportResults(results);
+    } catch (caughtError) {
+      setError(String(caughtError));
+    } finally {
+      setIsImporting(false);
     }
   }
 
@@ -160,6 +226,15 @@ function App() {
               <Plus size={16} aria-hidden="true" />
               {isCreating ? "作成中" : "新規案件"}
             </Button>
+            <Button
+              disabled={isImporting || projects.length === 0}
+              onClick={handleImportSamples}
+              type="button"
+              variant="outline"
+            >
+              <Upload size={16} aria-hidden="true" />
+              {isImporting ? "読取中" : "サンプル読取"}
+            </Button>
           </header>
 
           <div className="mt-6 grid grid-cols-4 gap-3">
@@ -221,6 +296,61 @@ function App() {
 
           <div className="mt-4 text-xs leading-5 text-[var(--app-muted)]">
             SQLite DB: {storageInfo?.dbPath ?? "確認中"}
+          </div>
+
+          <div
+            className="mt-6 overflow-hidden rounded-md border border-[var(--app-border)] bg-white"
+            id="sources"
+          >
+            <div className="grid grid-cols-[1fr_120px_120px_1fr] border-b border-[var(--app-border)] bg-[var(--app-surface)] px-4 py-3 text-xs font-semibold text-[var(--app-muted)]">
+              <div>資料</div>
+              <div>状態</div>
+              <div>Chunks</div>
+              <div>出典例</div>
+            </div>
+            {importResults.length > 0 ? (
+              importResults.map((result) => {
+                const firstChunk = result.chunks[0];
+                const sourceLabel =
+                  firstChunk?.pageNumber != null
+                    ? `page ${firstChunk.pageNumber}`
+                    : firstChunk?.sheetName
+                      ? `${firstChunk.sheetName} row ${firstChunk.rowStart}`
+                      : firstChunk?.headingPath
+                        ? firstChunk.headingPath
+                        : firstChunk?.rowStart
+                          ? `row ${firstChunk.rowStart}`
+                          : result.error || "-";
+
+                return (
+                  <div
+                    className="grid grid-cols-[1fr_120px_120px_1fr] items-center border-b border-[var(--app-border)] px-4 py-4 text-sm last:border-b-0"
+                    key={result.sourceFileId}
+                  >
+                    <div className="font-medium">{result.fileName}</div>
+                    <div>
+                      <span
+                        className={
+                          result.status === "read"
+                            ? "status-pill"
+                            : "status-pill status-pill-error"
+                        }
+                      >
+                        {result.status}
+                      </span>
+                    </div>
+                    <div className="text-[var(--app-muted)]">{result.chunkCount}</div>
+                    <div className="truncate text-[var(--app-muted)]">
+                      {sourceLabel}
+                    </div>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="px-4 py-8 text-center text-sm text-[var(--app-muted)]">
+                サンプル読取を実行すると、source chunksと出典情報を確認できます。
+              </div>
+            )}
           </div>
         </section>
       </div>

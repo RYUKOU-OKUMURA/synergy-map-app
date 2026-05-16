@@ -1,0 +1,12 @@
+# Hearing Memo Sample
+
+## Business Overview
+Sample Foods sells regional food products through wholesale, EC, and local events.
+
+## Current Issues
+- EC traffic is increasing, but repeat purchase is low.
+- Wholesale distributors need clearer sales material.
+- Event leads are not followed up within one week.
+
+## Consultant Notes
+Focus first on customer journey gaps between Instagram, EC purchase, and LINE follow-up.

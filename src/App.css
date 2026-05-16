@@ -85,6 +85,12 @@ a {
   font-weight: 600;
 }
 
+.status-pill-error {
+  border-color: #e4b8b8;
+  background: #fff4f2;
+  color: #8f3128;
+}
+
 .error-banner {
   border: 1px solid #e4b8b8;
   border-radius: 0.5rem;
