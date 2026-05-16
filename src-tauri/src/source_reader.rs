@@ -94,28 +94,25 @@ fn detect_file_type(path: &Path) -> String {
 fn read_pdf(path: &Path) -> Result<Vec<SourceChunkDraft>, String> {
     let pages = pdf_extract::extract_text_by_pages(path)
         .map_err(|error| format!("PDF text extraction failed or OCR is unsupported: {error}"))?;
-    let chunks = pages
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, text)| {
-            let content = normalize_text(&text);
+    let mut chunks = Vec::new();
 
-            if is_extractable_text(&content) {
-                Some(SourceChunkDraft::new(index, content).with_pdf_page(index + 1))
-            } else {
-                None
-            }
-        })
-        .collect();
+    for (page_index, text) in pages.into_iter().enumerate() {
+        let content = normalize_text(&text);
+
+        if is_extractable_text(&content) {
+            chunks.push(SourceChunkDraft::new(chunks.len(), content).with_pdf_page(page_index + 1));
+        }
+    }
 
     Ok(chunks)
 }
 
 fn read_csv(path: &Path) -> Result<Vec<SourceChunkDraft>, String> {
     let bytes = fs::read(path).map_err(|error| error.to_string())?;
-    let content = match String::from_utf8(bytes.clone()) {
+    let content = match String::from_utf8(bytes) {
         Ok(value) => value,
-        Err(_) => {
+        Err(error) => {
+            let bytes = error.into_bytes();
             let (decoded, _, _) = SHIFT_JIS.decode(&bytes);
             decoded.into_owned()
         }

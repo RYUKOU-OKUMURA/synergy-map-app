@@ -112,10 +112,29 @@ const PHASE0_SAMPLE_FILES: &[&str] = &[
     "long-hearing-note.txt",
 ];
 
+const AI_SCHEMA_NAME: &str = "AiAnalysisOutput";
+const AI_RUN_TYPE: &str = "phase0_schema_poc";
+const AI_RUN_MODEL: &str = "codex-app-server";
+const AI_REQUEST_SUMMARY: &str =
+    "Phase 0 sample map analysis request. Full source chunks are not included.";
+
 fn now_rfc3339() -> Result<String, String> {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .map_err(|error| error.to_string())
+}
+
+fn workspace_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
+fn app_data_dir_from_db(db_path: &Path) -> Result<&Path, String> {
+    db_path
+        .parent()
+        .ok_or_else(|| "DB path has no parent directory.".to_string())
 }
 
 fn open_connection(db_path: &PathBuf) -> Result<Connection, String> {
@@ -319,10 +338,7 @@ fn list_projects(state: State<'_, DbState>) -> Result<Vec<Project>, String> {
 
 #[tauri::command]
 fn get_storage_info(state: State<'_, DbState>) -> Result<StorageInfo, String> {
-    let app_data_dir = state
-        .db_path
-        .parent()
-        .ok_or_else(|| "DB path has no parent directory.".to_string())?;
+    let app_data_dir = app_data_dir_from_db(&state.db_path)?;
 
     Ok(StorageInfo {
         db_path: state.db_path.display().to_string(),
@@ -336,16 +352,12 @@ fn import_sample_source(
     project_id: String,
     sample_file_name: String,
 ) -> Result<ImportSourceResult, String> {
-    let app_data_dir = state
-        .db_path
-        .parent()
-        .ok_or_else(|| "DB path has no parent directory.".to_string())?;
+    let app_data_dir = app_data_dir_from_db(&state.db_path)?;
     let sample_file_name = PHASE0_SAMPLE_FILES
         .iter()
         .find(|allowed_name| **allowed_name == sample_file_name)
         .ok_or_else(|| "Sample file is not allowed.".to_string())?;
-    let sample_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
+    let sample_path = workspace_dir()
         .join("samples")
         .join("phase-0")
         .join(sample_file_name);
@@ -379,10 +391,7 @@ fn list_source_chunks(
 
 #[tauri::command]
 fn run_codex_smoke_test(app: tauri::AppHandle) -> CodexSmokeResult {
-    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let cwd = workspace_dir();
 
     codex_app_server::run_smoke_test(app, &cwd.display().to_string())
 }
@@ -403,20 +412,14 @@ fn run_ai_schema_poc(
     state: State<'_, DbState>,
     project_id: String,
 ) -> Result<AiSchemaPocResult, String> {
-    let app_data_dir = state
-        .db_path
-        .parent()
-        .ok_or_else(|| "DB path has no parent directory.".to_string())?;
+    let app_data_dir = app_data_dir_from_db(&state.db_path)?;
     let connection = open_connection(&state.db_path)?;
     let project = get_project_by_id(&connection, &project_id)?;
     let prompt = format!(
         "Sample FoodsのPhase 0検証です。既存顧客、店舗接点、EC接点、商品連携、売上効果の関係から、事業機会を日本語で短く分析してください。schemaVersionは必ず{}にしてください。",
         SCHEMA_VERSION
     );
-    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let cwd = workspace_dir();
     let structured = codex_app_server::run_structured_output_turn(
         app,
         &cwd.display().to_string(),
@@ -427,7 +430,7 @@ fn run_ai_schema_poc(
     if let Some(response_json) = structured.response_json.as_ref() {
         match validate_ai_analysis_json(response_json) {
             Ok(output) => {
-                let ai_run_id = save_ai_run(
+                let saved_run = save_ai_run(
                     &state.db_path,
                     app_data_dir,
                     &project.id,
@@ -436,39 +439,12 @@ fn run_ai_schema_poc(
                     response_json,
                 )?;
 
-                Ok(AiSchemaPocResult {
-                    ok: true,
-                    ai_run_id: Some(ai_run_id.0),
-                    schema_name: "AiAnalysisOutput".to_string(),
-                    schema_version: SCHEMA_VERSION.to_string(),
-                    response_summary: Some(output.summary),
-                    request_summary_path: Some(ai_run_id.1),
-                    response_json_path: Some(ai_run_id.2),
-                    errors: Vec::new(),
-                })
+                Ok(ai_schema_poc_success(saved_run, output.summary))
             }
-            Err(error) => Ok(AiSchemaPocResult {
-                ok: false,
-                ai_run_id: None,
-                schema_name: "AiAnalysisOutput".to_string(),
-                schema_version: SCHEMA_VERSION.to_string(),
-                response_summary: None,
-                request_summary_path: None,
-                response_json_path: None,
-                errors: vec![error],
-            }),
+            Err(error) => Ok(ai_schema_poc_failure(vec![error])),
         }
     } else {
-        Ok(AiSchemaPocResult {
-            ok: false,
-            ai_run_id: None,
-            schema_name: "AiAnalysisOutput".to_string(),
-            schema_version: SCHEMA_VERSION.to_string(),
-            response_summary: None,
-            request_summary_path: None,
-            response_json_path: None,
-            errors: structured.errors,
-        })
+        Ok(ai_schema_poc_failure(structured.errors))
     }
 }
 
@@ -493,52 +469,89 @@ fn import_source_path(
 
     fs::create_dir_all(&chunks_dir).map_err(|error| error.to_string())?;
 
-    let transaction = connection
-        .transaction()
-        .map_err(|error| error.to_string())?;
-    transaction
-        .execute(
-            "INSERT INTO source_files (
-                id, project_id, file_name, file_type, local_path, status, metadata_json, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                source_file_id,
-                project_id,
-                file_name,
-                file_type,
-                source_path.display().to_string(),
-                status,
-                serde_json::json!({ "error": error }).to_string(),
-                now,
-                now
-            ],
-        )
-        .map_err(|error| error.to_string())?;
+    let result = (|| -> Result<ImportSourceResult, String> {
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO source_files (
+                    id, project_id, file_name, file_type, local_path, status, metadata_json, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    source_file_id,
+                    project_id,
+                    file_name,
+                    file_type,
+                    source_path.display().to_string(),
+                    status,
+                    serde_json::json!({ "error": error }).to_string(),
+                    now,
+                    now
+                ],
+            )
+            .map_err(|error| error.to_string())?;
 
-    let chunks = insert_source_chunks(
-        &transaction,
-        &chunks_dir,
-        project_id,
-        &source_file_id,
-        &draft,
-        &now,
-    )?;
+        let chunks = insert_source_chunks(
+            &transaction,
+            &chunks_dir,
+            project_id,
+            &source_file_id,
+            &draft,
+            &now,
+        )?;
 
-    transaction.commit().map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
 
-    Ok(ImportSourceResult {
-        source_file_id,
-        file_name: draft.file_name,
-        file_type: draft.file_type,
-        status: draft.status,
-        error: draft.error,
-        chunk_count: chunks.len(),
-        chunks,
-    })
+        Ok(ImportSourceResult {
+            source_file_id,
+            file_name: draft.file_name,
+            file_type: draft.file_type,
+            status: draft.status,
+            error: draft.error,
+            chunk_count: chunks.len(),
+            chunks,
+        })
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&chunks_dir);
+    }
+
+    result
 }
 
 fn ai_runs_dir(app_data_dir: &Path, project_id: &str) -> PathBuf {
     project_dir(app_data_dir, project_id).join("ai-runs")
+}
+
+fn ai_schema_poc_success(
+    saved_run: (String, String, String),
+    response_summary: String,
+) -> AiSchemaPocResult {
+    AiSchemaPocResult {
+        ok: true,
+        ai_run_id: Some(saved_run.0),
+        schema_name: AI_SCHEMA_NAME.to_string(),
+        schema_version: SCHEMA_VERSION.to_string(),
+        response_summary: Some(response_summary),
+        request_summary_path: Some(saved_run.1),
+        response_json_path: Some(saved_run.2),
+        errors: Vec::new(),
+    }
+}
+
+fn ai_schema_poc_failure(errors: Vec<String>) -> AiSchemaPocResult {
+    AiSchemaPocResult {
+        ok: false,
+        ai_run_id: None,
+        schema_name: AI_SCHEMA_NAME.to_string(),
+        schema_version: SCHEMA_VERSION.to_string(),
+        response_summary: None,
+        request_summary_path: None,
+        response_json_path: None,
+        errors,
+    }
 }
 
 fn save_ai_run(
@@ -557,25 +570,32 @@ fn save_ai_run(
     let response_json_path = run_dir.join("response.json");
     let input_hash = hex::encode(Sha256::digest(prompt.as_bytes()));
 
-    fs::create_dir_all(&run_dir).map_err(|error| error.to_string())?;
-    fs::write(
-        &request_summary_path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "summary": "Phase 0 sample map analysis request. Full source chunks are not included.",
-            "inputHash": input_hash,
-            "schemaName": "AiAnalysisOutput",
-            "schemaVersion": SCHEMA_VERSION,
-        }))
-        .map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    fs::write(
-        &response_json_path,
-        serde_json::to_vec_pretty(response_json).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
+    let write_result = (|| -> Result<(), String> {
+        fs::create_dir_all(&run_dir).map_err(|error| error.to_string())?;
+        fs::write(
+            &request_summary_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "summary": AI_REQUEST_SUMMARY,
+                "inputHash": input_hash,
+                "schemaName": AI_SCHEMA_NAME,
+                "schemaVersion": SCHEMA_VERSION,
+            }))
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            &response_json_path,
+            serde_json::to_vec_pretty(response_json).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())
+    })();
 
-    connection
+    if let Err(error) = write_result {
+        let _ = fs::remove_dir_all(&run_dir);
+        return Err(error);
+    }
+
+    let insert_result = connection
         .execute(
             "INSERT INTO ai_runs (
                 id, project_id, codex_thread_id, run_type, schema_name, schema_version,
@@ -586,11 +606,11 @@ fn save_ai_run(
                 id,
                 project_id,
                 codex_thread_id,
-                "phase0_schema_poc",
-                "AiAnalysisOutput",
+                AI_RUN_TYPE,
+                AI_SCHEMA_NAME,
                 SCHEMA_VERSION,
                 input_hash,
-                "codex-app-server",
+                AI_RUN_MODEL,
                 "completed",
                 now,
                 now,
@@ -599,7 +619,12 @@ fn save_ai_run(
                 now
             ],
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string());
+
+    if let Err(error) = insert_result {
+        let _ = fs::remove_dir_all(&run_dir);
+        return Err(error);
+    }
 
     Ok((
         id,
@@ -670,6 +695,33 @@ fn insert_source_chunks(
     }
 
     Ok(chunks)
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .setup(|app| {
+            let app_data_dir = app.path().app_data_dir()?;
+            let db_path = app_data_dir.join("synergy-map.db");
+
+            init_database(&db_path).map_err(Box::<dyn std::error::Error>::from)?;
+            app.manage(DbState { db_path });
+
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            create_project,
+            list_projects,
+            get_storage_info,
+            import_sample_source,
+            list_source_chunks,
+            run_codex_smoke_test,
+            run_codex_device_code_check,
+            get_codex_runtime_info,
+            run_ai_schema_poc
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
 }
 
 #[cfg(test)]
@@ -917,31 +969,4 @@ mod tests {
 
         let _ = fs::remove_file(db_path);
     }
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tauri::Builder::default()
-        .setup(|app| {
-            let app_data_dir = app.path().app_data_dir()?;
-            let db_path = app_data_dir.join("synergy-map.db");
-
-            init_database(&db_path).map_err(Box::<dyn std::error::Error>::from)?;
-            app.manage(DbState { db_path });
-
-            Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
-            create_project,
-            list_projects,
-            get_storage_info,
-            import_sample_source,
-            list_source_chunks,
-            run_codex_smoke_test,
-            run_codex_device_code_check,
-            get_codex_runtime_info,
-            run_ai_schema_poc
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
 }

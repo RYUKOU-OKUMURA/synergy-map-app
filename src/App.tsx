@@ -15,7 +15,7 @@ import {
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import "./App.css";
 import { Button } from "@/components/ui/button";
@@ -152,8 +152,60 @@ const sampleFiles = [
   "long-hearing-note.txt",
 ];
 
+const PROJECT_REQUIRED_MESSAGE = "先に新規案件を作成してください。";
+const CODEX_EVENT_NAME = "codex-app-server-event";
+const MAX_CODEX_EVENTS = 32;
+const MAP_EXPORT = {
+  backgroundColor: "#f8faf6",
+  fileName: "phase-0-synergy-map.png",
+  pixelRatio: 2,
+};
+
+type StatusTone = "success" | "neutral" | "error";
+
+function statusPillClass(tone: StatusTone = "success") {
+  return tone === "success" ? "status-pill" : `status-pill status-pill-${tone}`;
+}
+
+function StatusPill({
+  children,
+  tone = "success",
+}: {
+  children: ReactNode;
+  tone?: StatusTone;
+}) {
+  return <span className={statusPillClass(tone)}>{children}</span>;
+}
+
+function sourceLabelFor(result: ImportSourceResult) {
+  const firstChunk = result.chunks[0];
+
+  if (firstChunk?.pageNumber != null) {
+    return `page ${firstChunk.pageNumber}`;
+  }
+
+  if (firstChunk?.sheetName) {
+    return `${firstChunk.sheetName} row ${firstChunk.rowStart ?? "-"}`;
+  }
+
+  if (firstChunk?.headingPath) {
+    return firstChunk.headingPath;
+  }
+
+  if (firstChunk?.rowStart != null) {
+    return `row ${firstChunk.rowStart}`;
+  }
+
+  return result.error || "-";
+}
+
+function hasTauriRuntime() {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
   const [importResults, setImportResults] = useState<ImportSourceResult[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -187,14 +239,24 @@ function App() {
   );
   const [isAiSendConfirmed, setIsAiSendConfirmed] = useState(false);
   const flowExportRef = useRef<HTMLDivElement | null>(null);
+  const isTauriRuntime = hasTauriRuntime();
 
   async function loadProjects() {
+    if (!isTauriRuntime) {
+      return;
+    }
+
     const [projectRows, storage] = await Promise.all([
       invoke<Project[]>("list_projects"),
       invoke<StorageInfo>("get_storage_info"),
     ]);
 
     setProjects(projectRows);
+    setSelectedProjectId((currentProjectId) =>
+      currentProjectId && projectRows.some((project) => project.id === currentProjectId)
+        ? currentProjectId
+        : (projectRows[0]?.id ?? null),
+    );
     setStorageInfo(storage);
   }
 
@@ -203,9 +265,10 @@ function App() {
     setError(null);
 
     try {
-      await invoke<Project>("create_project", {
+      const project = await invoke<Project>("create_project", {
         name: `Phase 0 検証案件 ${projects.length + 1}`,
       });
+      setSelectedProjectId(project.id);
       await loadProjects();
     } catch (caughtError) {
       setError(String(caughtError));
@@ -215,10 +278,8 @@ function App() {
   }
 
   async function handleImportSamples() {
-    const project = projects[0];
-
-    if (!project) {
-      setError("先に新規案件を作成してください。");
+    if (!activeProject) {
+      setError(PROJECT_REQUIRED_MESSAGE);
       return;
     }
 
@@ -230,7 +291,7 @@ function App() {
 
       for (const sampleFileName of sampleFiles) {
         const result = await invoke<ImportSourceResult>("import_sample_source", {
-          projectId: project.id,
+          projectId: activeProject.id,
           sampleFileName,
         });
         results.push(result);
@@ -290,24 +351,22 @@ function App() {
     setError(null);
 
     try {
-      const pixelRatio = 2;
       const dataUrl = await toPng(exportElement, {
-        backgroundColor: "#f8faf6",
+        backgroundColor: MAP_EXPORT.backgroundColor,
         cacheBust: true,
-        pixelRatio,
+        pixelRatio: MAP_EXPORT.pixelRatio,
       });
       const link = document.createElement("a");
-      const fileName = "phase-0-synergy-map.png";
 
       link.href = dataUrl;
-      link.download = fileName;
+      link.download = MAP_EXPORT.fileName;
       link.click();
 
       const base64 = dataUrl.split(",")[1] ?? "";
       setMapExportInfo({
-        fileName,
-        width: Math.round(exportElement.offsetWidth * pixelRatio),
-        height: Math.round(exportElement.offsetHeight * pixelRatio),
+        fileName: MAP_EXPORT.fileName,
+        width: Math.round(exportElement.offsetWidth * MAP_EXPORT.pixelRatio),
+        height: Math.round(exportElement.offsetHeight * MAP_EXPORT.pixelRatio),
         bytes: Math.round((base64.length * 3) / 4),
       });
     } catch (caughtError) {
@@ -318,10 +377,8 @@ function App() {
   }
 
   async function handleAiSchemaPoc() {
-    const project = projects[0];
-
-    if (!project) {
-      setError("先に新規案件を作成してください。");
+    if (!activeProject) {
+      setError(PROJECT_REQUIRED_MESSAGE);
       return;
     }
 
@@ -331,7 +388,7 @@ function App() {
 
     try {
       const result = await invoke<AiSchemaPocResult>("run_ai_schema_poc", {
-        projectId: project.id,
+        projectId: activeProject.id,
       });
       setSchemaPocResult(result);
     } catch (caughtError) {
@@ -345,6 +402,10 @@ function App() {
     let isMounted = true;
 
     async function loadInitialProjects() {
+      if (!isTauriRuntime) {
+        return;
+      }
+
       try {
         const [projectRows, storage, runtimeInfo] = await Promise.all([
           invoke<Project[]>("list_projects"),
@@ -357,6 +418,12 @@ function App() {
         }
 
         setProjects(projectRows);
+        setSelectedProjectId((currentProjectId) =>
+          currentProjectId &&
+          projectRows.some((project) => project.id === currentProjectId)
+            ? currentProjectId
+            : (projectRows[0]?.id ?? null),
+        );
         setStorageInfo(storage);
         setCodexRuntimeInfo(runtimeInfo);
       } catch (caughtError) {
@@ -371,11 +438,18 @@ function App() {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [isTauriRuntime]);
 
   useEffect(() => {
-    const unlisten = listen<CodexUiEvent>("codex-app-server-event", (event) => {
-      setCodexEvents((currentEvents) => [...currentEvents.slice(-31), event.payload]);
+    if (!isTauriRuntime) {
+      return;
+    }
+
+    const unlisten = listen<CodexUiEvent>(CODEX_EVENT_NAME, (event) => {
+      setCodexEvents((currentEvents) => [
+        ...currentEvents.slice(1 - MAX_CODEX_EVENTS),
+        event.payload,
+      ]);
       if (event.payload.verificationUrl || event.payload.userCode) {
         setLiveDeviceCode({
           verificationUrl: event.payload.verificationUrl,
@@ -389,12 +463,14 @@ function App() {
         dispose();
       });
     };
-  }, []);
+  }, [isTauriRuntime]);
 
-  const isCodexBusy = isCodexRunning || isDeviceChecking;
+  const isCodexBusy = !isTauriRuntime || isCodexRunning || isDeviceChecking;
   const visibleVerificationUrl =
     deviceCodeResult?.verificationUrl ?? liveDeviceCode.verificationUrl;
   const visibleUserCode = deviceCodeResult?.userCode ?? liveDeviceCode.userCode;
+  const activeProject =
+    projects.find((project) => project.id === selectedProjectId) ?? projects[0] ?? null;
 
   return (
     <main className="min-h-screen bg-[var(--app-bg)] text-[var(--app-fg)]">
@@ -451,12 +527,16 @@ function App() {
               </p>
             </div>
             <div className="flex flex-wrap justify-end gap-2">
-              <Button disabled={isCreating} onClick={handleCreateProject} type="button">
+              <Button
+                disabled={isCreating || !isTauriRuntime}
+                onClick={handleCreateProject}
+                type="button"
+              >
                 <Plus size={16} aria-hidden="true" />
                 {isCreating ? "作成中" : "新規案件"}
               </Button>
               <Button
-                disabled={isImporting || projects.length === 0}
+                disabled={isImporting || !activeProject}
                 onClick={handleImportSamples}
                 type="button"
                 variant="outline"
@@ -467,7 +547,7 @@ function App() {
             </div>
           </header>
 
-          <div className="mt-6 grid grid-cols-4 gap-3">
+          <div className="mt-6 grid grid-cols-4 gap-3" id="go-no-go">
             {gateItems.map((item) => {
               const Icon = item.icon;
 
@@ -507,9 +587,19 @@ function App() {
                   className="grid grid-cols-[1fr_160px_120px_160px] items-center border-b border-[var(--app-border)] px-4 py-4 text-sm last:border-b-0"
                   key={project.id}
                 >
-                  <div className="font-medium">{project.name}</div>
+                  <button
+                    className="text-left font-medium"
+                    onClick={() => setSelectedProjectId(project.id)}
+                    type="button"
+                  >
+                    {project.name}
+                  </button>
                   <div>
-                    <span className="status-pill">保存済み</span>
+                    <StatusPill
+                      tone={project.id === activeProject?.id ? "success" : "neutral"}
+                    >
+                      {project.id === activeProject?.id ? "選択中" : "保存済み"}
+                    </StatusPill>
                   </div>
                   <div className="text-[var(--app-muted)]">0</div>
                   <div className="text-[var(--app-muted)]">
@@ -540,17 +630,7 @@ function App() {
             </div>
             {importResults.length > 0 ? (
               importResults.map((result) => {
-                const firstChunk = result.chunks[0];
-                const sourceLabel =
-                  firstChunk?.pageNumber != null
-                    ? `page ${firstChunk.pageNumber}`
-                    : firstChunk?.sheetName
-                      ? `${firstChunk.sheetName} row ${firstChunk.rowStart}`
-                      : firstChunk?.headingPath
-                        ? firstChunk.headingPath
-                        : firstChunk?.rowStart
-                          ? `row ${firstChunk.rowStart}`
-                          : result.error || "-";
+                const sourceLabel = sourceLabelFor(result);
 
                 return (
                   <div
@@ -559,15 +639,9 @@ function App() {
                   >
                     <div className="font-medium">{result.fileName}</div>
                     <div>
-                      <span
-                        className={
-                          result.status === "read"
-                            ? "status-pill"
-                            : "status-pill status-pill-error"
-                        }
-                      >
+                      <StatusPill tone={result.status === "read" ? "success" : "error"}>
                         {result.status}
-                      </span>
+                      </StatusPill>
                     </div>
                     <div className="text-[var(--app-muted)]">{result.chunkCount}</div>
                     <div className="truncate text-[var(--app-muted)]">
@@ -623,19 +697,13 @@ function App() {
                   turn結果
                 </div>
                 <div className="mt-3 flex items-center gap-2 text-sm">
-                  <span
-                    className={
-                      codexSmokeResult?.ok
-                        ? "status-pill"
-                        : "status-pill status-pill-neutral"
-                    }
-                  >
+                  <StatusPill tone={codexSmokeResult?.ok ? "success" : "neutral"}>
                     {codexSmokeResult
                       ? codexSmokeResult.ok
                         ? "OK"
                         : "要確認"
                       : "未実行"}
-                  </span>
+                  </StatusPill>
                   <span className="text-[var(--app-muted)]">
                     {codexSmokeResult?.accountType ?? "account未確認"}
                   </span>
@@ -655,19 +723,13 @@ function App() {
                   device-code
                 </div>
                 <div className="mt-3 flex items-center gap-2 text-sm">
-                  <span
-                    className={
-                      deviceCodeResult?.ok
-                        ? "status-pill"
-                        : "status-pill status-pill-neutral"
-                    }
-                  >
+                  <StatusPill tone={deviceCodeResult?.ok ? "success" : "neutral"}>
                     {deviceCodeResult
                       ? deviceCodeResult.ok
                         ? "発行確認"
                         : "要確認"
                       : "未実行"}
-                  </span>
+                  </StatusPill>
                   <span className="text-[var(--app-muted)]">
                     {deviceCodeResult?.cancelStatus
                       ? `cancel: ${deviceCodeResult.cancelStatus}`
@@ -797,9 +859,7 @@ function App() {
                 </div>
               </div>
               <Button
-                disabled={
-                  isSchemaRunning || projects.length === 0 || !isAiSendConfirmed
-                }
+                disabled={isSchemaRunning || !activeProject || !isAiSendConfirmed}
                 onClick={handleAiSchemaPoc}
                 type="button"
               >
@@ -830,19 +890,13 @@ function App() {
             <div className="grid grid-cols-[160px_1fr] gap-y-2 px-4 py-4 text-sm">
               <div className="text-[var(--app-muted)]">状態</div>
               <div>
-                <span
-                  className={
-                    schemaPocResult?.ok
-                      ? "status-pill"
-                      : "status-pill status-pill-neutral"
-                  }
-                >
+                <StatusPill tone={schemaPocResult?.ok ? "success" : "neutral"}>
                   {schemaPocResult
                     ? schemaPocResult.ok
                       ? "保存済み"
                       : "要確認"
                     : "未実行"}
-                </span>
+                </StatusPill>
               </div>
               <div className="text-[var(--app-muted)]">ai_run</div>
               <div>{schemaPocResult?.aiRunId ?? "-"}</div>

@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter};
 const EVENT_NAME: &str = "codex-app-server-event";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TURN_TIMEOUT: Duration = Duration::from_secs(120);
-const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -424,53 +424,16 @@ pub fn run_structured_output_turn(
     };
 
     let result = (|| -> Result<Value, String> {
-        process.request(
-            "initialize",
-            json!({
-                "clientInfo": {
-                    "name": "synergy-map-phase0",
-                    "title": "Synergy Map Phase 0",
-                    "version": env!("CARGO_PKG_VERSION"),
-                },
-                "capabilities": {
-                    "experimentalApi": true,
-                },
-            }),
-            REQUEST_TIMEOUT,
-            &app,
-            &mut events,
-            &mut assistant_text,
-        )?;
-        process.notification("initialized")?;
+        initialize_app_server(&mut process, &app, &mut events, &mut assistant_text)?;
 
-        let thread = process.request(
-            "thread/start",
-            json!({
-                "cwd": cwd,
-                "approvalPolicy": "never",
-                "sandbox": "read-only",
-                "ephemeral": true,
-                "experimentalRawEvents": false,
-                "persistExtendedHistory": false,
-            }),
-            REQUEST_TIMEOUT,
-            &app,
-            &mut events,
-            &mut assistant_text,
-        )?;
-        thread_id = thread
-            .get("thread")
-            .and_then(|thread| thread.get("id"))
-            .and_then(Value::as_str)
-            .map(ToString::to_string);
-        let thread_id_ref = thread_id
-            .as_deref()
-            .ok_or_else(|| "thread/start response did not include thread.id.".to_string())?;
+        let started_thread_id =
+            start_read_only_thread(&mut process, &app, cwd, &mut events, &mut assistant_text)?;
+        thread_id = Some(started_thread_id.clone());
 
         let turn = process.request(
             "turn/start",
             json!({
-                "threadId": thread_id_ref,
+                "threadId": started_thread_id,
                 "input": [{
                     "type": "text",
                     "text": prompt,
@@ -501,14 +464,7 @@ pub fn run_structured_output_turn(
             &mut events,
             &mut assistant_text,
         )?;
-        let turn_status = turn_completed
-            .get("turn")
-            .and_then(|turn| turn.get("status"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        if turn_status != "completed" {
-            return Err(format!("turn/completed returned status {turn_status}."));
-        }
+        ensure_turn_completed(&turn_completed)?;
 
         serde_json::from_str::<Value>(assistant_text.trim())
             .map_err(|error| format!("Structured assistant message was not valid JSON: {error}"))
@@ -547,23 +503,7 @@ fn run_smoke_sequence(
     thread_id: &mut Option<String>,
     turn_id: &mut Option<String>,
 ) -> Result<(), String> {
-    let initialize = process.request(
-        "initialize",
-        json!({
-            "clientInfo": {
-                "name": "synergy-map-phase0",
-                "title": "Synergy Map Phase 0",
-                "version": env!("CARGO_PKG_VERSION"),
-            },
-            "capabilities": {
-                "experimentalApi": true,
-            },
-        }),
-        REQUEST_TIMEOUT,
-        app,
-        events,
-        assistant_text,
-    )?;
+    let initialize = initialize_app_server(process, app, events, assistant_text)?;
     *user_agent = initialize
         .get("userAgent")
         .and_then(Value::as_str)
@@ -580,7 +520,6 @@ fn run_smoke_sequence(
         platform_os.clone(),
     );
 
-    process.notification("initialized")?;
     push_event(app, events, "notification", "initialized通知を送信", None);
 
     let account = process.request(
@@ -610,26 +549,8 @@ fn run_smoke_sequence(
         account_type.clone(),
     );
 
-    let thread = process.request(
-        "thread/start",
-        json!({
-            "cwd": cwd,
-            "approvalPolicy": "never",
-            "sandbox": "read-only",
-            "ephemeral": true,
-            "experimentalRawEvents": false,
-            "persistExtendedHistory": false,
-        }),
-        REQUEST_TIMEOUT,
-        app,
-        events,
-        assistant_text,
-    )?;
-    *thread_id = thread
-        .get("thread")
-        .and_then(|thread| thread.get("id"))
-        .and_then(Value::as_str)
-        .map(ToString::to_string);
+    let started_thread_id = start_read_only_thread(process, app, cwd, events, assistant_text)?;
+    *thread_id = Some(started_thread_id.clone());
     push_event(
         app,
         events,
@@ -638,13 +559,10 @@ fn run_smoke_sequence(
         thread_id.clone(),
     );
 
-    let thread_id = thread_id
-        .as_deref()
-        .ok_or_else(|| "thread/start response did not include thread.id.".to_string())?;
     let turn = process.request(
         "turn/start",
         json!({
-            "threadId": thread_id,
+            "threadId": started_thread_id,
             "input": [{
                 "type": "text",
                 "text": "Reply with exactly: OK",
@@ -675,22 +593,7 @@ fn run_smoke_sequence(
         events,
         assistant_text,
     )?;
-    let turn_status = turn_completed
-        .get("turn")
-        .and_then(|turn| turn.get("status"))
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    if turn_status != "completed" {
-        let turn_error = turn_completed
-            .get("turn")
-            .and_then(|turn| turn.get("error"))
-            .and_then(|error| error.get("message"))
-            .and_then(Value::as_str)
-            .unwrap_or("No turn error details.");
-        return Err(format!(
-            "turn/completed returned status {turn_status}: {turn_error}"
-        ));
-    }
+    ensure_turn_completed(&turn_completed)?;
     push_event(app, events, "stream", "turn/completedを受信", None);
 
     Ok(())
@@ -734,24 +637,7 @@ pub fn run_device_code_login_check(app: AppHandle) -> DeviceCodeLoginResult {
     );
 
     let result = (|| -> Result<(), String> {
-        process.request(
-            "initialize",
-            json!({
-                "clientInfo": {
-                    "name": "synergy-map-phase0",
-                    "title": "Synergy Map Phase 0",
-                    "version": env!("CARGO_PKG_VERSION"),
-                },
-                "capabilities": {
-                    "experimentalApi": true,
-                },
-            }),
-            REQUEST_TIMEOUT,
-            &app,
-            &mut events,
-            &mut assistant_text,
-        )?;
-        process.notification("initialized")?;
+        initialize_app_server(&mut process, &app, &mut events, &mut assistant_text)?;
 
         let login = process.request(
             "account/login/start",
@@ -851,6 +737,88 @@ pub fn run_device_code_login_check(app: AppHandle) -> DeviceCodeLoginResult {
         errors,
         warnings,
     }
+}
+
+fn initialize_app_server(
+    process: &mut CodexProcess,
+    app: &AppHandle,
+    events: &mut Vec<CodexUiEvent>,
+    assistant_text: &mut String,
+) -> Result<Value, String> {
+    let initialize = process.request(
+        "initialize",
+        json!({
+            "clientInfo": {
+                "name": "synergy-map-phase0",
+                "title": "Synergy Map Phase 0",
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+            "capabilities": {
+                "experimentalApi": true,
+            },
+        }),
+        REQUEST_TIMEOUT,
+        app,
+        events,
+        assistant_text,
+    )?;
+    process.notification("initialized")?;
+
+    Ok(initialize)
+}
+
+fn start_read_only_thread(
+    process: &mut CodexProcess,
+    app: &AppHandle,
+    cwd: &str,
+    events: &mut Vec<CodexUiEvent>,
+    assistant_text: &mut String,
+) -> Result<String, String> {
+    let thread = process.request(
+        "thread/start",
+        json!({
+            "cwd": cwd,
+            "approvalPolicy": "never",
+            "sandbox": "read-only",
+            "ephemeral": true,
+            "experimentalRawEvents": false,
+            "persistExtendedHistory": false,
+        }),
+        REQUEST_TIMEOUT,
+        app,
+        events,
+        assistant_text,
+    )?;
+
+    thread
+        .get("thread")
+        .and_then(|thread| thread.get("id"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| "thread/start response did not include thread.id.".to_string())
+}
+
+fn ensure_turn_completed(turn_completed: &Value) -> Result<(), String> {
+    let turn_status = turn_completed
+        .get("turn")
+        .and_then(|turn| turn.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+
+    if turn_status == "completed" {
+        return Ok(());
+    }
+
+    let turn_error = turn_completed
+        .get("turn")
+        .and_then(|turn| turn.get("error"))
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("No turn error details.");
+
+    Err(format!(
+        "turn/completed returned status {turn_status}: {turn_error}"
+    ))
 }
 
 fn record_wire_message(
