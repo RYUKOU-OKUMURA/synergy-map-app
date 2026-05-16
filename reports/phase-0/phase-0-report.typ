@@ -41,7 +41,7 @@
   gutter: 6mm,
   metric("Desktop", "Tauri + React", "macOSで起動確認"),
   metric("Codex", "stdio OK", "turn/startまで確認"),
-  metric("Map", "2188 x 840px", "PNG出力確認"),
+  metric("判定", "条件付きGo", "macOS PoC継続"),
 )
 
 #section-title[顧客接点シナジーマップ]
@@ -75,7 +75,20 @@
   [PDF出力],
   [Go],
   [Typstで日本語本文とマップ画像を含むPDFを生成。],
+  [AI schema],
+  [Go],
+  [JSON Schema付きturnを実行し、serde検証後だけai_runsへ保存。],
+  [情報管理],
+  [Go],
+  [既定送信モードは要約のみ。資料本文とprompt全文は履歴に保存しない。],
+  [Windows],
+  [未確認],
+  [実機確認、既定ブラウザ導線、フォント、sidecar起動はMVP-1配布前ゲート。],
 )
+
+#section-title[Go / No-Go判断]
+
+MVP-1の設計とmacOS PoC継続は条件付きGo。Windows配布、実利用者検証、Codex App Server sidecar同梱は未確認ゲートが残るため、現時点ではGoにしない。
 
 #section-title[フォント運用]
 
