@@ -303,6 +303,58 @@ button:disabled {
   color: var(--primary-dark);
 }
 
+.map-edit-toolbar {
+  position: absolute;
+  top: 16px;
+  right: 336px;
+  z-index: 24;
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.12);
+}
+
+.map-edit-toolbar button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  padding: 0 11px;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.map-edit-toolbar button:hover,
+.map-edit-toolbar button.active {
+  background: #eef5f5;
+  color: var(--primary-dark);
+}
+
+.layout-save-status {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  color: var(--text-muted);
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.layout-save-status-saving {
+  color: #9a3412;
+}
+
+.layout-save-status-error {
+  color: #991b1b;
+}
+
 .map-stage {
   position: absolute;
   inset: 0 0 44px 0;
@@ -318,6 +370,22 @@ button:disabled {
   background-size:
     28px 28px,
     56px 56px;
+}
+
+.map-canvas .react-flow__nodes {
+  z-index: 3;
+}
+
+.map-canvas-editable .react-flow__nodes {
+  pointer-events: auto;
+}
+
+.map-canvas .react-flow__node {
+  z-index: 5 !important;
+}
+
+.map-canvas .react-flow__edgelabel-renderer {
+  z-index: 4;
 }
 
 .tray-tab {
@@ -808,6 +876,15 @@ button:disabled {
   gap: 8px;
 }
 
+.form-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.form-actions .primary-button {
+  flex: 1;
+}
+
 .source-list {
   display: grid;
   gap: 4px;
@@ -1045,14 +1122,42 @@ button:disabled {
 }
 
 .map-node {
+  box-sizing: border-box;
   position: relative;
-  width: 202px;
+  width: 100%;
+  min-width: 170px;
+  height: 100%;
   min-height: 92px;
+  overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface);
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
   color: var(--text);
+}
+
+.map-canvas-editable .react-flow__node {
+  cursor: grab;
+}
+
+.map-canvas-editable .react-flow__node.dragging {
+  cursor: grabbing;
+}
+
+.map-node-editable.map-node-drag-handle,
+.map-node-editable.map-node-drag-handle .map-node-main,
+.map-node-editable.map-node-drag-handle .map-node-copy,
+.map-node-editable.map-node-drag-handle .map-node-title,
+.map-node-editable.map-node-drag-handle .map-node-description {
+  cursor: grab;
+}
+
+.map-canvas-editable .react-flow__node.dragging .map-node-editable {
+  cursor: grabbing;
+}
+
+.map-node-editable {
+  border-color: #b9d8d5;
 }
 
 .map-node::after {
@@ -1079,7 +1184,6 @@ button:disabled {
 }
 
 .map-node-view-business_impact {
-  width: 224px;
   border-color: #cdd6e5;
 }
 
@@ -1231,9 +1335,43 @@ button:disabled {
   background: var(--primary);
 }
 
+.map-node-readonly .map-handle {
+  opacity: 0.35;
+}
+
+.map-node-editable .map-handle {
+  width: 13px;
+  height: 13px;
+  opacity: 1;
+  box-shadow:
+    0 0 0 3px rgba(22, 138, 131, 0.16),
+    0 4px 10px rgba(15, 23, 42, 0.18);
+  cursor: crosshair;
+}
+
+.map-node-editable .map-handle-source::after {
+  content: "+";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  color: white;
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 1;
+  transform: translate(-50%, -55%);
+}
+
+.map-node-editable .map-handle-target {
+  background: var(--indigo);
+}
+
 .map-edge {
   stroke: var(--slate);
   stroke-width: 2;
+}
+
+.map-edge-selected {
+  stroke-width: 4;
 }
 
 .map-edge-halo {
@@ -1277,6 +1415,14 @@ button:disabled {
   font-weight: 750;
   box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08);
   pointer-events: all;
+  cursor: pointer;
+}
+
+.map-edge-label:hover,
+.map-edge-label-selected {
+  border-color: var(--primary);
+  color: var(--primary-dark);
+  box-shadow: 0 8px 18px rgba(22, 138, 131, 0.16);
 }
 
 .map-edge-label-warning {

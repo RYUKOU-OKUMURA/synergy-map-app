@@ -941,6 +941,7 @@ pub fn run() {
             mvp1::generate_map_from_items,
             mvp1::update_map_node,
             mvp1::update_map_edge,
+            mvp1::create_map_edge,
             mvp1::save_map_layout,
             mvp1::save_view_layout,
             mvp1::generate_suggestions_from_map,

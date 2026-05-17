@@ -14,6 +14,8 @@ import {
   ListChecks,
   Map as MapIcon,
   MessageSquareText,
+  MousePointer2,
+  PencilRuler,
   Plus,
   Save,
   Sparkles,
@@ -23,12 +25,13 @@ import {
   Upload,
 } from "lucide-react";
 import type * as React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import "./App.css";
 import {
   SynergyMapCanvas,
   type MapViewMode,
+  type MapNodeLayout,
   type NodeImpactStats,
   type NodePositionOverrides,
 } from "@/features/map/SynergyMapCanvas";
@@ -101,6 +104,125 @@ function formatTime(value: string | null | undefined) {
   }
 }
 
+function layoutToJson(layout: MapNodeLayout) {
+  const value: Record<string, string | number> = {
+    nodeId: layout.nodeId,
+    x: layout.x,
+    y: layout.y,
+  };
+  if (typeof layout.width === "number") value.width = layout.width;
+  if (typeof layout.height === "number") value.height = layout.height;
+  return value;
+}
+
+function mergeNodePositionJson(positionJson: string, layout: MapNodeLayout) {
+  let current: Record<string, unknown>;
+  try {
+    current = JSON.parse(positionJson) as Record<string, unknown>;
+  } catch {
+    current = {};
+  }
+  return JSON.stringify({
+    ...current,
+    ...layoutToJson(layout),
+  });
+}
+
+function mergeViewLayoutJson(
+  currentLayoutJson: string | null,
+  viewId: MapViewMode,
+  layouts: MapNodeLayout[],
+) {
+  const layoutMap = new Map<string, MapNodeLayout>();
+  if (currentLayoutJson) {
+    try {
+      const parsed = JSON.parse(currentLayoutJson) as {
+        positions?: Array<{
+          nodeId?: string;
+          x?: number;
+          y?: number;
+          width?: number;
+          height?: number;
+        }>;
+      };
+      for (const position of parsed.positions ?? []) {
+        if (
+          typeof position.nodeId === "string" &&
+          typeof position.x === "number" &&
+          typeof position.y === "number"
+        ) {
+          layoutMap.set(position.nodeId, {
+            nodeId: position.nodeId,
+            x: position.x,
+            y: position.y,
+            width: position.width,
+            height: position.height,
+          });
+        }
+      }
+    } catch {
+      layoutMap.clear();
+    }
+  }
+
+  for (const layout of layouts) {
+    layoutMap.set(layout.nodeId, layout);
+  }
+
+  return JSON.stringify({
+    viewId,
+    positions: Array.from(layoutMap.values())
+      .sort((left, right) => left.nodeId.localeCompare(right.nodeId))
+      .map(layoutToJson),
+  });
+}
+
+function applyLocalMapLayouts(
+  workspace: ProjectWorkspace,
+  projectId: string,
+  viewMode: MapViewMode,
+  layouts: MapNodeLayout[],
+): ProjectWorkspace {
+  const now = new Date().toISOString();
+  if (viewMode === "customer_journey") {
+    return {
+      ...workspace,
+      nodes: workspace.nodes.map((node) => {
+        const layout = layouts.find((candidate) => candidate.nodeId === node.id);
+        if (!layout) return node;
+        return {
+          ...node,
+          positionJson: mergeNodePositionJson(node.positionJson, layout),
+          updatedAt: now,
+        };
+      }),
+    };
+  }
+
+  const currentLayout =
+    workspace.viewLayouts.find((layout) => layout.viewId === viewMode) ?? null;
+  const nextLayout: ViewLayoutRow = {
+    id: currentLayout?.id ?? `local-layout-${viewMode}`,
+    projectId,
+    viewId: viewMode,
+    layoutJson: mergeViewLayoutJson(
+      currentLayout?.layoutJson ?? null,
+      viewMode,
+      layouts,
+    ),
+    createdAt: currentLayout?.createdAt ?? now,
+    updatedAt: now,
+  };
+
+  return {
+    ...workspace,
+    viewLayouts: [
+      ...workspace.viewLayouts.filter((layout) => layout.viewId !== viewMode),
+      nextLayout,
+    ],
+  };
+}
+
 function App() {
   const isTauriRuntime = hasTauriRuntime();
   const [view, setView] = useState<ViewId>("map");
@@ -120,6 +242,11 @@ function App() {
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
   const [isTrayOpen, setIsTrayOpen] = useState(true);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const [isMapEditMode, setIsMapEditMode] = useState(false);
+  const [layoutSaveStatus, setLayoutSaveStatus] = useState<
+    "idle" | "saving" | "saved" | "error"
+  >("idle");
+  const [layoutSaveScope, setLayoutSaveScope] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [approvedChunkSignature, setApprovedChunkSignature] = useState<string | null>(
     null,
@@ -182,6 +309,15 @@ function App() {
   const saveStatus = workspace.versions[0]
     ? `保存済み ${formatTime(workspace.versions[0].createdAt)}`
     : "保存済み";
+  const currentLayoutScope = `${activeProjectId ?? "none"}:${mapViewMode}`;
+  const visibleLayoutSaveStatus =
+    layoutSaveScope === currentLayoutScope ? layoutSaveStatus : "idle";
+
+  useEffect(() => {
+    if (!notice) return;
+    const timeoutId = window.setTimeout(() => setNotice(null), 3200);
+    return () => window.clearTimeout(timeoutId);
+  }, [notice]);
 
   async function runAction<T>(
     action: () => Promise<T>,
@@ -418,24 +554,75 @@ function App() {
     );
   }
 
-  async function handleSavePositions(
-    viewMode: MapViewMode,
-    positions: Array<{ nodeId: string; x: number; y: number }>,
-  ) {
-    if (!activeProjectId || !isTauriRuntime) return;
+  const handleSavePositions = useCallback(
+    async function handleSavePositions(
+      viewMode: MapViewMode,
+      positions: MapNodeLayout[],
+    ) {
+      if (!activeProjectId) return;
+      const saveScope = `${activeProjectId}:${viewMode}`;
+      setLayoutSaveScope(saveScope);
+      setLayoutSaveStatus("saving");
+      try {
+        const nextWorkspace = isTauriRuntime
+          ? viewMode === "customer_journey"
+            ? await invoke<ProjectWorkspace>("save_map_layout", {
+                projectId: activeProjectId,
+                positions,
+              })
+            : await invoke<ProjectWorkspace>("save_view_layout", {
+                projectId: activeProjectId,
+                viewId: viewMode,
+                positions,
+              })
+          : applyLocalMapLayouts(workspace, activeProjectId, viewMode, positions);
+        setWorkspace(nextWorkspace);
+        setLayoutSaveStatus("saved");
+      } catch (caughtError) {
+        setLayoutSaveStatus("error");
+        setError(String(caughtError));
+      }
+    },
+    [activeProjectId, workspace, isTauriRuntime],
+  );
+
+  async function handleCreateMapEdge(sourceNodeId: string, targetNodeId: string) {
+    if (!activeProjectId) return;
+    setError(null);
     try {
-      const nextWorkspace =
-        viewMode === "customer_journey"
-          ? await invoke<ProjectWorkspace>("save_map_layout", {
+      const nextWorkspace = isTauriRuntime
+        ? await invoke<ProjectWorkspace>("create_map_edge", {
+            projectId: activeProjectId,
+            sourceNodeId,
+            targetNodeId,
+          })
+        : (() => {
+            const now = new Date().toISOString();
+            const edgeId =
+              globalThis.crypto?.randomUUID?.() ?? `local-edge-${Date.now()}`;
+            const edge: MapEdgeRow = {
+              id: edgeId,
               projectId: activeProjectId,
-              positions,
-            })
-          : await invoke<ProjectWorkspace>("save_view_layout", {
-              projectId: activeProjectId,
-              viewId: viewMode,
-              positions,
-            });
+              sourceNodeId,
+              targetNodeId,
+              edgeType: "normal",
+              flowType: "inquiry",
+              strength: "normal",
+              direction: "forward",
+              confidenceStatus: "estimated",
+              evidence: "ユーザーがマップ編集モードで追加した導線です。",
+              note: null,
+              label: "導線",
+              adoptionStatus: "accepted",
+              priority: null,
+              createdAt: now,
+              updatedAt: now,
+            };
+            return { ...workspace, edges: [...workspace.edges, edge] };
+          })();
       setWorkspace(nextWorkspace);
+      setSelectedMapElement(null);
+      setNotice("導線を追加しました。");
     } catch (caughtError) {
       setError(String(caughtError));
     }
@@ -605,8 +792,12 @@ function App() {
           {view === "map" ? (
             <MapWorkspace
               drawerOpen={isDrawerOpen}
+              editMode={isMapEditMode}
+              layoutSaveStatus={visibleLayoutSaveStatus}
               mapViewMode={mapViewMode}
+              onCreateMapEdge={handleCreateMapEdge}
               onDrawerOpenChange={setIsDrawerOpen}
+              onEditModeChange={setIsMapEditMode}
               onGenerateMap={handleGenerateMap}
               onGenerateSuggestions={handleGenerateSuggestions}
               onMapViewModeChange={(nextMode) => {
@@ -727,8 +918,12 @@ function StatusChip({ children }: { children: React.ReactNode }) {
 
 function MapWorkspace({
   drawerOpen,
+  editMode,
+  layoutSaveStatus,
   mapViewMode,
+  onCreateMapEdge,
   onDrawerOpenChange,
+  onEditModeChange,
   onGenerateMap,
   onGenerateSuggestions,
   onMapViewModeChange,
@@ -743,15 +938,16 @@ function MapWorkspace({
   workspace,
 }: {
   drawerOpen: boolean;
+  editMode: boolean;
+  layoutSaveStatus: "idle" | "saving" | "saved" | "error";
   mapViewMode: MapViewMode;
+  onCreateMapEdge: (sourceNodeId: string, targetNodeId: string) => void;
   onDrawerOpenChange: (open: boolean) => void;
+  onEditModeChange: (enabled: boolean) => void;
   onGenerateMap: () => void;
   onGenerateSuggestions: () => void;
   onMapViewModeChange: (mode: MapViewMode) => void;
-  onSavePositions: (
-    viewMode: MapViewMode,
-    positions: Array<{ nodeId: string; x: number; y: number }>,
-  ) => void;
+  onSavePositions: (viewMode: MapViewMode, positions: MapNodeLayout[]) => void;
   onSelectItem: (itemId: string) => void;
   onSelectMapElement: (selection: SelectedMapElement) => void;
   onSelectSuggestion: (suggestionId: string) => void;
@@ -765,6 +961,10 @@ function MapWorkspace({
   const impactPositions = useMemo(
     () => buildImpactPositionOverrides(workspace, impactStats),
     [impactStats, workspace],
+  );
+  const handleCanvasPositionsChange = useCallback(
+    (positions: MapNodeLayout[]) => onSavePositions(mapViewMode, positions),
+    [mapViewMode, onSavePositions],
   );
 
   return (
@@ -786,6 +986,36 @@ function MapWorkspace({
           <BarChart3 size={14} aria-hidden="true" />
           事業インパクト
         </button>
+      </div>
+
+      <div className="map-edit-toolbar" aria-label="マップ編集モード">
+        <button
+          className={!editMode ? "active" : ""}
+          onClick={() => onEditModeChange(false)}
+          title="閲覧"
+          type="button"
+        >
+          <MousePointer2 size={14} aria-hidden="true" />
+          閲覧
+        </button>
+        <button
+          className={editMode ? "active" : ""}
+          onClick={() => onEditModeChange(true)}
+          title="編集"
+          type="button"
+        >
+          <PencilRuler size={14} aria-hidden="true" />
+          編集
+        </button>
+        <span className={`layout-save-status layout-save-status-${layoutSaveStatus}`}>
+          {layoutSaveStatus === "saving"
+            ? "保存中"
+            : layoutSaveStatus === "error"
+              ? "保存失敗"
+              : layoutSaveStatus === "idle"
+                ? "未変更"
+                : "保存済み"}
+        </span>
       </div>
 
       {mapViewMode === "customer_journey" ? (
@@ -861,10 +1091,12 @@ function MapWorkspace({
       <section className="map-stage">
         {workspace.nodes.length > 0 ? (
           <SynergyMapCanvas
+            editable={editMode}
             edges={workspace.edges}
             impactStats={impactStats}
             nodes={workspace.nodes}
-            onPositionsChange={(positions) => onSavePositions(mapViewMode, positions)}
+            onConnectNodes={onCreateMapEdge}
+            onPositionsChange={handleCanvasPositionsChange}
             onSelect={onSelectMapElement}
             positionOverrides={
               mapViewMode === "business_impact" ? impactPositions : undefined
@@ -1156,7 +1388,13 @@ function parseViewLayoutPositions(layout: ViewLayoutRow | null): NodePositionOve
   if (!layout) return {};
   try {
     const parsed = JSON.parse(layout.layoutJson) as {
-      positions?: Array<{ nodeId?: string; x?: number; y?: number }>;
+      positions?: Array<{
+        nodeId?: string;
+        x?: number;
+        y?: number;
+        width?: number;
+        height?: number;
+      }>;
     };
     return Object.fromEntries(
       (parsed.positions ?? [])
@@ -1168,7 +1406,12 @@ function parseViewLayoutPositions(layout: ViewLayoutRow | null): NodePositionOve
         )
         .map((position) => [
           position.nodeId as string,
-          { x: position.x as number, y: position.y as number },
+          {
+            x: position.x as number,
+            y: position.y as number,
+            width: position.width,
+            height: position.height,
+          },
         ]),
     );
   } catch {
@@ -1723,6 +1966,37 @@ function InspectorPanel({
     onWorkspaceChange(nextWorkspace);
   }
 
+  async function hideEdge() {
+    if (!edge || !projectId) return;
+    if (!isTauriRuntime) {
+      onWorkspaceChange({
+        ...workspace,
+        edges: workspace.edges.map((candidate) =>
+          candidate.id === edge.id
+            ? {
+                ...candidate,
+                adoptionStatus: "rejected",
+                updatedAt: new Date().toISOString(),
+              }
+            : candidate,
+        ),
+      });
+      return;
+    }
+    const nextWorkspace = await invoke<ProjectWorkspace>("update_map_edge", {
+      projectId,
+      edgeId: edge.id,
+      label: edge.label ?? "",
+      flowType: edge.flowType ?? "inquiry",
+      strength: edge.strength ?? "normal",
+      confidenceStatus: edge.confidenceStatus ?? "estimated",
+      edgeType: edge.edgeType,
+      adoptionStatus: "rejected",
+      note: edge.note ?? "",
+    });
+    onWorkspaceChange(nextWorkspace);
+  }
+
   async function submitSuggestion(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!suggestion || !projectId || !isTauriRuntime) return;
@@ -1758,7 +2032,7 @@ function InspectorPanel({
       </div>
       {item ? <ItemForm item={item} onSubmit={submitItem} /> : null}
       {node ? <NodeForm node={node} onSubmit={submitNode} /> : null}
-      {edge ? <EdgeForm edge={edge} onSubmit={submitEdge} /> : null}
+      {edge ? <EdgeForm edge={edge} onHide={hideEdge} onSubmit={submitEdge} /> : null}
       {suggestion ? (
         <SuggestionForm
           suggestion={suggestion}
@@ -2087,9 +2361,11 @@ function NodeForm({
 
 function EdgeForm({
   edge,
+  onHide,
   onSubmit,
 }: {
   edge: MapEdgeRow;
+  onHide: () => void;
   onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
 }) {
   return (
@@ -2152,9 +2428,15 @@ function EdgeForm({
       <Field label="メモ">
         <textarea defaultValue={edge.note ?? ""} name="note" />
       </Field>
-      <button className="primary-button" type="submit">
-        保存
-      </button>
+      <div className="form-actions">
+        <button className="ghost-button danger-button" onClick={onHide} type="button">
+          <Trash2 size={14} aria-hidden="true" />
+          非表示
+        </button>
+        <button className="primary-button" type="submit">
+          保存
+        </button>
+      </div>
     </form>
   );
 }

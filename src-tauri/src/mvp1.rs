@@ -267,6 +267,16 @@ pub struct MapPositionInput {
     node_id: String,
     x: f64,
     y: f64,
+    width: Option<f64>,
+    height: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MapLayoutValues {
+    x: f64,
+    y: f64,
+    width: Option<f64>,
+    height: Option<f64>,
 }
 
 fn now_rfc3339() -> Result<String, String> {
@@ -805,6 +815,84 @@ pub fn update_map_edge(
 }
 
 #[tauri::command]
+pub fn create_map_edge(
+    state: State<'_, DbState>,
+    project_id: String,
+    source_node_id: String,
+    target_node_id: String,
+) -> Result<ProjectWorkspace, String> {
+    if source_node_id == target_node_id {
+        return Err("同じノード同士は接続できません。".to_string());
+    }
+
+    let mut connection = open_connection(&state.db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+    let now = now_rfc3339()?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    for node_id in [&source_node_id, &target_node_id] {
+        let exists: Option<String> = transaction
+            .query_row(
+                "SELECT id FROM nodes WHERE id = ?1 AND project_id = ?2",
+                params![node_id, project_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if exists.is_none() {
+            return Err("接続先ノードが見つかりません。".to_string());
+        }
+    }
+
+    let duplicate: Option<String> = transaction
+        .query_row(
+            "SELECT id FROM edges
+             WHERE project_id = ?1 AND source_node_id = ?2 AND target_node_id = ?3
+               AND adoption_status != 'rejected'",
+            params![
+                project_id.as_str(),
+                source_node_id.as_str(),
+                target_node_id.as_str()
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if duplicate.is_some() {
+        return Err("この導線はすでに存在します。".to_string());
+    }
+
+    let edge_id = Uuid::new_v4().to_string();
+    transaction
+        .execute(
+            "INSERT INTO edges (
+                id, project_id, source_node_id, target_node_id, edge_type, flow_type,
+                strength, direction, confidence_status, evidence, note, label,
+                adoption_status, priority, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, 'normal', 'inquiry',
+                'normal', 'forward', 'estimated', ?5, NULL, '導線',
+                'accepted', NULL, ?6, ?6
+             )",
+            params![
+                edge_id,
+                project_id.as_str(),
+                source_node_id.as_str(),
+                target_node_id.as_str(),
+                "ユーザーがマップ編集モードで追加した導線です。",
+                now
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    clear_map_analysis_in_transaction(&transaction, &project_id)?;
+    record_snapshot_in_transaction(&transaction, &project_id, "human_create_map_edge")?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    load_workspace(&connection, &project_id)
+}
+
+#[tauri::command]
 pub fn save_map_layout(
     state: State<'_, DbState>,
     project_id: String,
@@ -822,7 +910,7 @@ pub fn save_map_layout(
             .execute(
                 "UPDATE nodes SET position_json = ?1, updated_at = ?2 WHERE id = ?3 AND project_id = ?4",
                 params![
-                    json!({ "x": position.x, "y": position.y }).to_string(),
+                    map_position_json(&position).to_string(),
                     now,
                     position.node_id,
                     project_id
@@ -831,7 +919,6 @@ pub fn save_map_layout(
             .map_err(|error| error.to_string())?;
     }
 
-    record_snapshot_in_transaction(&transaction, &project_id, "human_edit_map_layout")?;
     transaction.commit().map_err(|error| error.to_string())?;
 
     load_workspace(&connection, &project_id)
@@ -872,7 +959,6 @@ pub fn save_view_layout(
         )
         .map_err(|error| error.to_string())?;
 
-    record_snapshot_in_transaction(&transaction, &project_id, "human_edit_view_layout")?;
     transaction.commit().map_err(|error| error.to_string())?;
 
     load_workspace(&connection, &project_id)
@@ -899,7 +985,15 @@ fn merged_view_layout_json(
         .unwrap_or_default();
 
     for position in positions {
-        merged_positions.insert(position.node_id.clone(), (position.x, position.y));
+        merged_positions.insert(
+            position.node_id.clone(),
+            MapLayoutValues {
+                x: position.x,
+                y: position.y,
+                width: position.width,
+                height: position.height,
+            },
+        );
     }
 
     let mut sorted_positions = merged_positions.into_iter().collect::<Vec<_>>();
@@ -909,19 +1003,40 @@ fn merged_view_layout_json(
         "viewId": view_id,
         "positions": sorted_positions
             .into_iter()
-            .map(|(node_id, (x, y))| {
-                json!({
-                    "nodeId": node_id,
-                    "x": x,
-                    "y": y,
-                })
-            })
+            .map(|(node_id, values)| map_layout_json(&node_id, values))
             .collect::<Vec<_>>(),
     })
     .to_string())
 }
 
-fn parse_layout_position_map(value: &str) -> Result<HashMap<String, (f64, f64)>, String> {
+fn map_position_json(position: &MapPositionInput) -> Value {
+    map_layout_json(
+        &position.node_id,
+        MapLayoutValues {
+            x: position.x,
+            y: position.y,
+            width: position.width,
+            height: position.height,
+        },
+    )
+}
+
+fn map_layout_json(node_id: &str, values: MapLayoutValues) -> Value {
+    let mut value = json!({
+        "nodeId": node_id,
+        "x": values.x,
+        "y": values.y,
+    });
+    if let Some(width) = values.width {
+        value["width"] = json!(width);
+    }
+    if let Some(height) = values.height {
+        value["height"] = json!(height);
+    }
+    value
+}
+
+fn parse_layout_position_map(value: &str) -> Result<HashMap<String, MapLayoutValues>, String> {
     let parsed: Value = serde_json::from_str(value).map_err(|error| error.to_string())?;
     let Some(positions) = parsed.get("positions").and_then(Value::as_array) else {
         return Ok(HashMap::new());
@@ -938,7 +1053,15 @@ fn parse_layout_position_map(value: &str) -> Result<HashMap<String, (f64, f64)>,
         let Some(y) = position.get("y").and_then(Value::as_f64) else {
             continue;
         };
-        result.insert(node_id.to_string(), (x, y));
+        result.insert(
+            node_id.to_string(),
+            MapLayoutValues {
+                x,
+                y,
+                width: position.get("width").and_then(Value::as_f64),
+                height: position.get("height").and_then(Value::as_f64),
+            },
+        );
     }
 
     Ok(result)
@@ -3598,5 +3721,41 @@ mod tests {
         assert!(!serialized.contains("SECRET_CLIENT"));
         assert!(!serialized.contains("secret-client-plan"));
         assert!(serialized.contains(local_summary_only_quote()));
+    }
+
+    #[test]
+    fn layout_position_parser_preserves_optional_size() {
+        let parsed = parse_layout_position_map(
+            r#"{"positions":[{"nodeId":"node-1","x":12.0,"y":24.0,"width":220.0,"height":140.0}]}"#,
+        )
+        .expect("layout should parse");
+
+        assert_eq!(
+            parsed.get("node-1"),
+            Some(&MapLayoutValues {
+                x: 12.0,
+                y: 24.0,
+                width: Some(220.0),
+                height: Some(140.0),
+            })
+        );
+    }
+
+    #[test]
+    fn map_position_json_omits_unset_size() {
+        let position = MapPositionInput {
+            node_id: "node-1".to_string(),
+            x: 12.0,
+            y: 24.0,
+            width: None,
+            height: None,
+        };
+
+        let value = map_position_json(&position);
+
+        assert_eq!(value["x"], json!(12.0));
+        assert_eq!(value["y"], json!(24.0));
+        assert!(value.get("width").is_none());
+        assert!(value.get("height").is_none());
     }
 }
