@@ -2,6 +2,11 @@
 
 作成日: 2026-05-18
 
+関連資料:
+
+- `docs/product-role-models-and-competitors-research.md`
+- `docs/product-competitive-positioning-and-strategy.md`
+
 ## 目指す状態
 
 このツールは、単なる図解ツールではない。

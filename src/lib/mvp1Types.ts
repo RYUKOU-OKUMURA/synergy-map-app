@@ -205,6 +205,54 @@ export type ProjectWorkspace = {
   viewLayouts: ViewLayoutRow[];
 };
 
+export type CodexRuntimeInfo = {
+  commandStrategy: string;
+  resolvedPath: string | null;
+  realPath: string | null;
+  version: string | null;
+  targetTriple: string | null;
+  sidecarCandidateName: string | null;
+  frontendShellPermissions: string;
+  distributionDecision: string;
+  warnings: string[];
+};
+
+export type CodexUiEvent = {
+  kind: string;
+  label: string;
+  detail: string | null;
+  verificationUrl: string | null;
+  userCode: string | null;
+};
+
+export type CodexSmokeResult = {
+  ok: boolean;
+  userAgent: string | null;
+  platformOs: string | null;
+  authenticated: boolean;
+  accountType: string | null;
+  requiresOpenaiAuth: boolean;
+  threadId: string | null;
+  turnId: string | null;
+  assistantText: string;
+  events: CodexUiEvent[];
+  stderr: string[];
+  errors: string[];
+};
+
+export type DeviceCodeLoginResult = {
+  ok: boolean;
+  loginId: string | null;
+  verificationUrl: string | null;
+  userCode: string | null;
+  completionSuccess: boolean | null;
+  cancelStatus: string | null;
+  events: CodexUiEvent[];
+  stderr: string[];
+  errors: string[];
+  warnings: string[];
+};
+
 export type MvpRunResult = {
   ok: boolean;
   aiRunId: string | null;

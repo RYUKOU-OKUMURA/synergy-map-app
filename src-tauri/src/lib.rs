@@ -971,6 +971,8 @@ pub fn run() {
             mvp1::update_project,
             mvp1::delete_project,
             mvp1::run_extract_items,
+            mvp1::create_onboarding_brief_source,
+            mvp1::create_text_information_source,
             mvp1::create_extracted_item,
             mvp1::update_extracted_item,
             mvp1::generate_map_from_items,

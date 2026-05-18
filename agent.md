@@ -4,6 +4,8 @@
 
 ## 基本方針
 
+- 作業開始時は、まず`docs/project-context.md`を読む。
+- すべてのドキュメントを毎回読まず、`docs/project-context.md`の読み分けルールに従って必要な関連資料だけを参照する。
 - 要件定義は`docs/requirements.md`を参照する。
 - 技術選定は`docs/tech-stack.md`を参照する。
 - 実装計画は以下を参照する。

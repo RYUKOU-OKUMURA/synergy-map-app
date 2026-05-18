@@ -6,11 +6,15 @@ import {
   Clock3,
   Database,
   Download,
+  ExternalLink,
   FileText,
   FolderKanban,
   Gauge,
+  Globe2,
   History,
+  Info,
   Layers3,
+  Link as LinkIcon,
   ListChecks,
   Map as MapIcon,
   MessageSquareText,
@@ -18,9 +22,11 @@ import {
   PencilRuler,
   Plus,
   Save,
+  Settings,
   Sparkles,
   Target,
   Trash2,
+  TriangleAlert,
   TrendingUp,
   Upload,
 } from "lucide-react";
@@ -48,6 +54,9 @@ import {
 } from "@/lib/mvp1Labels";
 import type {
   AiRunRow,
+  CodexRuntimeInfo,
+  CodexSmokeResult,
+  DeviceCodeLoginResult,
   ExportResult,
   ExtractedItemRow,
   MapEdgeRow,
@@ -59,6 +68,11 @@ import type {
   SuggestionRow,
   ViewLayoutRow,
 } from "@/lib/mvp1Types";
+import {
+  mapPurposeLabel,
+  mapPurposeOptions,
+  type MapPurposeId,
+} from "@/lib/onboardingOptions";
 
 type ViewId =
   | "projects"
@@ -67,7 +81,8 @@ type ViewId =
   | "map"
   | "suggestions"
   | "export"
-  | "history";
+  | "history"
+  | "settings";
 
 type ProjectFormValues = {
   name: string;
@@ -77,15 +92,76 @@ type ProjectFormValues = {
   memo: string;
 };
 
+type OnboardingDraft = {
+  companyName: string;
+  purposeId: MapPurposeId | "";
+  industry: string;
+  memo: string;
+  websiteUrl: string;
+  snsUrl: string;
+  productInfo: string;
+};
+
+type CodexConnectionAction = "refresh" | "smoke" | "login";
+
+type InformationSourceKind = "manual_note" | "website_url" | "sns_url" | "product_info";
+
+type InformationSourceDraft = {
+  sourceKind: InformationSourceKind;
+  title: string;
+  body: string;
+  url: string;
+};
+
 const navItems: Array<{ id: ViewId; label: string; icon: typeof FolderKanban }> = [
   { id: "projects", label: "案件", icon: FolderKanban },
-  { id: "sources", label: "資料", icon: Upload },
+  { id: "sources", label: "情報", icon: Upload },
   { id: "extract", label: "抽出", icon: ListChecks },
   { id: "map", label: "マップ", icon: MapIcon },
   { id: "suggestions", label: "施策", icon: MessageSquareText },
   { id: "export", label: "出力", icon: Download },
   { id: "history", label: "履歴", icon: History },
+  { id: "settings", label: "設定", icon: Settings },
 ];
+
+const informationSourceOptions: Array<{
+  id: InformationSourceKind;
+  label: string;
+  icon: typeof FileText;
+}> = [
+  { id: "manual_note", label: "自由メモ", icon: MessageSquareText },
+  { id: "website_url", label: "ホームページURL", icon: Globe2 },
+  { id: "sns_url", label: "SNS URL", icon: LinkIcon },
+  { id: "product_info", label: "商品情報", icon: Archive },
+];
+
+function sourceTypeLabel(fileType: string) {
+  return (
+    informationSourceOptions.find((option) => option.id === fileType)?.label ??
+    (fileType === "onboarding_brief"
+      ? "初回入力"
+      : fileType === "markdown"
+        ? "Markdown"
+        : fileType.toUpperCase())
+  );
+}
+
+function shortText(value: string, limit = 92) {
+  const trimmed = value.trim();
+  if (trimmed.length <= limit) return trimmed;
+  return `${trimmed.slice(0, limit)}...`;
+}
+
+function hasOnboardingBrief(workspace: ProjectWorkspace) {
+  return workspace.sourceFiles.some((source) => source.fileType === "onboarding_brief");
+}
+
+function hasUnconfirmedGeneratedItems(workspace: ProjectWorkspace) {
+  return workspace.extractedItems.some(
+    (item) =>
+      item.confidenceStatus === "estimated" || item.confidenceStatus === "needs_review",
+  );
+}
 
 function hasTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -121,6 +197,22 @@ function aiRunStatusLabel(run: AiRunRow | null | undefined) {
   if (run.status === "response_validated") return "検証済み";
   if (run.status === "fallback_response_validated") return "補完検証済み";
   return run.status;
+}
+
+function getPrimaryActionLabel(workspace: ProjectWorkspace) {
+  if (workspace.sourceChunks.length === 0 && workspace.extractedItems.length === 0) {
+    return "情報を追加";
+  }
+  if (workspace.extractedItems.length === 0) {
+    return "AIで材料整理";
+  }
+  if (workspace.nodes.length === 0) {
+    return "マップ生成";
+  }
+  if (workspace.suggestions.length === 0 && workspace.aiComments.length === 0) {
+    return "施策と確認質問";
+  }
+  return "マップに相談";
 }
 
 function layoutToJson(layout: MapNodeLayout) {
@@ -320,6 +412,15 @@ function App() {
   const [layoutSaveScope, setLayoutSaveScope] = useState<string | null>(null);
   const [mapInsightBusy, setMapInsightBusy] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
+  const [codexRuntimeInfo, setCodexRuntimeInfo] = useState<CodexRuntimeInfo | null>(
+    null,
+  );
+  const [codexSmokeResult, setCodexSmokeResult] = useState<CodexSmokeResult | null>(
+    null,
+  );
+  const [deviceCodeResult, setDeviceCodeResult] =
+    useState<DeviceCodeLoginResult | null>(null);
+  const [codexBusy, setCodexBusy] = useState<CodexConnectionAction | null>(null);
   const [approvedChunkSignature, setApprovedChunkSignature] = useState<string | null>(
     null,
   );
@@ -385,12 +486,18 @@ function App() {
   const currentLayoutScope = `${activeProjectId ?? "none"}:${mapViewMode}`;
   const visibleLayoutSaveStatus =
     layoutSaveScope === currentLayoutScope ? layoutSaveStatus : "idle";
+  const primaryActionLabel = getPrimaryActionLabel(workspace);
 
   useEffect(() => {
     if (!notice) return;
     const timeoutId = window.setTimeout(() => setNotice(null), 3200);
     return () => window.clearTimeout(timeoutId);
   }, [notice]);
+
+  useEffect(() => {
+    void handleRefreshCodexRuntime();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isTauriRuntime]);
 
   async function runAction<T>(
     action: () => Promise<T>,
@@ -501,6 +608,11 @@ function App() {
   async function handleAiUpdate() {
     if (!activeProjectId) return;
     if (workspace.extractedItems.length === 0) {
+      if (workspace.sourceChunks.length === 0) {
+        setView("map");
+        setNotice("まずマップ作成画面で目的と情報を入力してください。");
+        return;
+      }
       if (!isAiSendApproved) {
         setView("extract");
         setNotice("AI抽出前に送信範囲を確認してください。");
@@ -535,6 +647,11 @@ function App() {
           setView("map");
         },
       );
+      return;
+    }
+    if (workspace.suggestions.length > 0 || workspace.aiComments.length > 0) {
+      setView("map");
+      await handleAskWholeMap("explain");
       return;
     }
     await runAction(
@@ -587,20 +704,6 @@ function App() {
     );
   }
 
-  async function handleGenerateMap() {
-    if (!activeProjectId) return;
-    await runAction(
-      () =>
-        invoke<MvpRunResult>("generate_map_from_items", { projectId: activeProjectId }),
-      (result) => {
-        setWorkspace(result.workspace);
-        setSelectedSuggestionId(null);
-        setNotice(result.message);
-        setView("map");
-      },
-    );
-  }
-
   async function handleGenerateSuggestions() {
     if (!activeProjectId) return;
     await runAction(
@@ -625,6 +728,167 @@ function App() {
         setNotice(`出力しました: ${result.exportJob.outputPath ?? "-"}`);
       },
     );
+  }
+
+  async function handleRefreshCodexRuntime() {
+    if (!isTauriRuntime) {
+      setCodexRuntimeInfo({
+        commandStrategy: "ブラウザ確認用デモ",
+        resolvedPath: null,
+        realPath: null,
+        version: null,
+        targetTriple: null,
+        sidecarCandidateName: null,
+        frontendShellPermissions: "なし",
+        distributionDecision: "Tauri実行時にCodex接続を確認します。",
+        warnings: ["Tauri実行時のみCodex CLIを確認できます。"],
+      });
+      return;
+    }
+    setCodexBusy("refresh");
+    setError(null);
+    try {
+      const result = await invoke<CodexRuntimeInfo>("get_codex_runtime_info");
+      setCodexRuntimeInfo(result);
+    } catch (caughtError) {
+      setError(String(caughtError));
+    } finally {
+      setCodexBusy(null);
+    }
+  }
+
+  async function handleRunCodexSmokeTest() {
+    if (!isTauriRuntime) return;
+    setCodexBusy("smoke");
+    setError(null);
+    try {
+      const result = await invoke<CodexSmokeResult>("run_codex_smoke_test");
+      setCodexSmokeResult(result);
+      setNotice(
+        result.ok ? "Codex接続を確認しました。" : "Codex接続確認に失敗しました。",
+      );
+    } catch (caughtError) {
+      setError(String(caughtError));
+    } finally {
+      setCodexBusy(null);
+    }
+  }
+
+  async function handleRunCodexLoginCheck() {
+    if (!isTauriRuntime) return;
+    setCodexBusy("login");
+    setError(null);
+    try {
+      const result = await invoke<DeviceCodeLoginResult>("run_codex_device_code_check");
+      setDeviceCodeResult(result);
+      setNotice(
+        result.verificationUrl
+          ? "ChatGPT認証用のURLとコードを取得しました。"
+          : "ChatGPT認証情報を取得できませんでした。",
+      );
+    } catch (caughtError) {
+      setError(String(caughtError));
+    } finally {
+      setCodexBusy(null);
+    }
+  }
+
+  async function handleCreateOnboardingMap(draft: OnboardingDraft) {
+    const purposeLabel = mapPurposeLabel(draft.purposeId);
+    if (!draft.companyName.trim() || !purposeLabel) {
+      setNotice("企業名 / 案件名と目的を入力してください。");
+      return;
+    }
+
+    setIsBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      let projectId = activeProjectId;
+      let nextProjects: Project[];
+
+      if (!projectId || !activeProject) {
+        const created = await invoke<Project>("create_project", {
+          name: draft.companyName.trim(),
+          clientName: draft.companyName.trim(),
+          industry: draft.industry.trim(),
+          description: purposeLabel,
+          memo: draft.memo.trim(),
+        });
+        projectId = created.id;
+        nextProjects = await invoke<Project[]>("list_projects");
+      } else {
+        await invoke<ProjectWorkspace>("update_project", {
+          projectId,
+          name: draft.companyName.trim(),
+          clientName: activeProject.clientName?.trim() || draft.companyName.trim(),
+          industry: draft.industry.trim() || activeProject.industry || "",
+          description: purposeLabel,
+          memo: draft.memo.trim() || activeProject.memo || "",
+        });
+        nextProjects = await invoke<Project[]>("list_projects");
+      }
+
+      const sourceWorkspace = await invoke<ProjectWorkspace>(
+        "create_onboarding_brief_source",
+        {
+          projectId,
+          companyName: draft.companyName.trim(),
+          purposeId: draft.purposeId,
+          purposeLabel,
+          industry: draft.industry.trim(),
+          memo: draft.memo.trim(),
+          websiteUrl: draft.websiteUrl.trim(),
+          snsUrl: draft.snsUrl.trim(),
+          productInfo: draft.productInfo.trim(),
+        },
+      );
+
+      setProjects(nextProjects);
+      setSelectedProjectId(projectId);
+      setWorkspace(sourceWorkspace);
+      setApprovedChunkSignature(null);
+      setExcludedChunkIds([]);
+      setSelectedItemId(null);
+      setSelectedMapElement(null);
+      setSelectedSuggestionId(null);
+      setView("map");
+
+      const sourceChunkIds = sourceWorkspace.sourceChunks.map((chunk) => chunk.id);
+      const extractResult = await invoke<MvpRunResult>("run_extract_items", {
+        projectId,
+        sourceChunkIds,
+      });
+      setWorkspace(extractResult.workspace);
+
+      const mapResult = await invoke<MvpRunResult>("generate_map_from_items", {
+        projectId,
+      });
+      setWorkspace(mapResult.workspace);
+
+      const suggestionsResult = await invoke<MvpRunResult>(
+        "generate_suggestions_from_map",
+        { projectId },
+      );
+
+      setWorkspace(
+        suggestionsResult.workspace.nodes.length > 0
+          ? suggestionsResult.workspace
+          : mapResult.workspace.nodes.length > 0
+            ? mapResult.workspace
+            : extractResult.workspace,
+      );
+      setIsDrawerOpen(true);
+      setNotice(
+        `${
+          suggestionsResult.message || mapResult.message || extractResult.message
+        } 初回生成は未確認ドラフトです。抽出カードの確度を確認してください。`,
+      );
+    } catch (caughtError) {
+      setError(String(caughtError));
+    } finally {
+      setIsBusy(false);
+    }
   }
 
   const handleSavePositions = useCallback(
@@ -739,6 +1003,69 @@ function App() {
         setWorkspace(result.nextWorkspace);
         setApprovedChunkSignature(null);
         setNotice(`${result.count}件の資料を投入しました。`);
+      },
+    );
+  }
+
+  async function handleCreateInformationSource(draft: InformationSourceDraft) {
+    if (!activeProjectId || !isTauriRuntime) return;
+    await runAction(
+      () =>
+        invoke<ProjectWorkspace>("create_text_information_source", {
+          projectId: activeProjectId,
+          sourceKind: draft.sourceKind,
+          title: draft.title.trim(),
+          body: draft.body.trim(),
+          url: draft.url.trim(),
+        }),
+      (nextWorkspace) => {
+        setWorkspace(nextWorkspace);
+        setApprovedChunkSignature(null);
+        setNotice(`${sourceTypeLabel(draft.sourceKind)}を情報ソースに追加しました。`);
+      },
+    );
+  }
+
+  async function handlePickOnboardingFiles(draft: OnboardingDraft) {
+    if (!isTauriRuntime) return;
+    if (activeProjectId) {
+      await handlePickSourceFiles();
+      return;
+    }
+    if (!draft.companyName.trim()) {
+      setNotice("ファイル追加前に企業名 / 案件名を入力してください。");
+      return;
+    }
+
+    await runAction(
+      async () => {
+        const purposeLabel = mapPurposeLabel(draft.purposeId);
+        const project = await invoke<Project>("create_project", {
+          name: draft.companyName.trim(),
+          clientName: draft.companyName.trim(),
+          industry: draft.industry.trim(),
+          description: purposeLabel,
+          memo: draft.memo.trim(),
+        });
+        const imported = await invoke<unknown[]>("import_source_files_from_dialog", {
+          projectId: project.id,
+        });
+        const nextProjects = await invoke<Project[]>("list_projects");
+        const nextWorkspace = await invoke<ProjectWorkspace>("get_project_workspace", {
+          projectId: project.id,
+        });
+        return { importedCount: imported.length, nextProjects, nextWorkspace, project };
+      },
+      ({ importedCount, nextProjects, nextWorkspace, project }) => {
+        setProjects(nextProjects);
+        setSelectedProjectId(project.id);
+        setWorkspace(nextWorkspace);
+        setApprovedChunkSignature(null);
+        setExcludedChunkIds([]);
+        setView("map");
+        if (importedCount > 0) {
+          setNotice(`${importedCount}件の情報ソースを追加しました。`);
+        }
       },
     );
   }
@@ -945,7 +1272,7 @@ function App() {
               type="button"
             >
               <Sparkles size={15} aria-hidden="true" />
-              {isBusy ? "処理中" : "AIで更新"}
+              {isBusy ? "処理中" : primaryActionLabel}
             </button>
           </div>
         </header>
@@ -956,8 +1283,15 @@ function App() {
         <div className="workspace">
           {view === "map" ? (
             <MapWorkspace
+              activeProject={activeProject}
+              canPickFiles={isTauriRuntime}
+              codexBusy={codexBusy}
+              codexRuntimeInfo={codexRuntimeInfo}
+              codexSmokeResult={codexSmokeResult}
+              deviceCodeResult={deviceCodeResult}
               drawerOpen={isDrawerOpen}
               editMode={isMapEditMode}
+              generationBusy={isBusy}
               layoutSaveStatus={visibleLayoutSaveStatus}
               latestAiRun={latestAiRun}
               mapInsightBusy={mapInsightBusy}
@@ -965,10 +1299,19 @@ function App() {
               onArrangeMap={handleArrangeMap}
               onAskWholeMap={handleAskWholeMap}
               onCreateMapEdge={handleCreateMapEdge}
+              onCreateOnboardingMap={handleCreateOnboardingMap}
               onDrawerOpenChange={setIsDrawerOpen}
               onEditModeChange={setIsMapEditMode}
-              onGenerateMap={handleGenerateMap}
               onGenerateSuggestions={handleGenerateSuggestions}
+              onOpenExtractReview={() => {
+                setSelectedItemId(workspace.extractedItems[0]?.id ?? null);
+                setIsDrawerOpen(false);
+                setView("extract");
+              }}
+              onPickFiles={handlePickOnboardingFiles}
+              onRefreshCodexRuntime={handleRefreshCodexRuntime}
+              onRunCodexLoginCheck={handleRunCodexLoginCheck}
+              onRunCodexSmokeTest={handleRunCodexSmokeTest}
               onMapViewModeChange={(nextMode) => {
                 setMapViewMode(nextMode);
                 setSelectedMapElement(null);
@@ -1020,6 +1363,8 @@ function App() {
           {view === "sources" ? (
             <SourcesView
               canPickFiles={Boolean(activeProjectId && isTauriRuntime)}
+              canSaveTextSource={Boolean(activeProjectId && isTauriRuntime)}
+              onCreateInformationSource={handleCreateInformationSource}
               onPickFiles={handlePickSourceFiles}
               workspace={workspace}
             />
@@ -1070,6 +1415,17 @@ function App() {
             <ExportView onExport={handleExport} workspace={workspace} />
           ) : null}
           {view === "history" ? <HistoryView workspace={workspace} /> : null}
+          {view === "settings" ? (
+            <SettingsView
+              codexBusy={codexBusy}
+              codexRuntimeInfo={codexRuntimeInfo}
+              codexSmokeResult={codexSmokeResult}
+              deviceCodeResult={deviceCodeResult}
+              onRefreshCodexRuntime={handleRefreshCodexRuntime}
+              onRunCodexLoginCheck={handleRunCodexLoginCheck}
+              onRunCodexSmokeTest={handleRunCodexSmokeTest}
+            />
+          ) : null}
         </div>
 
         <InspectorPanel
@@ -1092,8 +1448,15 @@ function StatusChip({ children }: { children: React.ReactNode }) {
 }
 
 function MapWorkspace({
+  activeProject,
+  canPickFiles,
+  codexBusy,
+  codexRuntimeInfo,
+  codexSmokeResult,
+  deviceCodeResult,
   drawerOpen,
   editMode,
+  generationBusy,
   layoutSaveStatus,
   latestAiRun,
   mapInsightBusy,
@@ -1101,10 +1464,15 @@ function MapWorkspace({
   onArrangeMap,
   onAskWholeMap,
   onCreateMapEdge,
+  onCreateOnboardingMap,
   onDrawerOpenChange,
   onEditModeChange,
-  onGenerateMap,
   onGenerateSuggestions,
+  onOpenExtractReview,
+  onPickFiles,
+  onRefreshCodexRuntime,
+  onRunCodexLoginCheck,
+  onRunCodexSmokeTest,
   onMapViewModeChange,
   onSavePositions,
   onSelectItem,
@@ -1116,8 +1484,15 @@ function MapWorkspace({
   onTrayOpenChange,
   workspace,
 }: {
+  activeProject: Project | null;
+  canPickFiles: boolean;
+  codexBusy: CodexConnectionAction | null;
+  codexRuntimeInfo: CodexRuntimeInfo | null;
+  codexSmokeResult: CodexSmokeResult | null;
+  deviceCodeResult: DeviceCodeLoginResult | null;
   drawerOpen: boolean;
   editMode: boolean;
+  generationBusy: boolean;
   layoutSaveStatus: "idle" | "saving" | "saved" | "error";
   latestAiRun: AiRunRow | null;
   mapInsightBusy: boolean;
@@ -1125,10 +1500,15 @@ function MapWorkspace({
   onArrangeMap: () => void;
   onAskWholeMap: (questionType?: string) => void;
   onCreateMapEdge: (sourceNodeId: string, targetNodeId: string) => void;
+  onCreateOnboardingMap: (draft: OnboardingDraft) => void;
   onDrawerOpenChange: (open: boolean) => void;
   onEditModeChange: (enabled: boolean) => void;
-  onGenerateMap: () => void;
   onGenerateSuggestions: () => void;
+  onOpenExtractReview: () => void;
+  onPickFiles: (draft: OnboardingDraft) => void;
+  onRefreshCodexRuntime: () => void;
+  onRunCodexLoginCheck: () => void;
+  onRunCodexSmokeTest: () => void;
   onMapViewModeChange: (mode: MapViewMode) => void;
   onSavePositions: (viewMode: MapViewMode, positions: MapNodeLayout[]) => void;
   onSelectItem: (itemId: string) => void;
@@ -1145,6 +1525,9 @@ function MapWorkspace({
     () => buildImpactPositionOverrides(workspace, impactStats),
     [impactStats, workspace],
   );
+  const hasGeneratedMap = workspace.nodes.length > 0;
+  const shouldReviewDraft =
+    hasOnboardingBrief(workspace) && hasUnconfirmedGeneratedItems(workspace);
   const handleCanvasPositionsChange = useCallback(
     (positions: MapNodeLayout[]) => onSavePositions(mapViewMode, positions),
     [mapViewMode, onSavePositions],
@@ -1152,87 +1535,88 @@ function MapWorkspace({
 
   return (
     <div className="map-workbench">
-      <div className="map-view-switch" role="tablist" aria-label="マップ表示">
-        <button
-          className={mapViewMode === "customer_journey" ? "active" : ""}
-          onClick={() => onMapViewModeChange("customer_journey")}
-          type="button"
-        >
-          <MapIcon size={14} aria-hidden="true" />
-          顧客導線
-        </button>
-        <button
-          className={mapViewMode === "business_impact" ? "active" : ""}
-          onClick={() => onMapViewModeChange("business_impact")}
-          type="button"
-        >
-          <BarChart3 size={14} aria-hidden="true" />
-          事業インパクト
-        </button>
-      </div>
+      {hasGeneratedMap ? (
+        <>
+          <div className="map-view-switch" role="tablist" aria-label="マップ表示">
+            <button
+              className={mapViewMode === "customer_journey" ? "active" : ""}
+              onClick={() => onMapViewModeChange("customer_journey")}
+              type="button"
+            >
+              <MapIcon size={14} aria-hidden="true" />
+              顧客導線
+            </button>
+            <button
+              className={mapViewMode === "business_impact" ? "active" : ""}
+              onClick={() => onMapViewModeChange("business_impact")}
+              type="button"
+            >
+              <BarChart3 size={14} aria-hidden="true" />
+              事業インパクト
+            </button>
+          </div>
 
-      <div className="map-edit-toolbar" aria-label="マップ編集モード">
-        <button
-          className={!editMode ? "active" : ""}
-          onClick={() => onEditModeChange(false)}
-          title="閲覧"
-          type="button"
-        >
-          <MousePointer2 size={14} aria-hidden="true" />
-          閲覧
-        </button>
-        <button
-          className={editMode ? "active" : ""}
-          onClick={() => onEditModeChange(true)}
-          title="編集"
-          type="button"
-        >
-          <PencilRuler size={14} aria-hidden="true" />
-          編集
-        </button>
-        <button
-          disabled={workspace.nodes.length === 0}
-          onClick={onArrangeMap}
-          title="見やすく整列"
-          type="button"
-        >
-          <MapIcon size={14} aria-hidden="true" />
-          整える
-        </button>
-        <button
-          disabled={workspace.nodes.length === 0 || mapInsightBusy}
-          onClick={() => onAskWholeMap("explain")}
-          title="マップ全体をCodexに聞く"
-          type="button"
-        >
-          <MessageSquareText size={14} aria-hidden="true" />
-          聞く
-        </button>
-        <span className={`layout-save-status layout-save-status-${layoutSaveStatus}`}>
-          {layoutSaveStatus === "saving"
-            ? "保存中"
-            : layoutSaveStatus === "error"
-              ? "保存失敗"
-              : layoutSaveStatus === "idle"
-                ? "未変更"
-                : "保存済み"}
-        </span>
-        <span
-          className={`map-ai-status ${
-            isFallbackRun(latestAiRun) ? "map-ai-status-fallback" : ""
-          }`}
-          title={latestAiRun?.error ?? aiRunStatusLabel(latestAiRun)}
-        >
-          {aiRunSourceLabel(latestAiRun)}
-        </span>
-        {editMode ? (
-          <span className="map-edit-hint">
-            ノードをドラッグ。選択後、角で大きさを調整。
-          </span>
-        ) : null}
-      </div>
+          <div className="map-edit-toolbar" aria-label="マップ編集モード">
+            <button
+              className={!editMode ? "active" : ""}
+              onClick={() => onEditModeChange(false)}
+              title="閲覧"
+              type="button"
+            >
+              <MousePointer2 size={14} aria-hidden="true" />
+              閲覧
+            </button>
+            <button
+              className={editMode ? "active" : ""}
+              onClick={() => onEditModeChange(true)}
+              title="編集"
+              type="button"
+            >
+              <PencilRuler size={14} aria-hidden="true" />
+              編集
+            </button>
+            <button onClick={onArrangeMap} title="見やすく整列" type="button">
+              <MapIcon size={14} aria-hidden="true" />
+              整える
+            </button>
+            <button
+              disabled={mapInsightBusy}
+              onClick={() => onAskWholeMap("explain")}
+              title="マップ全体をCodexに聞く"
+              type="button"
+            >
+              <MessageSquareText size={14} aria-hidden="true" />
+              聞く
+            </button>
+            <span
+              className={`layout-save-status layout-save-status-${layoutSaveStatus}`}
+            >
+              {layoutSaveStatus === "saving"
+                ? "保存中"
+                : layoutSaveStatus === "error"
+                  ? "保存失敗"
+                  : layoutSaveStatus === "idle"
+                    ? "未変更"
+                    : "保存済み"}
+            </span>
+            <span
+              className={`map-ai-status ${
+                isFallbackRun(latestAiRun) ? "map-ai-status-fallback" : ""
+              }`}
+              title={latestAiRun?.error ?? aiRunStatusLabel(latestAiRun)}
+            >
+              {aiRunSourceLabel(latestAiRun)}
+            </span>
+            {editMode ? (
+              <span className="map-edit-hint">
+                ノードをドラッグ。選択後、角で大きさを調整。
+              </span>
+            ) : null}
+          </div>
+        </>
+      ) : null}
 
-      {mapViewMode === "customer_journey" ? (
+      {hasGeneratedMap && mapViewMode === "customer_journey" ? (
         <button
           className={`tray-tab ${trayOpen ? "tray-tab-open" : ""}`}
           aria-expanded={trayOpen}
@@ -1243,7 +1627,7 @@ function MapWorkspace({
           抽出カード {workspace.extractedItems.length}
         </button>
       ) : null}
-      {mapViewMode === "customer_journey" ? (
+      {hasGeneratedMap && mapViewMode === "customer_journey" ? (
         <aside
           className={`extraction-tray ${
             trayOpen ? "extraction-tray-open" : "extraction-tray-closed"
@@ -1279,7 +1663,7 @@ function MapWorkspace({
         </aside>
       ) : null}
 
-      {mapViewMode === "business_impact" && workspace.nodes.length > 0 ? (
+      {mapViewMode === "business_impact" && hasGeneratedMap ? (
         <>
           <button
             className={`tray-tab impact-panel-tab ${
@@ -1319,75 +1703,506 @@ function MapWorkspace({
             viewMode={mapViewMode}
           />
         ) : (
-          <div className="empty-map">
-            <MapIcon size={32} aria-hidden="true" />
-            <h2>シナジーマップ未生成</h2>
-            <p>抽出カードを確認したら、顧客導線マップを生成します。</p>
-            <button className="primary-button" onClick={onGenerateMap} type="button">
-              <Sparkles size={15} aria-hidden="true" />
-              マップ生成
-            </button>
-          </div>
+          <MapCreationFlow
+            activeProject={activeProject}
+            canPickFiles={canPickFiles}
+            codexBusy={codexBusy}
+            codexRuntimeInfo={codexRuntimeInfo}
+            codexSmokeResult={codexSmokeResult}
+            deviceCodeResult={deviceCodeResult}
+            generationBusy={generationBusy}
+            key={activeProject?.id ?? "new-map"}
+            onCreateMap={onCreateOnboardingMap}
+            onPickFiles={onPickFiles}
+            onRefreshCodexRuntime={onRefreshCodexRuntime}
+            onRunCodexLoginCheck={onRunCodexLoginCheck}
+            onRunCodexSmokeTest={onRunCodexSmokeTest}
+            workspace={workspace}
+          />
         )}
       </section>
 
-      <div className={`bottom-drawer ${drawerOpen ? "bottom-drawer-open" : ""}`}>
-        <button
-          className="drawer-summary"
-          onClick={() => onDrawerOpenChange(!drawerOpen)}
-          type="button"
-        >
-          <span>AIコメント・確認質問</span>
-          <StatusChip>
-            強い導線{" "}
-            {workspace.edges.filter((edge) => edge.strength === "strong").length}
-          </StatusChip>
-          <StatusChip>
-            詰まり{" "}
-            {
-              workspace.aiComments.filter(
-                (comment) => comment.commentType === "bottleneck",
-              ).length
-            }
-          </StatusChip>
-          <StatusChip>
-            未接続候補{" "}
-            {
-              workspace.aiComments.filter(
-                (comment) => comment.commentType === "unconnected",
-              ).length
-            }
-          </StatusChip>
-        </button>
-        {drawerOpen ? (
-          <div className="drawer-content">
-            {workspace.nodes.length > 0 ? (
-              <MapInsightActions
-                busy={mapInsightBusy}
-                error={null}
-                onAsk={onAskWholeMap}
-                targetLabel="マップ全体"
-              />
-            ) : null}
-            <button
-              className="ghost-button"
-              onClick={onGenerateSuggestions}
-              type="button"
-            >
-              <Sparkles size={15} aria-hidden="true" />
-              {mapViewMode === "business_impact"
-                ? "インパクト評価生成"
-                : "AIコメント生成"}
-            </button>
-            {workspace.aiComments.map((comment) => (
-              <div className="comment-line" key={comment.id}>
-                <strong>{comment.title}</strong>
-                <span>{comment.body}</span>
-              </div>
+      {hasGeneratedMap ? (
+        <div className={`bottom-drawer ${drawerOpen ? "bottom-drawer-open" : ""}`}>
+          <button
+            className="drawer-summary"
+            onClick={() => onDrawerOpenChange(!drawerOpen)}
+            type="button"
+          >
+            <span>AIコメント・確認質問</span>
+            <StatusChip>
+              強い導線{" "}
+              {workspace.edges.filter((edge) => edge.strength === "strong").length}
+            </StatusChip>
+            <StatusChip>
+              詰まり{" "}
+              {
+                workspace.aiComments.filter(
+                  (comment) => comment.commentType === "bottleneck",
+                ).length
+              }
+            </StatusChip>
+            <StatusChip>
+              未接続候補{" "}
+              {
+                workspace.aiComments.filter(
+                  (comment) => comment.commentType === "unconnected",
+                ).length
+              }
+            </StatusChip>
+          </button>
+          {drawerOpen ? (
+            <div className="drawer-content">
+              {workspace.nodes.length > 0 ? (
+                <MapInsightActions
+                  busy={mapInsightBusy}
+                  error={null}
+                  onAsk={onAskWholeMap}
+                  targetLabel="マップ全体"
+                />
+              ) : null}
+              {shouldReviewDraft ? (
+                <div className="draft-review-banner">
+                  <TriangleAlert size={15} aria-hidden="true" />
+                  <div>
+                    <strong>初回生成ドラフトです</strong>
+                    <span>
+                      推定や要確認を含みます。施策判断の前に抽出カードの確度を確認してください。
+                    </span>
+                  </div>
+                  <button
+                    className="ghost-button"
+                    onClick={onOpenExtractReview}
+                    type="button"
+                  >
+                    抽出カードを確認
+                  </button>
+                </div>
+              ) : null}
+              <button
+                className="ghost-button"
+                onClick={onGenerateSuggestions}
+                type="button"
+              >
+                <Sparkles size={15} aria-hidden="true" />
+                {mapViewMode === "business_impact"
+                  ? "インパクト評価生成"
+                  : "AIコメント生成"}
+              </button>
+              {workspace.aiComments.map((comment) => (
+                <div className="comment-line" key={comment.id}>
+                  <strong>{comment.title}</strong>
+                  <span>{comment.body}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function MapCreationFlow({
+  activeProject,
+  canPickFiles,
+  codexBusy,
+  codexRuntimeInfo,
+  codexSmokeResult,
+  deviceCodeResult,
+  generationBusy,
+  onCreateMap,
+  onPickFiles,
+  onRefreshCodexRuntime,
+  onRunCodexLoginCheck,
+  onRunCodexSmokeTest,
+  workspace,
+}: {
+  activeProject: Project | null;
+  canPickFiles: boolean;
+  codexBusy: CodexConnectionAction | null;
+  codexRuntimeInfo: CodexRuntimeInfo | null;
+  codexSmokeResult: CodexSmokeResult | null;
+  deviceCodeResult: DeviceCodeLoginResult | null;
+  generationBusy: boolean;
+  onCreateMap: (draft: OnboardingDraft) => void;
+  onPickFiles: (draft: OnboardingDraft) => void;
+  onRefreshCodexRuntime: () => void;
+  onRunCodexLoginCheck: () => void;
+  onRunCodexSmokeTest: () => void;
+  workspace: ProjectWorkspace;
+}) {
+  const [draft, setDraft] = useState<OnboardingDraft>({
+    companyName: activeProject?.name ?? "",
+    purposeId: "",
+    industry: activeProject?.industry ?? "",
+    memo: activeProject?.memo ?? "",
+    websiteUrl: "",
+    snsUrl: "",
+    productInfo: "",
+  });
+  const [sendApproved, setSendApproved] = useState(false);
+
+  const purposeLabel = mapPurposeLabel(draft.purposeId);
+  const sourceCount = workspace.sourceFiles.length;
+  const additionalInputs = [
+    draft.memo,
+    draft.websiteUrl,
+    draft.snsUrl,
+    draft.productInfo,
+  ].filter((value) => value.trim().length > 0).length;
+  const informationScore = sourceCount + additionalInputs;
+  const informationLevel =
+    informationScore >= 4 ? "高" : informationScore >= 2 ? "中" : "低";
+  const hypothesisMode = informationScore === 0;
+  const canGenerate = draft.companyName.trim().length > 0 && Boolean(purposeLabel);
+  const targetSourceCount = sourceCount + 1;
+  const sendScopeItems = [
+    `初回入力: ${draft.companyName.trim() || "企業名未入力"} / ${
+      purposeLabel || "目的未選択"
+    }`,
+    draft.industry.trim() ? `業種: ${draft.industry.trim()}` : "",
+    draft.memo.trim() ? `メモ: ${shortText(draft.memo)}` : "",
+    draft.websiteUrl.trim() ? `ホームページURL: ${draft.websiteUrl.trim()}` : "",
+    draft.snsUrl.trim() ? `SNS URL: ${draft.snsUrl.trim()}` : "",
+    draft.productInfo.trim() ? `商品情報: ${shortText(draft.productInfo)}` : "",
+    ...workspace.sourceFiles
+      .slice(0, 6)
+      .map(
+        (source) =>
+          `${sourceTypeLabel(source.fileType)}: ${source.fileName} (${source.chunkCount} chunks)`,
+      ),
+  ].filter(Boolean);
+
+  function updateDraft<K extends keyof OnboardingDraft>(
+    key: K,
+    value: OnboardingDraft[K],
+  ) {
+    setDraft((current) => ({ ...current, [key]: value }));
+  }
+
+  return (
+    <div className="map-creation-flow">
+      <section className="creation-main">
+        <div className="creation-header">
+          <div>
+            <span className="eyebrow">新しいマップを作る</span>
+            <h1>必要情報を入れると、AIがシナジーマップを生成します</h1>
+            <p>
+              目的、企業情報、マップの材料を入れてください。情報が少ない場合も仮説マップとして開始できます。
+            </p>
+          </div>
+          <div className="creation-progress" aria-label="初回マップ作成ステップ">
+            {["目的", "接続", "材料", "生成"].map((label, index) => (
+              <span key={label} className={index === 0 ? "active" : ""}>
+                {label}
+              </span>
             ))}
           </div>
-        ) : null}
+        </div>
+
+        <div className="creation-grid">
+          <section className="creation-section">
+            <div className="section-title">
+              <Target size={15} aria-hidden="true" />
+              <span>目的</span>
+            </div>
+            <div className="purpose-grid">
+              {mapPurposeOptions.map((option) => (
+                <button
+                  className={`purpose-option ${
+                    draft.purposeId === option.id ? "purpose-option-active" : ""
+                  }`}
+                  key={option.id}
+                  onClick={() => updateDraft("purposeId", option.id)}
+                  type="button"
+                >
+                  <strong>{option.label}</strong>
+                  <span>{option.description}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+
+          <section className="creation-section">
+            <div className="section-title">
+              <FolderKanban size={15} aria-hidden="true" />
+              <span>基本情報</span>
+            </div>
+            <FormGrid>
+              <Field label="企業名 / 案件名">
+                <input
+                  onChange={(event) => updateDraft("companyName", event.target.value)}
+                  placeholder="例: 山田製作所 DX支援"
+                  value={draft.companyName}
+                />
+              </Field>
+              <Field label="業種">
+                <input
+                  onChange={(event) => updateDraft("industry", event.target.value)}
+                  placeholder="例: 製造業、店舗ビジネス、士業"
+                  value={draft.industry}
+                />
+              </Field>
+            </FormGrid>
+            <Field label="今わかっていること / 困っていること">
+              <textarea
+                onChange={(event) => updateDraft("memo", event.target.value)}
+                placeholder="例: Web問い合わせはあるが、商談化や継続提案への導線が見えていない。"
+                value={draft.memo}
+              />
+            </Field>
+          </section>
+
+          <section className="creation-section">
+            <div className="section-title">
+              <Database size={15} aria-hidden="true" />
+              <span>マップの材料</span>
+            </div>
+            <div className="source-input-grid">
+              <Field label="ホームページURL">
+                <input
+                  onChange={(event) => updateDraft("websiteUrl", event.target.value)}
+                  placeholder="https://example.com"
+                  value={draft.websiteUrl}
+                />
+              </Field>
+              <Field label="SNSアカウントURL">
+                <input
+                  onChange={(event) => updateDraft("snsUrl", event.target.value)}
+                  placeholder="Instagram、X、YouTubeなど"
+                  value={draft.snsUrl}
+                />
+              </Field>
+            </div>
+            <Field label="商品 / サービス情報">
+              <textarea
+                onChange={(event) => updateDraft("productInfo", event.target.value)}
+                placeholder="主力商品、提供サービス、客単価、継続商品など"
+                value={draft.productInfo}
+              />
+            </Field>
+            <div className="source-actions">
+              <button
+                className="ghost-button"
+                disabled={!canPickFiles}
+                onClick={() => onPickFiles(draft)}
+                type="button"
+              >
+                <Upload size={15} aria-hidden="true" />
+                ファイルを追加
+              </button>
+              <span>{sourceCount}件の情報ソースを登録済み</span>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <aside className="creation-side">
+        <CodexConnectionCard
+          busy={codexBusy}
+          runtimeInfo={codexRuntimeInfo}
+          smokeResult={codexSmokeResult}
+          deviceCodeResult={deviceCodeResult}
+          onLoginCheck={onRunCodexLoginCheck}
+          onRefresh={onRefreshCodexRuntime}
+          onSmokeTest={onRunCodexSmokeTest}
+        />
+
+        <div className="generation-card">
+          <div className="section-title">
+            <Gauge size={15} aria-hidden="true" />
+            <span>生成準備</span>
+          </div>
+          <div className="readiness-meter">
+            <span>情報量</span>
+            <strong>{informationLevel}</strong>
+          </div>
+          <div className="readiness-meter">
+            <span>確度</span>
+            <strong>{hypothesisMode ? "仮説多め" : "根拠あり"}</strong>
+          </div>
+          <div className="send-scope-preview">
+            <strong>AIへ送る要約</strong>
+            <ul>
+              {sendScopeItems.slice(0, 8).map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+            {sendScopeItems.length > 8 ? (
+              <small>ほか{sendScopeItems.length - 8}件の情報ソース</small>
+            ) : null}
+          </div>
+          <label className="onboarding-send-confirm">
+            <input
+              checked={sendApproved}
+              onChange={(event) => setSendApproved(event.target.checked)}
+              type="checkbox"
+            />
+            <span>
+              AIへ送る範囲を確認しました。対象は初回入力と登録済み情報ソース
+              {targetSourceCount}件です。
+            </span>
+          </label>
+          {hypothesisMode ? (
+            <div className="hypothesis-warning">
+              <TriangleAlert size={15} aria-hidden="true" />
+              <span>
+                入力情報が少ないため推測を含みます。資料、URL、メモを追加すると精度が上がります。
+              </span>
+            </div>
+          ) : null}
+          <button
+            className="primary-button creation-generate-button"
+            disabled={!canGenerate || !sendApproved || generationBusy}
+            onClick={() => onCreateMap(draft)}
+            type="button"
+          >
+            <Sparkles size={15} aria-hidden="true" />
+            {generationBusy
+              ? "生成中"
+              : hypothesisMode
+                ? "仮説マップを生成する"
+                : "シナジーマップを生成する"}
+          </button>
+          {!canGenerate ? (
+            <small>企業名 / 案件名と目的を入力すると生成できます。</small>
+          ) : !sendApproved ? (
+            <small>送信範囲を確認すると生成できます。</small>
+          ) : (
+            <small>AIが材料整理、マップ生成、施策と確認質問の作成まで進めます。</small>
+          )}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function CodexConnectionCard({
+  busy,
+  deviceCodeResult,
+  onLoginCheck,
+  onRefresh,
+  onSmokeTest,
+  runtimeInfo,
+  smokeResult,
+}: {
+  busy: CodexConnectionAction | null;
+  deviceCodeResult: DeviceCodeLoginResult | null;
+  onLoginCheck: () => void;
+  onRefresh: () => void;
+  onSmokeTest: () => void;
+  runtimeInfo: CodexRuntimeInfo | null;
+  smokeResult: CodexSmokeResult | null;
+}) {
+  const cliDetected = Boolean(runtimeInfo?.resolvedPath);
+  const deviceCodeCompleted = deviceCodeResult?.completionSuccess === true;
+  const authenticated = (smokeResult?.authenticated ?? false) || deviceCodeCompleted;
+  const hasSmokeResult = Boolean(smokeResult);
+  const hasAuthSignal = hasSmokeResult || deviceCodeResult !== null;
+  const authState = authenticated
+    ? deviceCodeCompleted && !smokeResult?.authenticated
+      ? "認証完了"
+      : "接続済み"
+    : hasAuthSignal
+      ? "未接続"
+      : "未確認";
+  const authTone = authenticated ? "good" : hasAuthSignal ? "warn" : "neutral";
+
+  return (
+    <section className="codex-card">
+      <div className="section-title">
+        <Settings size={15} aria-hidden="true" />
+        <span>Codex接続</span>
       </div>
+      <div className="connection-status-grid">
+        <ConnectionStatus
+          label="Codex CLI"
+          state={cliDetected ? "検出済み" : "未検出"}
+          tone={cliDetected ? "good" : "warn"}
+        />
+        <ConnectionStatus label="ChatGPT認証" state={authState} tone={authTone} />
+      </div>
+      <div className="codex-detail-list">
+        <span>Version: {runtimeInfo?.version ?? "-"}</span>
+        <span>Mode: {authenticated ? "Codex生成" : "ローカルドラフト可"}</span>
+      </div>
+      {runtimeInfo?.warnings.length ? (
+        <div className="codex-warning">
+          <Info size={14} aria-hidden="true" />
+          <span>{runtimeInfo.warnings[0]}</span>
+        </div>
+      ) : null}
+      {deviceCodeResult?.verificationUrl ? (
+        <div className="device-code-box">
+          <span>認証URL</span>
+          <a href={deviceCodeResult.verificationUrl} rel="noreferrer" target="_blank">
+            {deviceCodeResult.verificationUrl}
+            <ExternalLink size={12} aria-hidden="true" />
+          </a>
+          <strong>{deviceCodeResult.userCode ?? ""}</strong>
+        </div>
+      ) : null}
+      {deviceCodeResult ? (
+        <div
+          className={`codex-warning ${deviceCodeCompleted ? "codex-warning-good" : ""}`}
+        >
+          <Info size={14} aria-hidden="true" />
+          <span>
+            {deviceCodeCompleted
+              ? "ChatGPT認証が完了しました。接続テストでCodex生成を確認できます。"
+              : (deviceCodeResult.errors[0] ??
+                deviceCodeResult.warnings[0] ??
+                "ChatGPT認証は未完了です。URLとコードを確認してください。")}
+          </span>
+        </div>
+      ) : null}
+      <div className="connection-actions">
+        <button
+          className="ghost-button"
+          disabled={busy !== null}
+          onClick={onRefresh}
+          type="button"
+        >
+          <Settings size={14} aria-hidden="true" />
+          {busy === "refresh" ? "確認中" : "状態確認"}
+        </button>
+        <button
+          className="ghost-button"
+          disabled={busy !== null || !cliDetected}
+          onClick={onSmokeTest}
+          type="button"
+        >
+          <Sparkles size={14} aria-hidden="true" />
+          {busy === "smoke" ? "接続中" : "接続テスト"}
+        </button>
+        <button
+          className="ghost-button"
+          disabled={busy !== null || !cliDetected}
+          onClick={onLoginCheck}
+          type="button"
+        >
+          <ExternalLink size={14} aria-hidden="true" />
+          {busy === "login" ? "取得中" : "ChatGPT接続"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function ConnectionStatus({
+  label,
+  state,
+  tone,
+}: {
+  label: string;
+  state: string;
+  tone: "good" | "neutral" | "warn";
+}) {
+  return (
+    <div className={`connection-status connection-status-${tone}`}>
+      <span>{label}</span>
+      <strong>{state}</strong>
     </div>
   );
 }
@@ -1779,25 +2594,195 @@ function ProjectsView({
   );
 }
 
+function SettingsView({
+  codexBusy,
+  codexRuntimeInfo,
+  codexSmokeResult,
+  deviceCodeResult,
+  onRefreshCodexRuntime,
+  onRunCodexLoginCheck,
+  onRunCodexSmokeTest,
+}: {
+  codexBusy: CodexConnectionAction | null;
+  codexRuntimeInfo: CodexRuntimeInfo | null;
+  codexSmokeResult: CodexSmokeResult | null;
+  deviceCodeResult: DeviceCodeLoginResult | null;
+  onRefreshCodexRuntime: () => void;
+  onRunCodexLoginCheck: () => void;
+  onRunCodexSmokeTest: () => void;
+}) {
+  return (
+    <section className="page-panel settings-panel">
+      <div className="page-header">
+        <div>
+          <h1>設定</h1>
+          <p>Codex接続、ChatGPT認証、ローカルドラフトへの切り替わりを確認します。</p>
+        </div>
+      </div>
+      <div className="settings-grid">
+        <CodexConnectionCard
+          busy={codexBusy}
+          runtimeInfo={codexRuntimeInfo}
+          smokeResult={codexSmokeResult}
+          deviceCodeResult={deviceCodeResult}
+          onLoginCheck={onRunCodexLoginCheck}
+          onRefresh={onRefreshCodexRuntime}
+          onSmokeTest={onRunCodexSmokeTest}
+        />
+        <div className="settings-detail-card">
+          <div className="section-title">
+            <Info size={15} aria-hidden="true" />
+            <span>接続情報</span>
+          </div>
+          <dl>
+            <dt>Codex CLI path</dt>
+            <dd>{codexRuntimeInfo?.resolvedPath ?? "-"}</dd>
+            <dt>real path</dt>
+            <dd>{codexRuntimeInfo?.realPath ?? "-"}</dd>
+            <dt>target</dt>
+            <dd>{codexRuntimeInfo?.targetTriple ?? "-"}</dd>
+            <dt>sidecar candidate</dt>
+            <dd>{codexRuntimeInfo?.sidecarCandidateName ?? "-"}</dd>
+            <dt>distribution</dt>
+            <dd>{codexRuntimeInfo?.distributionDecision ?? "-"}</dd>
+          </dl>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function SourcesView({
   canPickFiles,
+  canSaveTextSource,
+  onCreateInformationSource,
   onPickFiles,
   workspace,
 }: {
   canPickFiles: boolean;
+  canSaveTextSource: boolean;
+  onCreateInformationSource: (draft: InformationSourceDraft) => void;
   onPickFiles: () => void;
   workspace: ProjectWorkspace;
 }) {
+  const [draft, setDraft] = useState<InformationSourceDraft>({
+    sourceKind: "manual_note",
+    title: "",
+    body: "",
+    url: "",
+  });
+  const selectedOption =
+    informationSourceOptions.find((option) => option.id === draft.sourceKind) ??
+    informationSourceOptions[0];
+  const needsUrl = draft.sourceKind === "website_url" || draft.sourceKind === "sns_url";
+  const canSave =
+    canSaveTextSource &&
+    (needsUrl ? draft.url.trim().length > 0 : draft.body.trim().length > 0);
+
+  function updateDraft<K extends keyof InformationSourceDraft>(
+    key: K,
+    value: InformationSourceDraft[K],
+  ) {
+    setDraft((current) => ({ ...current, [key]: value }));
+  }
+
+  function submitInformationSource(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canSave) return;
+    onCreateInformationSource(draft);
+    setDraft({
+      sourceKind: draft.sourceKind,
+      title: "",
+      body: "",
+      url: "",
+    });
+  }
+
   return (
     <section className="page-panel">
       <div className="page-header">
         <div>
-          <h1>資料投入</h1>
-          <p>
-            PDF / CSV / XLSX / Markdown / Textをドロップまたはクリックで投入します。
-          </p>
+          <h1>情報ソース</h1>
+          <p>ファイル、メモ、URL、SNS、商品情報をマップの材料として追加します。</p>
         </div>
       </div>
+      <div className="source-type-strip">
+        {[
+          [FileText, "ファイル"],
+          [MessageSquareText, "自由メモ"],
+          [Globe2, "ホームページURL"],
+          [LinkIcon, "SNS URL"],
+          [Archive, "商品情報"],
+        ].map(([Icon, label]) => {
+          const SourceIcon = Icon as typeof FileText;
+          return (
+            <div className="source-type-chip" key={String(label)}>
+              <SourceIcon size={14} aria-hidden="true" />
+              <span>{String(label)}</span>
+            </div>
+          );
+        })}
+      </div>
+      <form className="source-add-panel" onSubmit={submitInformationSource}>
+        <div className="source-kind-tabs" role="tablist" aria-label="情報ソース種別">
+          {informationSourceOptions.map((option) => {
+            const SourceIcon = option.icon;
+            return (
+              <button
+                className={draft.sourceKind === option.id ? "active" : ""}
+                key={option.id}
+                onClick={() => updateDraft("sourceKind", option.id)}
+                type="button"
+              >
+                <SourceIcon size={14} aria-hidden="true" />
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+        <FormGrid>
+          <Field label="タイトル">
+            <input
+              onChange={(event) => updateDraft("title", event.target.value)}
+              placeholder={selectedOption.label}
+              value={draft.title}
+            />
+          </Field>
+          {needsUrl ? (
+            <Field label="URL">
+              <input
+                onChange={(event) => updateDraft("url", event.target.value)}
+                placeholder={
+                  draft.sourceKind === "sns_url"
+                    ? "https://instagram.com/example"
+                    : "https://example.com"
+                }
+                value={draft.url}
+              />
+            </Field>
+          ) : null}
+        </FormGrid>
+        <Field label={needsUrl ? "補足メモ" : "内容"}>
+          <textarea
+            onChange={(event) => updateDraft("body", event.target.value)}
+            placeholder={
+              needsUrl
+                ? "このURLから確認したいこと、見てほしい商品や導線など"
+                : "事業、商品、集客、顧客接点、売上導線について分かっていること"
+            }
+            value={draft.body}
+          />
+        </Field>
+        <div className="source-add-actions">
+          <button className="primary-button" disabled={!canSave} type="submit">
+            <Plus size={15} aria-hidden="true" />
+            情報ソースに追加
+          </button>
+          <small>
+            URLやSNSは本文を自動取得せず、入力内容をローカルの材料として保存します。
+          </small>
+        </div>
+      </form>
       <button
         className="drop-zone"
         disabled={!canPickFiles}
@@ -1806,14 +2791,14 @@ function SourcesView({
       >
         <Upload size={24} aria-hidden="true" />
         <strong>ここにファイルをドロップ / クリックして選択</strong>
-        <span>投入後、原本コピー、ハッシュ、source chunks、出典情報を保存します。</span>
+        <span>PDF / CSV / Excel / Markdown / Textを追加できます。</span>
       </button>
       <div className="source-grid">
         {workspace.sourceFiles.map((source) => (
           <div className="source-row" key={source.id}>
             <FileText size={15} aria-hidden="true" />
             <strong>{source.fileName}</strong>
-            <span>{source.fileType}</span>
+            <span>{sourceTypeLabel(source.fileType)}</span>
             <span>{source.status}</span>
             <span>{source.chunkCount} chunks</span>
           </div>

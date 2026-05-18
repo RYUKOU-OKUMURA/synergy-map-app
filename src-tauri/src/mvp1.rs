@@ -304,6 +304,14 @@ fn project_dir(app_data_dir: &Path, project_id: &str) -> PathBuf {
     app_data_dir.join("projects").join(project_id)
 }
 
+fn source_files_dir(app_data_dir: &Path, project_id: &str) -> PathBuf {
+    project_dir(app_data_dir, project_id).join("sources")
+}
+
+fn source_chunks_dir(app_data_dir: &Path, project_id: &str) -> PathBuf {
+    project_dir(app_data_dir, project_id).join("extracted")
+}
+
 fn ai_runs_dir(app_data_dir: &Path, project_id: &str) -> PathBuf {
     project_dir(app_data_dir, project_id).join("ai-runs")
 }
@@ -471,7 +479,8 @@ pub fn run_extract_items(
         );
     }
 
-    let prompt = extraction_prompt(&chunks);
+    let purpose_context = prompt_purpose_context_from_chunks(&chunks);
+    let prompt = extraction_prompt(&chunks, &purpose_context);
     let prompt_hash = hash_text(&prompt);
     let codex_result = try_structured_codex(app, &prompt, extracted_items_json_schema());
     let (output_json, model, status, error, fallback_used, message) = match codex_result {
@@ -508,6 +517,8 @@ pub fn run_extract_items(
             "promptHash": prompt_hash.clone(),
             "sourceChunkCount": chunks.len(),
             "sourceChunkIds": chunks.iter().map(|chunk| chunk.id.clone()).collect::<Vec<_>>(),
+            "purpose": purpose_context.request_summary(),
+            "generationMode": purpose_context.generation_mode(),
         }),
         &output_json,
         error,
@@ -590,6 +601,414 @@ pub fn create_extracted_item(
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
+pub fn create_onboarding_brief_source(
+    state: State<'_, DbState>,
+    project_id: String,
+    company_name: String,
+    purpose_id: String,
+    purpose_label: String,
+    industry: Option<String>,
+    memo: Option<String>,
+    website_url: Option<String>,
+    sns_url: Option<String>,
+    product_info: Option<String>,
+) -> Result<ProjectWorkspace, String> {
+    let trimmed_company_name = company_name.trim();
+    let trimmed_purpose_label = purpose_label.trim();
+
+    if trimmed_company_name.is_empty() {
+        return Err("企業名 / 案件名を入力してください。".to_string());
+    }
+    if trimmed_purpose_label.is_empty() {
+        return Err("マップ生成の目的を選択してください。".to_string());
+    }
+
+    let app_data_dir = app_data_dir_from_db(&state.db_path)?.to_path_buf();
+    let mut connection = open_connection(&state.db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+
+    let source_file_id = Uuid::new_v4().to_string();
+    let now = now_rfc3339()?;
+    let source_dir = source_files_dir(&app_data_dir, &project_id).join(&source_file_id);
+    let chunks_dir = source_chunks_dir(&app_data_dir, &project_id).join(&source_file_id);
+    let source_path = source_dir.join("onboarding-brief.md");
+    let chunk_path = chunks_dir.join("0000.txt");
+    let content = onboarding_brief_markdown(
+        trimmed_company_name,
+        &purpose_id,
+        trimmed_purpose_label,
+        industry.as_deref(),
+        memo.as_deref(),
+        website_url.as_deref(),
+        sns_url.as_deref(),
+        product_info.as_deref(),
+    );
+    let content_hash = hash_text(&content);
+    let metadata_json = json!({
+        "sourceKind": "onboarding_brief",
+        "purposeId": purpose_id,
+        "purposeLabel": trimmed_purpose_label,
+        "informationLevel": onboarding_information_level(&content, website_url.as_deref(), sns_url.as_deref(), product_info.as_deref()),
+        "hypothesisMode": onboarding_hypothesis_mode(memo.as_deref(), website_url.as_deref(), sns_url.as_deref(), product_info.as_deref()),
+    })
+    .to_string();
+
+    fs::create_dir_all(&source_dir).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&chunks_dir).map_err(|error| error.to_string())?;
+
+    let write_result = (|| -> Result<(), String> {
+        fs::write(&source_path, &content).map_err(|error| error.to_string())?;
+        fs::write(&chunk_path, &content).map_err(|error| error.to_string())
+    })();
+
+    if let Err(error) = write_result {
+        let _ = fs::remove_dir_all(&source_dir);
+        let _ = fs::remove_dir_all(&chunks_dir);
+        return Err(error);
+    }
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let insert_result = (|| -> Result<(), String> {
+        transaction
+            .execute(
+                "INSERT INTO source_files (
+                    id, project_id, file_name, file_type, local_path, file_hash, status,
+                    metadata_json, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, 'onboarding_brief', ?4, ?5, 'read', ?6, ?7, ?8)",
+                params![
+                    source_file_id.as_str(),
+                    project_id.as_str(),
+                    "マップ作成メモ.md",
+                    source_path.display().to_string(),
+                    content_hash.as_str(),
+                    metadata_json.as_str(),
+                    now.as_str(),
+                    now.as_str()
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+
+        transaction
+            .execute(
+                "INSERT INTO source_chunks (
+                    id, project_id, source_file_id, chunk_index, content_path, content_hash,
+                    page_number, sheet_name, row_start, row_end, column_start, column_end,
+                    heading_path, metadata_json, created_at
+                ) VALUES (?1, ?2, ?3, 0, ?4, ?5, NULL, NULL, NULL, NULL, NULL, NULL, ?6, ?7, ?8)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    project_id.as_str(),
+                    source_file_id.as_str(),
+                    chunk_path.display().to_string(),
+                    hash_text(&content),
+                    "初回マップ作成",
+                    json!({ "sourceKind": "onboarding_brief" }).to_string(),
+                    now.as_str()
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+
+        Ok(())
+    })();
+
+    if let Err(error) = insert_result {
+        let _ = fs::remove_dir_all(&source_dir);
+        let _ = fs::remove_dir_all(&chunks_dir);
+        return Err(error);
+    }
+
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    load_workspace(&connection, &project_id)
+}
+
+#[tauri::command]
+pub fn create_text_information_source(
+    state: State<'_, DbState>,
+    project_id: String,
+    source_kind: String,
+    title: Option<String>,
+    body: Option<String>,
+    url: Option<String>,
+) -> Result<ProjectWorkspace, String> {
+    ensure_allowed_input(
+        "source_kind",
+        &source_kind,
+        &["manual_note", "website_url", "sns_url", "product_info"],
+    )?;
+
+    let title = title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| information_source_kind_label(&source_kind));
+    let body = body
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let url = url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if matches!(source_kind.as_str(), "website_url" | "sns_url") && url.is_none() {
+        return Err("URLを入力してください。".to_string());
+    }
+    if !matches!(source_kind.as_str(), "website_url" | "sns_url") && body.is_none() {
+        return Err("内容を入力してください。".to_string());
+    }
+
+    let app_data_dir = app_data_dir_from_db(&state.db_path)?.to_path_buf();
+    let mut connection = open_connection(&state.db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+
+    let source_file_id = Uuid::new_v4().to_string();
+    let now = now_rfc3339()?;
+    let source_dir = source_files_dir(&app_data_dir, &project_id).join(&source_file_id);
+    let chunks_dir = source_chunks_dir(&app_data_dir, &project_id).join(&source_file_id);
+    let source_path = source_dir.join(format!("{}.md", source_kind));
+    let chunk_path = chunks_dir.join("0000.txt");
+    let content = information_source_markdown(&source_kind, title, body, url);
+    let content_hash = hash_text(&content);
+    let metadata_json = json!({
+        "sourceKind": source_kind,
+        "title": title,
+        "url": url,
+        "informationLevel": text_information_level(&content),
+        "hypothesisMode": false,
+    })
+    .to_string();
+
+    fs::create_dir_all(&source_dir).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&chunks_dir).map_err(|error| error.to_string())?;
+
+    let write_result = (|| -> Result<(), String> {
+        fs::write(&source_path, &content).map_err(|error| error.to_string())?;
+        fs::write(&chunk_path, &content).map_err(|error| error.to_string())
+    })();
+
+    if let Err(error) = write_result {
+        let _ = fs::remove_dir_all(&source_dir);
+        let _ = fs::remove_dir_all(&chunks_dir);
+        return Err(error);
+    }
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let insert_result = (|| -> Result<(), String> {
+        transaction
+            .execute(
+                "INSERT INTO source_files (
+                    id, project_id, file_name, file_type, local_path, file_hash, status,
+                    metadata_json, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'read', ?7, ?8, ?9)",
+                params![
+                    source_file_id.as_str(),
+                    project_id.as_str(),
+                    information_source_file_name(&source_kind, title),
+                    source_kind.as_str(),
+                    source_path.display().to_string(),
+                    content_hash.as_str(),
+                    metadata_json.as_str(),
+                    now.as_str(),
+                    now.as_str()
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+
+        transaction
+            .execute(
+                "INSERT INTO source_chunks (
+                    id, project_id, source_file_id, chunk_index, content_path, content_hash,
+                    page_number, sheet_name, row_start, row_end, column_start, column_end,
+                    heading_path, metadata_json, created_at
+                ) VALUES (?1, ?2, ?3, 0, ?4, ?5, NULL, NULL, NULL, NULL, NULL, NULL, ?6, ?7, ?8)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    project_id.as_str(),
+                    source_file_id.as_str(),
+                    chunk_path.display().to_string(),
+                    content_hash.as_str(),
+                    information_source_kind_label(&source_kind),
+                    json!({ "sourceKind": source_kind }).to_string(),
+                    now.as_str()
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+
+        Ok(())
+    })();
+
+    if let Err(error) = insert_result {
+        let _ = fs::remove_dir_all(&source_dir);
+        let _ = fs::remove_dir_all(&chunks_dir);
+        return Err(error);
+    }
+
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    load_workspace(&connection, &project_id)
+}
+
+fn onboarding_brief_markdown(
+    company_name: &str,
+    purpose_id: &str,
+    purpose_label: &str,
+    industry: Option<&str>,
+    memo: Option<&str>,
+    website_url: Option<&str>,
+    sns_url: Option<&str>,
+    product_info: Option<&str>,
+) -> String {
+    let mut sections = vec![
+        "# 初回マップ作成メモ".to_string(),
+        format!("- 企業名 / 案件名: {}", company_name.trim()),
+        format!("- マップ生成の目的: {}", purpose_label.trim()),
+        format!("- 目的ID: {}", purpose_id.trim()),
+    ];
+
+    push_optional_markdown_line(&mut sections, "業種", industry);
+    push_optional_markdown_line(&mut sections, "ホームページURL", website_url);
+    push_optional_markdown_line(&mut sections, "SNSアカウントURL", sns_url);
+    push_optional_section(&mut sections, "今わかっていること / 困っていること", memo);
+    push_optional_section(&mut sections, "商品 / サービス情報", product_info);
+
+    sections.push("## 利用上の注意".to_string());
+    sections.push(
+        "この情報ソースは、ユーザーが初回マップ作成画面で入力した内容です。情報が少ない場合は仮説を含めて扱い、確度は推定または要確認として整理してください。"
+            .to_string(),
+    );
+
+    sections.join("\n\n")
+}
+
+fn information_source_markdown(
+    source_kind: &str,
+    title: &str,
+    body: Option<&str>,
+    url: Option<&str>,
+) -> String {
+    let mut sections = vec![
+        format!("# {}", title.trim()),
+        format!("- 種別: {}", information_source_kind_label(source_kind)),
+    ];
+
+    push_optional_markdown_line(&mut sections, "URL", url);
+    push_optional_section(&mut sections, "内容", body);
+    sections.push("## 利用上の注意".to_string());
+    sections.push(
+        "この情報ソースはユーザーが手入力した内容です。URL本文やSNSインサイトは自動取得していないため、必要に応じて推定または要確認として扱ってください。"
+            .to_string(),
+    );
+
+    sections.join("\n\n")
+}
+
+fn information_source_kind_label(source_kind: &str) -> &'static str {
+    match source_kind {
+        "manual_note" => "自由メモ",
+        "website_url" => "ホームページURL",
+        "sns_url" => "SNSアカウントURL",
+        "product_info" => "商品 / サービス情報",
+        _ => "情報ソース",
+    }
+}
+
+fn information_source_file_name(source_kind: &str, title: &str) -> String {
+    let label = information_source_kind_label(source_kind);
+    let sanitized_title = title
+        .trim()
+        .chars()
+        .filter(|character| {
+            !matches!(
+                character,
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+            )
+        })
+        .take(32)
+        .collect::<String>();
+
+    if sanitized_title.is_empty() || sanitized_title == label {
+        format!("{label}.md")
+    } else {
+        format!("{label} - {sanitized_title}.md")
+    }
+}
+
+fn text_information_level(content: &str) -> &'static str {
+    match content.chars().count() {
+        0..=240 => "low",
+        241..=700 => "medium",
+        _ => "high",
+    }
+}
+
+fn push_optional_markdown_line(lines: &mut Vec<String>, label: &str, value: Option<&str>) {
+    let Some(value) = trimmed_non_empty(value) else {
+        return;
+    };
+    lines.push(format!("- {label}: {value}"));
+}
+
+fn push_optional_section(lines: &mut Vec<String>, title: &str, value: Option<&str>) {
+    let Some(value) = trimmed_non_empty(value) else {
+        return;
+    };
+    lines.push(format!("## {title}\n\n{value}"));
+}
+
+fn trimmed_non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn onboarding_hypothesis_mode(
+    memo: Option<&str>,
+    website_url: Option<&str>,
+    sns_url: Option<&str>,
+    product_info: Option<&str>,
+) -> bool {
+    trimmed_non_empty(memo).is_none()
+        && trimmed_non_empty(website_url).is_none()
+        && trimmed_non_empty(sns_url).is_none()
+        && trimmed_non_empty(product_info).is_none()
+}
+
+fn onboarding_information_level(
+    content: &str,
+    website_url: Option<&str>,
+    sns_url: Option<&str>,
+    product_info: Option<&str>,
+) -> &'static str {
+    let mut score = 0;
+    let content_length = content.chars().count();
+    if content_length > 220 {
+        score += 1;
+    }
+    if content_length > 700 {
+        score += 1;
+    }
+    if trimmed_non_empty(website_url).is_some() {
+        score += 1;
+    }
+    if trimmed_non_empty(sns_url).is_some() {
+        score += 1;
+    }
+    if trimmed_non_empty(product_info).is_some() {
+        score += 1;
+    }
+
+    match score {
+        0 | 1 => "low",
+        2 | 3 => "medium",
+        _ => "high",
+    }
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn update_extracted_item(
     state: State<'_, DbState>,
     project_id: String,
@@ -657,7 +1076,8 @@ pub fn generate_map_from_items(
         );
     }
 
-    let prompt = map_prompt(&items);
+    let purpose_context = load_prompt_purpose_context(&connection, &project_id)?;
+    let prompt = map_prompt(&items, &purpose_context);
     let prompt_hash = hash_text(&prompt);
     let codex_result = try_structured_codex(app, &prompt, map_draft_json_schema());
     let (output_json, model, status, error, fallback_used, message) = match codex_result {
@@ -694,6 +1114,8 @@ pub fn generate_map_from_items(
             "promptHash": prompt_hash,
             "extractedItemCount": items.len(),
             "extractedItemIds": items.iter().map(|item| item.id.clone()).collect::<Vec<_>>(),
+            "purpose": purpose_context.request_summary(),
+            "generationMode": purpose_context.generation_mode(),
         }),
         &output_json,
         error,
@@ -1085,8 +1507,9 @@ pub fn generate_suggestions_from_map(
         return Err("シナジーマップがありません。先にマップを生成してください。".to_string());
     }
 
-    let prompt = analysis_prompt(&workspace);
-    let suggestions_prompt = business_impact_prompt(&workspace);
+    let purpose_context = prompt_purpose_context_from_workspace(&workspace);
+    let prompt = analysis_prompt(&workspace, &purpose_context);
+    let suggestions_prompt = business_impact_prompt(&workspace, &purpose_context);
     let prompt_hash = hash_text(&prompt);
     let suggestions_prompt_hash = hash_text(&suggestions_prompt);
     let analysis_result = try_structured_codex(app.clone(), &prompt, ai_analysis_json_schema());
@@ -1135,6 +1558,8 @@ pub fn generate_suggestions_from_map(
             "promptHash": prompt_hash.clone(),
             "nodeCount": active_nodes.len(),
             "edgeCount": active_edges.len(),
+            "purpose": purpose_context.request_summary(),
+            "generationMode": purpose_context.generation_mode(),
         }),
         &analysis_json,
         analysis_error,
@@ -1154,6 +1579,8 @@ pub fn generate_suggestions_from_map(
             "nodeCount": active_nodes.len(),
             "edgeCount": active_edges.len(),
             "view": "business_impact",
+            "purpose": purpose_context.request_summary(),
+            "generationMode": purpose_context.generation_mode(),
         }),
         &suggestions_json,
         suggestions_error,
@@ -1233,11 +1660,13 @@ pub fn ask_map_insight(
         return Err("シナジーマップがありません。先にマップを生成してください。".to_string());
     }
 
+    let purpose_context = prompt_purpose_context_from_workspace(&workspace);
     let prompt = map_insight_prompt(
         &workspace,
         &target_kind,
         target_id.as_deref(),
         &question_type,
+        &purpose_context,
     )?;
     let prompt_hash = hash_text(&prompt);
     let codex_result = try_structured_codex(app, &prompt, map_insight_json_schema());
@@ -1281,6 +1710,8 @@ pub fn ask_map_insight(
             "targetKind": target_kind.as_str(),
             "targetId": target_id.as_deref(),
             "questionType": question_type.as_str(),
+            "purpose": purpose_context.request_summary(),
+            "generationMode": purpose_context.generation_mode(),
         }),
         &validated_output_json,
         error,
@@ -1995,6 +2426,7 @@ struct ExtractionChunk {
     source_file_id: String,
     file_name: String,
     file_type: String,
+    metadata_json: String,
     content: String,
 }
 
@@ -2009,6 +2441,52 @@ struct MapItem {
     source_count: i64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PromptPurposeContext {
+    purpose_id: Option<String>,
+    purpose_label: Option<String>,
+    information_level: Option<String>,
+    hypothesis_mode: bool,
+}
+
+impl PromptPurposeContext {
+    fn generation_mode(&self) -> &'static str {
+        if self.hypothesis_mode {
+            "hypothesis_map"
+        } else if self.purpose_label.is_some() {
+            "purpose_guided"
+        } else {
+            "standard"
+        }
+    }
+
+    fn request_summary(&self) -> Value {
+        json!({
+            "purposeId": self.purpose_id,
+            "purposeLabel": self.purpose_label,
+            "informationLevel": self.information_level,
+            "hypothesisMode": self.hypothesis_mode,
+            "generationMode": self.generation_mode(),
+        })
+    }
+
+    fn prompt_block(&self) -> String {
+        let purpose_id = self.purpose_id.as_deref().unwrap_or("unspecified");
+        let purpose_label = self.purpose_label.as_deref().unwrap_or("未指定");
+        let information_level = self.information_level.as_deref().unwrap_or("unknown");
+        let confidence_instruction = if self.hypothesis_mode {
+            "情報が少ない仮説マップとして扱い、断定を避け、confirmedよりestimated/needs_reviewを優先する。"
+        } else {
+            "目的に関係する材料を優先しつつ、根拠が薄い箇所はestimated/needs_reviewにする。"
+        };
+
+        format!(
+            "PurposeContext:\n- purposeId: {purpose_id}\n- purposeLabel: {purpose_label}\n- generationMode: {}\n- informationLevel: {information_level}\n- instruction: {confidence_instruction}",
+            self.generation_mode()
+        )
+    }
+}
+
 fn load_chunks_for_extraction(
     connection: &Connection,
     project_id: &str,
@@ -2021,7 +2499,7 @@ fn load_chunks_for_extraction(
         .collect::<std::collections::HashSet<_>>();
     let mut statement = connection
         .prepare(
-            "SELECT sc.id, sc.source_file_id, sf.file_name, sf.file_type, sc.content_path
+            "SELECT sc.id, sc.source_file_id, sf.file_name, sf.file_type, sf.metadata_json, sc.content_path
              FROM source_chunks sc
              JOIN source_files sf ON sf.id = sc.source_file_id
              WHERE sc.project_id = ?1
@@ -2030,12 +2508,13 @@ fn load_chunks_for_extraction(
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([project_id], |row| {
-            let content_path: String = row.get(4)?;
+            let content_path: String = row.get(5)?;
             Ok(ExtractionChunk {
                 id: row.get(0)?,
                 source_file_id: row.get(1)?,
                 file_name: row.get(2)?,
                 file_type: row.get(3)?,
+                metadata_json: row.get(4)?,
                 content: fs::read_to_string(content_path).unwrap_or_default(),
             })
         })
@@ -2050,6 +2529,101 @@ fn load_chunks_for_extraction(
         .take(48)
         .filter(|chunk| !chunk.content.trim().is_empty())
         .collect())
+}
+
+fn prompt_purpose_context_from_chunks(chunks: &[ExtractionChunk]) -> PromptPurposeContext {
+    chunks
+        .iter()
+        .find_map(|chunk| prompt_purpose_context_from_metadata(&chunk.metadata_json))
+        .unwrap_or_default()
+}
+
+fn prompt_purpose_context_from_workspace(workspace: &ProjectWorkspace) -> PromptPurposeContext {
+    workspace
+        .source_files
+        .iter()
+        .find_map(|source| prompt_purpose_context_from_metadata(&source.metadata_json))
+        .unwrap_or_default()
+}
+
+fn load_prompt_purpose_context(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<PromptPurposeContext, String> {
+    let metadata_json: Option<String> = connection
+        .query_row(
+            "SELECT metadata_json
+             FROM source_files
+             WHERE project_id = ?1
+               AND file_type = 'onboarding_brief'
+             ORDER BY created_at DESC
+             LIMIT 1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+
+    if let Some(context) =
+        metadata_json.and_then(|metadata| prompt_purpose_context_from_metadata(&metadata))
+    {
+        return Ok(context);
+    }
+
+    let project_purpose: Option<String> = connection
+        .query_row(
+            "SELECT description FROM projects WHERE id = ?1 AND archived_at IS NULL",
+            [project_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .flatten();
+
+    Ok(project_purpose
+        .and_then(|label| {
+            trimmed_owned(label).map(|purpose_label| PromptPurposeContext {
+                purpose_id: None,
+                purpose_label: Some(purpose_label),
+                information_level: None,
+                hypothesis_mode: false,
+            })
+        })
+        .unwrap_or_default())
+}
+
+fn prompt_purpose_context_from_metadata(metadata_json: &str) -> Option<PromptPurposeContext> {
+    let parsed: Value = serde_json::from_str(metadata_json).ok()?;
+    let purpose_label = json_string(&parsed, "purposeLabel");
+    if purpose_label.is_none() {
+        return None;
+    }
+
+    Some(PromptPurposeContext {
+        purpose_id: json_string(&parsed, "purposeId"),
+        purpose_label,
+        information_level: json_string(&parsed, "informationLevel"),
+        hypothesis_mode: parsed
+            .get("hypothesisMode")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn json_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|text| trimmed_owned(text.to_string()))
+}
+
+fn trimmed_owned(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn build_extracted_items_output(chunks: &[ExtractionChunk]) -> Value {
@@ -2096,7 +2670,7 @@ fn build_extracted_items_output(chunks: &[ExtractionChunk]) -> Value {
             "name": name,
             "itemType": item_type,
             "description": inferred_description(&item_type, source_chunks),
-            "confidenceStatus": if merged.chars().count() > 120 { "estimated" } else { "needs_review" },
+            "confidenceStatus": inferred_confidence_status(&merged, &first.file_type),
             "impactScore": inferred_impact_score(&merged),
             "subjectiveImportance": 2,
             "memo": null,
@@ -2135,7 +2709,7 @@ fn build_extracted_items_output(chunks: &[ExtractionChunk]) -> Value {
     })
 }
 
-fn extraction_prompt(chunks: &[ExtractionChunk]) -> String {
+fn extraction_prompt(chunks: &[ExtractionChunk], purpose_context: &PromptPurposeContext) -> String {
     let summaries = chunks
         .iter()
         .take(24)
@@ -2154,13 +2728,24 @@ fn extraction_prompt(chunks: &[ExtractionChunk]) -> String {
     format!(
         "MVP-1のシナジーマップ用に、以下のsource chunks要約から抽出カードを生成してください。\
          事業、商品・サービス、集客チャネル、顧客接点、財務参考情報、データ資料に分類し、\
+         PurposeContextの目的に関係する要素を優先して抽出してください。\
          confidenceStatusはconfirmed/estimated/needs_review、itemTypeはbusiness/service/channel/touchpoint/finance/data_sourceを使ってください。\
-         sourcesには根拠にしたsourceChunkId/sourceFileIdを入れ、quoteには原文引用ではなく「ローカル要約のみ」と分かる短い説明を入れてください。schemaVersionは{}です。\n\n{}",
-        SCHEMA_VERSION, summaries
+         fileTypeがonboarding_briefで情報量が少ない場合は、推測を含むためconfirmedにせずestimatedまたはneeds_reviewを優先してください。\
+         sourcesには根拠にしたsourceChunkId/sourceFileIdを入れ、quoteには原文引用ではなく「ローカル要約のみ」と分かる短い説明を入れてください。schemaVersionは{}です。\n\n{}\n\nSource chunks:\n{}",
+        SCHEMA_VERSION,
+        purpose_context.prompt_block(),
+        summaries
     )
 }
 
 fn summarize_chunk_for_ai(chunk: &ExtractionChunk) -> String {
+    if matches!(
+        chunk.file_type.as_str(),
+        "onboarding_brief" | "manual_note" | "website_url" | "sns_url" | "product_info"
+    ) {
+        return summarize_user_entered_source_for_ai(chunk);
+    }
+
     let keywords = infer_summary_keywords(&chunk.content);
     let category = infer_item_type(&chunk.content, "", &chunk.file_type);
     let line_count = chunk
@@ -2190,6 +2775,39 @@ fn summarize_chunk_for_ai(chunk: &ExtractionChunk) -> String {
             keywords.join("、"),
         )
     }
+}
+
+fn summarize_user_entered_source_for_ai(chunk: &ExtractionChunk) -> String {
+    let category = infer_item_type(&chunk.content, &chunk.file_name, &chunk.file_type);
+    let mut facts = chunk
+        .content
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with('#')
+                && !line.contains("利用上の注意")
+                && !line.contains("この情報ソースは")
+        })
+        .map(|line| {
+            line.trim_start_matches("- ")
+                .replace("## ", "")
+                .trim()
+                .to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .take(10)
+        .collect::<Vec<_>>();
+
+    if facts.is_empty() {
+        facts.push(truncate_chars(&chunk.content.replace('\n', " "), 420));
+    }
+
+    let summary = truncate_chars(&facts.join(" / "), 720);
+    format!(
+        "推定分類: {category}。ユーザー入力要約: {summary}。情報種別: {}。",
+        chunk.file_type
+    )
 }
 
 fn infer_summary_keywords(content: &str) -> Vec<&'static str> {
@@ -2270,6 +2888,16 @@ fn item_type_label(item_type: &str) -> &'static str {
         "finance" => "財務参考情報",
         "data_source" => "データ資料",
         _ => "抽出項目",
+    }
+}
+
+fn inferred_confidence_status(content: &str, file_type: &str) -> &'static str {
+    if file_type == "onboarding_brief" && content.chars().count() < 420 {
+        "needs_review"
+    } else if content.chars().count() > 120 {
+        "estimated"
+    } else {
+        "needs_review"
     }
 }
 
@@ -2568,7 +3196,7 @@ fn build_map_output(items: &[MapItem]) -> Value {
     })
 }
 
-fn map_prompt(items: &[MapItem]) -> String {
+fn map_prompt(items: &[MapItem], purpose_context: &PromptPurposeContext) -> String {
     let summaries = items
         .iter()
         .map(|item| {
@@ -2582,9 +3210,12 @@ fn map_prompt(items: &[MapItem]) -> String {
 
     format!(
         "MVP-1の顧客導線ビューとして、抽出カードから1枚のシナジーマップを生成してください。\
+         PurposeContextの目的に合う配置と導線を優先し、目的に関係しない要素は補助ノードとして扱ってください。\
          nodesは読みやすい2D座標で配置し、edgesはawareness/inquiry/proposal/purchase/retention/referral/data_referenceから選んでください。\
-         nodeTypeはbusiness/service/channel/touchpoint/finance/data_source、schemaVersionは{}です。\n\n{}",
-        SCHEMA_VERSION, summaries
+         nodeTypeはbusiness/service/channel/touchpoint/finance/data_source、schemaVersionは{}です。\n\n{}\n\nExtracted items:\n{}",
+        SCHEMA_VERSION,
+        purpose_context.prompt_block(),
+        summaries
     )
 }
 
@@ -2816,7 +3447,7 @@ fn build_analysis_output(workspace: &ProjectWorkspace) -> Value {
     })
 }
 
-fn analysis_prompt(workspace: &ProjectWorkspace) -> String {
+fn analysis_prompt(workspace: &ProjectWorkspace, purpose_context: &PromptPurposeContext) -> String {
     let (active_nodes, active_edges) = active_map_scope(workspace);
     let nodes = active_nodes
         .iter()
@@ -2838,12 +3469,19 @@ fn analysis_prompt(workspace: &ProjectWorkspace) -> String {
         .join("\n");
 
     format!(
-        "MVP-1のシナジーマップから、現状の全体像、強い導線、詰まり、未接続シナジー候補、確認質問、簡易施策を日本語で短く生成してください。schemaVersionは{}です。\n\nNodes:\n{}\n\nEdges:\n{}",
-        SCHEMA_VERSION, nodes, edges
+        "MVP-1のシナジーマップから、現状の全体像、強い導線、詰まり、未接続シナジー候補、確認質問、簡易施策を日本語で短く生成してください。\
+         PurposeContextの目的に合わせて、何を深掘りすべきかが分かる分析にしてください。schemaVersionは{}です。\n\n{}\n\nNodes:\n{}\n\nEdges:\n{}",
+        SCHEMA_VERSION,
+        purpose_context.prompt_block(),
+        nodes,
+        edges
     )
 }
 
-fn business_impact_prompt(workspace: &ProjectWorkspace) -> String {
+fn business_impact_prompt(
+    workspace: &ProjectWorkspace,
+    purpose_context: &PromptPurposeContext,
+) -> String {
     let (active_nodes, active_edges) = active_map_scope(workspace);
     let nodes = active_nodes
         .iter()
@@ -2891,10 +3529,14 @@ fn business_impact_prompt(workspace: &ProjectWorkspace) -> String {
     format!(
         "顧客導線マップで見えた課題・施策について、事業インパクトビュー用の施策カードを日本語で生成してください。\
          目的は「どこに手を入れると売上・利益・工数に効きそうか」を根拠付きで見える化し、提案や会議で優先順位を説明できる状態にすることです。\
+         PurposeContextの目的に合う施策を優先し、目的と関係が薄い施策は優先度を下げてください。\
          施策ごとに、売上影響、利益影響、費用、工数、効果発生までの時間、確度、0-100のimpactScore、根拠、関連ノードラベルを必ず返してください。\
          evidenceには、関連ノードのsourceTraceに含まれるsourceChunkIdやsourceFile名を使って、どの資料根拠からの判断か分かる短い説明を含めてください。\
-         不確実な情報はunknownまたはneeds_reviewにしてください。schemaVersionは{}です。\n\nNodes:\n{}\n\nEdges:\n{}",
-        SCHEMA_VERSION, nodes, edges
+         不確実な情報はunknownまたはneeds_reviewにしてください。schemaVersionは{}です。\n\n{}\n\nNodes:\n{}\n\nEdges:\n{}",
+        SCHEMA_VERSION,
+        purpose_context.prompt_block(),
+        nodes,
+        edges
     )
 }
 
@@ -2903,6 +3545,7 @@ fn map_insight_prompt(
     target_kind: &str,
     target_id: Option<&str>,
     question_type: &str,
+    purpose_context: &PromptPurposeContext,
 ) -> Result<String, String> {
     let target_context = map_insight_target_context(workspace, target_kind, target_id)?;
     let question = map_insight_question_label(question_type);
@@ -2943,10 +3586,17 @@ fn map_insight_prompt(
 
     Ok(format!(
         "以下のシナジーマップ文脈をもとに、非IT寄りの相談者にも分かる短い壁打ち回答を日本語で返してください。\
+         PurposeContextの目的に沿って、次に何を考えるべきかが分かる回答にしてください。\
          対象を断定しすぎず、資料根拠が薄い場合はneeds_reviewにしてください。\
          answerは2-4文、keyPointsは1-5件、followUpQuestionsは次に確認すべき質問を最大5件にしてください。\
-         schemaVersionは{}です。\n\nQuestionType: {}\nQuestion: {}\nTarget:\n{}\n\nMap nodes:\n{}\n\nMap edges:\n{}",
-        SCHEMA_VERSION, question_type, question, target_context, nodes, edges
+         schemaVersionは{}です。\n\n{}\n\nQuestionType: {}\nQuestion: {}\nTarget:\n{}\n\nMap nodes:\n{}\n\nMap edges:\n{}",
+        SCHEMA_VERSION,
+        purpose_context.prompt_block(),
+        question_type,
+        question,
+        target_context,
+        nodes,
+        edges
     ))
 }
 
@@ -4078,6 +4728,7 @@ mod tests {
             source_file_id: "source-file-1".to_string(),
             file_name: "secret-client-plan.md".to_string(),
             file_type: "markdown".to_string(),
+            metadata_json: "{}".to_string(),
             content: "SECRET_CLIENT_CONTRACT_LINE\nSECRET_CLIENT_PRICE_TABLE".to_string(),
         }];
 
@@ -4087,6 +4738,114 @@ mod tests {
         assert!(!serialized.contains("SECRET_CLIENT"));
         assert!(!serialized.contains("secret-client-plan"));
         assert!(serialized.contains(local_summary_only_quote()));
+    }
+
+    #[test]
+    fn onboarding_brief_marks_sparse_input_as_needs_review() {
+        let content = onboarding_brief_markdown(
+            "山田製作所",
+            "sales_flow",
+            "売上導線を整理したい",
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(content.contains("山田製作所"));
+        assert!(content.contains("売上導線を整理したい"));
+        assert_eq!(
+            inferred_confidence_status(&content, "onboarding_brief"),
+            "needs_review"
+        );
+    }
+
+    #[test]
+    fn onboarding_brief_keeps_url_inputs_as_source_context() {
+        let content = onboarding_brief_markdown(
+            "山田製作所",
+            "sns_web_sales",
+            "SNS / Webから売上につなげたい",
+            Some("製造業"),
+            Some("Web問い合わせから商談につながる導線を確認したい。"),
+            Some("https://example.com"),
+            Some("https://instagram.com/example"),
+            Some("保守サービスと部品販売を提供している。"),
+        );
+
+        assert!(content.contains("https://example.com"));
+        assert!(content.contains("https://instagram.com/example"));
+        assert_eq!(
+            onboarding_information_level(
+                &content,
+                Some("https://example.com"),
+                Some("https://instagram.com/example"),
+                Some("保守サービスと部品販売を提供している。"),
+            ),
+            "high"
+        );
+    }
+
+    #[test]
+    fn purpose_context_is_included_in_prompts_and_request_summary() {
+        let metadata = json!({
+            "sourceKind": "onboarding_brief",
+            "purposeId": "existing_customer_upsell",
+            "purposeLabel": "既存顧客への追加提案を考えたい",
+            "informationLevel": "low",
+            "hypothesisMode": true,
+        })
+        .to_string();
+        let chunks = vec![ExtractionChunk {
+            id: "chunk-1".to_string(),
+            source_file_id: "source-file-1".to_string(),
+            file_name: "マップ作成メモ.md".to_string(),
+            file_type: "onboarding_brief".to_string(),
+            metadata_json: metadata,
+            content: "既存顧客に追加提案したい。".to_string(),
+        }];
+
+        let context = prompt_purpose_context_from_chunks(&chunks);
+        let prompt = extraction_prompt(&chunks, &context);
+        let request_summary = context.request_summary();
+
+        assert!(prompt.contains("既存顧客への追加提案を考えたい"));
+        assert!(prompt.contains("hypothesis_map"));
+        assert_eq!(
+            request_summary["purposeId"],
+            json!("existing_customer_upsell")
+        );
+        assert_eq!(request_summary["generationMode"], json!("hypothesis_map"));
+    }
+
+    #[test]
+    fn onboarding_summary_keeps_user_entered_business_context() {
+        let content = onboarding_brief_markdown(
+            "山田製作所",
+            "sns_web_sales",
+            "SNS / Webから売上につなげたい",
+            Some("製造業"),
+            Some("Web問い合わせはあるが、商談化と保守サービスへの導線が弱い。"),
+            Some("https://example.com"),
+            Some("https://instagram.com/example"),
+            Some("保守サービスと部品販売を提供している。"),
+        );
+        let chunk = ExtractionChunk {
+            id: "chunk-1".to_string(),
+            source_file_id: "source-file-1".to_string(),
+            file_name: "マップ作成メモ.md".to_string(),
+            file_type: "onboarding_brief".to_string(),
+            metadata_json: "{}".to_string(),
+            content,
+        };
+
+        let summary = summarize_chunk_for_ai(&chunk);
+
+        assert!(summary.contains("山田製作所"));
+        assert!(summary.contains("Web問い合わせ"));
+        assert!(summary.contains("保守サービス"));
+        assert!(summary.contains("https://example.com"));
     }
 
     #[test]
