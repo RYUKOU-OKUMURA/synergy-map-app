@@ -318,6 +318,7 @@ function App() {
     "idle" | "saving" | "saved" | "error"
   >("idle");
   const [layoutSaveScope, setLayoutSaveScope] = useState<string | null>(null);
+  const [mapInsightBusy, setMapInsightBusy] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
   const [approvedChunkSignature, setApprovedChunkSignature] = useState<string | null>(
     null,
@@ -718,6 +719,72 @@ function App() {
     }
   }
 
+  async function handlePickSourceFiles() {
+    if (!activeProjectId || !isTauriRuntime) return;
+    await runAction(
+      async () => {
+        const imported = await invoke<unknown[]>("import_source_files_from_dialog", {
+          projectId: activeProjectId,
+        });
+        if (imported.length === 0) {
+          return null;
+        }
+        const nextWorkspace = await invoke<ProjectWorkspace>("get_project_workspace", {
+          projectId: activeProjectId,
+        });
+        return { nextWorkspace, count: imported.length };
+      },
+      (result) => {
+        if (!result) return;
+        setWorkspace(result.nextWorkspace);
+        setApprovedChunkSignature(null);
+        setNotice(`${result.count}件の資料を投入しました。`);
+      },
+    );
+  }
+
+  async function handleAskWholeMap(questionType = "explain") {
+    if (!activeProjectId) return;
+    setMapInsightBusy(true);
+    setError(null);
+    try {
+      if (!isTauriRuntime) {
+        const now = new Date().toISOString();
+        setWorkspace({
+          ...workspace,
+          aiComments: [
+            {
+              id: `local-map-insight-${Date.now()}`,
+              projectId: activeProjectId,
+              aiRunId: null,
+              commentType: "map_insight",
+              title: "壁打ち: マップ全体",
+              body: "マップ全体について、資料要約とノード/導線の関係から確認するための下書きです。強い導線、詰まり、次に聞くことを確認してください。",
+              confidenceStatus: "estimated",
+              createdAt: now,
+            },
+            ...workspace.aiComments,
+          ],
+        });
+        setIsDrawerOpen(true);
+        return;
+      }
+      const result = await invoke<MvpRunResult>("ask_map_insight", {
+        projectId: activeProjectId,
+        targetKind: "map",
+        targetId: null,
+        questionType,
+      });
+      setWorkspace(result.workspace);
+      setNotice(result.message);
+      setIsDrawerOpen(true);
+    } catch (caughtError) {
+      setError(String(caughtError));
+    } finally {
+      setMapInsightBusy(false);
+    }
+  }
+
   useEffect(() => {
     if (!isTauriRuntime) return;
     let cancelled = false;
@@ -893,8 +960,10 @@ function App() {
               editMode={isMapEditMode}
               layoutSaveStatus={visibleLayoutSaveStatus}
               latestAiRun={latestAiRun}
+              mapInsightBusy={mapInsightBusy}
               mapViewMode={mapViewMode}
               onArrangeMap={handleArrangeMap}
+              onAskWholeMap={handleAskWholeMap}
               onCreateMapEdge={handleCreateMapEdge}
               onDrawerOpenChange={setIsDrawerOpen}
               onEditModeChange={setIsMapEditMode}
@@ -948,7 +1017,13 @@ function App() {
               projects={projects}
             />
           ) : null}
-          {view === "sources" ? <SourcesView workspace={workspace} /> : null}
+          {view === "sources" ? (
+            <SourcesView
+              canPickFiles={Boolean(activeProjectId && isTauriRuntime)}
+              onPickFiles={handlePickSourceFiles}
+              workspace={workspace}
+            />
+          ) : null}
           {view === "extract" ? (
             <ExtractView
               aiSendApproved={isAiSendApproved}
@@ -1021,8 +1096,10 @@ function MapWorkspace({
   editMode,
   layoutSaveStatus,
   latestAiRun,
+  mapInsightBusy,
   mapViewMode,
   onArrangeMap,
+  onAskWholeMap,
   onCreateMapEdge,
   onDrawerOpenChange,
   onEditModeChange,
@@ -1043,8 +1120,10 @@ function MapWorkspace({
   editMode: boolean;
   layoutSaveStatus: "idle" | "saving" | "saved" | "error";
   latestAiRun: AiRunRow | null;
+  mapInsightBusy: boolean;
   mapViewMode: MapViewMode;
   onArrangeMap: () => void;
+  onAskWholeMap: (questionType?: string) => void;
   onCreateMapEdge: (sourceNodeId: string, targetNodeId: string) => void;
   onDrawerOpenChange: (open: boolean) => void;
   onEditModeChange: (enabled: boolean) => void;
@@ -1119,6 +1198,15 @@ function MapWorkspace({
         >
           <MapIcon size={14} aria-hidden="true" />
           整える
+        </button>
+        <button
+          disabled={workspace.nodes.length === 0 || mapInsightBusy}
+          onClick={() => onAskWholeMap("explain")}
+          title="マップ全体をCodexに聞く"
+          type="button"
+        >
+          <MessageSquareText size={14} aria-hidden="true" />
+          聞く
         </button>
         <span className={`layout-save-status layout-save-status-${layoutSaveStatus}`}>
           {layoutSaveStatus === "saving"
@@ -1273,6 +1361,14 @@ function MapWorkspace({
         </button>
         {drawerOpen ? (
           <div className="drawer-content">
+            {workspace.nodes.length > 0 ? (
+              <MapInsightActions
+                busy={mapInsightBusy}
+                error={null}
+                onAsk={onAskWholeMap}
+                targetLabel="マップ全体"
+              />
+            ) : null}
             <button
               className="ghost-button"
               onClick={onGenerateSuggestions}
@@ -1683,20 +1779,35 @@ function ProjectsView({
   );
 }
 
-function SourcesView({ workspace }: { workspace: ProjectWorkspace }) {
+function SourcesView({
+  canPickFiles,
+  onPickFiles,
+  workspace,
+}: {
+  canPickFiles: boolean;
+  onPickFiles: () => void;
+  workspace: ProjectWorkspace;
+}) {
   return (
     <section className="page-panel">
       <div className="page-header">
         <div>
           <h1>資料投入</h1>
-          <p>PDF / CSV / XLSX / Markdown / Textをドラッグ&ドロップで投入します。</p>
+          <p>
+            PDF / CSV / XLSX / Markdown / Textをドロップまたはクリックで投入します。
+          </p>
         </div>
       </div>
-      <div className="drop-zone">
+      <button
+        className="drop-zone"
+        disabled={!canPickFiles}
+        onClick={onPickFiles}
+        type="button"
+      >
         <Upload size={24} aria-hidden="true" />
-        <strong>ここにファイルをドロップ</strong>
+        <strong>ここにファイルをドロップ / クリックして選択</strong>
         <span>投入後、原本コピー、ハッシュ、source chunks、出典情報を保存します。</span>
-      </div>
+      </button>
       <div className="source-grid">
         {workspace.sourceFiles.map((source) => (
           <div className="source-row" key={source.id}>
@@ -2079,22 +2190,7 @@ function InspectorPanel({
   }
 
   if (!item && !node && !edge && !suggestion) {
-    return (
-      <aside className="inspector">
-        <div className="panel-heading">
-          <span>インスペクター</span>
-        </div>
-        <div className="empty-panel">
-          ノード、導線、抽出カードを選択してください。マップ全体についてCodexに聞くこともできます。
-        </div>
-        <MapInsightActions
-          busy={askBusy}
-          error={askError}
-          onAsk={askMapInsight}
-          targetLabel="マップ全体"
-        />
-      </aside>
-    );
+    return null;
   }
 
   async function submitItem(event: React.FormEvent<HTMLFormElement>) {

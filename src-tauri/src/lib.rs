@@ -8,6 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::{DragDropEvent, Manager, State, WindowEvent};
+use tauri_plugin_dialog::DialogExt;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -551,6 +552,38 @@ fn import_source_files(
 }
 
 #[tauri::command]
+fn import_source_files_from_dialog(
+    app: tauri::AppHandle,
+    state: State<'_, DbState>,
+    project_id: String,
+) -> Result<Vec<ImportSourceResult>, String> {
+    let selected_paths = app
+        .dialog()
+        .file()
+        .add_filter(
+            "資料ファイル",
+            &["pdf", "csv", "xlsx", "xls", "ods", "md", "markdown", "txt"],
+        )
+        .blocking_pick_files()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| path.into_path().map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if selected_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let app_data_dir = app_data_dir_from_db(&state.db_path)?;
+    selected_paths
+        .iter()
+        .map(|source_path| {
+            import_source_path(&state.db_path, app_data_dir, &project_id, source_path)
+        })
+        .collect()
+}
+
+#[tauri::command]
 fn list_source_chunks(
     state: State<'_, DbState>,
     source_file_id: String,
@@ -905,6 +938,7 @@ fn insert_source_chunks(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .on_window_event(|window, event| {
             if let WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
                 let drop_state = window.state::<DropImportState>();
@@ -927,6 +961,7 @@ pub fn run() {
             get_storage_info,
             import_sample_source,
             import_source_files,
+            import_source_files_from_dialog,
             list_source_chunks,
             run_codex_smoke_test,
             run_codex_device_code_check,
