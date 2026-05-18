@@ -47,6 +47,7 @@ import {
   timeToImpactOptions,
 } from "@/lib/mvp1Labels";
 import type {
+  AiRunRow,
   ExportResult,
   ExtractedItemRow,
   MapEdgeRow,
@@ -104,6 +105,24 @@ function formatTime(value: string | null | undefined) {
   }
 }
 
+function isFallbackRun(run: AiRunRow | null | undefined) {
+  return run?.model === "mvp-local-draft" || run?.status === "fallback_completed";
+}
+
+function aiRunSourceLabel(run: AiRunRow | null | undefined) {
+  if (!run) return "AI未実行";
+  return isFallbackRun(run) ? "ローカルドラフト" : "Codex生成";
+}
+
+function aiRunStatusLabel(run: AiRunRow | null | undefined) {
+  if (!run) return "未実行";
+  if (run.status === "completed") return "完了";
+  if (run.status === "fallback_completed") return "補完完了";
+  if (run.status === "response_validated") return "検証済み";
+  if (run.status === "fallback_response_validated") return "補完検証済み";
+  return run.status;
+}
+
 function layoutToJson(layout: MapNodeLayout) {
   const value: Record<string, string | number> = {
     nodeId: layout.nodeId,
@@ -113,6 +132,58 @@ function layoutToJson(layout: MapNodeLayout) {
   if (typeof layout.width === "number") value.width = layout.width;
   if (typeof layout.height === "number") value.height = layout.height;
   return value;
+}
+
+function parseNodeLayout(positionJson: string) {
+  try {
+    const parsed = JSON.parse(positionJson) as {
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
+    };
+    return {
+      x: typeof parsed.x === "number" ? parsed.x : 0,
+      y: typeof parsed.y === "number" ? parsed.y : 0,
+      width: typeof parsed.width === "number" ? parsed.width : undefined,
+      height: typeof parsed.height === "number" ? parsed.height : undefined,
+    };
+  } catch {
+    return { x: 0, y: 0 };
+  }
+}
+
+function readableCustomerJourneyLayouts(nodes: MapNodeRow[]): MapNodeLayout[] {
+  const categoryCounts = new Map<string, number>();
+  return nodes
+    .filter((node) => node.adoptionStatus !== "rejected")
+    .map((node) => {
+      const count = categoryCounts.get(node.nodeType) ?? 0;
+      categoryCounts.set(node.nodeType, count + 1);
+      const current = parseNodeLayout(node.positionJson);
+      const y = 88 + count * 132;
+      const x =
+        node.nodeType === "business"
+          ? 80
+          : node.nodeType === "channel"
+            ? 350
+            : node.nodeType === "touchpoint"
+              ? 625
+              : node.nodeType === "service"
+                ? 900
+                : node.nodeType === "finance"
+                  ? 900
+                  : 80;
+      const yOffset =
+        node.nodeType === "finance" ? 150 : node.nodeType === "data_source" ? 270 : 0;
+      return {
+        nodeId: node.id,
+        x,
+        y: y + yOffset,
+        width: current.width,
+        height: current.height,
+      };
+    });
 }
 
 function mergeNodePositionJson(positionJson: string, layout: MapNodeLayout) {
@@ -309,6 +380,7 @@ function App() {
   const saveStatus = workspace.versions[0]
     ? `保存済み ${formatTime(workspace.versions[0].createdAt)}`
     : "保存済み";
+  const latestAiRun = workspace.aiRuns[0] ?? null;
   const currentLayoutScope = `${activeProjectId ?? "none"}:${mapViewMode}`;
   const visibleLayoutSaveStatus =
     layoutSaveScope === currentLayoutScope ? layoutSaveStatus : "idle";
@@ -586,6 +658,24 @@ function App() {
     [activeProjectId, workspace, isTauriRuntime],
   );
 
+  async function handleArrangeMap() {
+    if (!activeProjectId || workspace.nodes.length === 0) return;
+    const positions =
+      mapViewMode === "business_impact"
+        ? Object.entries(
+            buildImpactPositionOverrides(workspace, buildNodeImpactStats(workspace)),
+          ).map(([nodeId, layout]) => ({
+            nodeId,
+            x: layout.x,
+            y: layout.y,
+            width: layout.width,
+            height: layout.height,
+          }))
+        : readableCustomerJourneyLayouts(workspace.nodes);
+    await handleSavePositions(mapViewMode, positions);
+    setNotice("マップを見やすい配置に整えました。");
+  }
+
   async function handleCreateMapEdge(sourceNodeId: string, targetNodeId: string) {
     if (!activeProjectId) return;
     setError(null);
@@ -765,6 +855,14 @@ function App() {
             <StatusChip>{workspace.extractedItems.length}カード</StatusChip>
             <StatusChip>{workspace.nodes.length}ノード</StatusChip>
             <StatusChip>{workspace.edges.length}導線</StatusChip>
+            <span
+              className={`ai-source-chip ${
+                isFallbackRun(latestAiRun) ? "ai-source-chip-fallback" : ""
+              }`}
+              title={latestAiRun?.error ?? aiRunStatusLabel(latestAiRun)}
+            >
+              {aiRunSourceLabel(latestAiRun)}
+            </span>
             <button
               className="ghost-button"
               onClick={() => setView("history")}
@@ -794,7 +892,9 @@ function App() {
               drawerOpen={isDrawerOpen}
               editMode={isMapEditMode}
               layoutSaveStatus={visibleLayoutSaveStatus}
+              latestAiRun={latestAiRun}
               mapViewMode={mapViewMode}
+              onArrangeMap={handleArrangeMap}
               onCreateMapEdge={handleCreateMapEdge}
               onDrawerOpenChange={setIsDrawerOpen}
               onEditModeChange={setIsMapEditMode}
@@ -920,7 +1020,9 @@ function MapWorkspace({
   drawerOpen,
   editMode,
   layoutSaveStatus,
+  latestAiRun,
   mapViewMode,
+  onArrangeMap,
   onCreateMapEdge,
   onDrawerOpenChange,
   onEditModeChange,
@@ -940,7 +1042,9 @@ function MapWorkspace({
   drawerOpen: boolean;
   editMode: boolean;
   layoutSaveStatus: "idle" | "saving" | "saved" | "error";
+  latestAiRun: AiRunRow | null;
   mapViewMode: MapViewMode;
+  onArrangeMap: () => void;
   onCreateMapEdge: (sourceNodeId: string, targetNodeId: string) => void;
   onDrawerOpenChange: (open: boolean) => void;
   onEditModeChange: (enabled: boolean) => void;
@@ -1007,6 +1111,15 @@ function MapWorkspace({
           <PencilRuler size={14} aria-hidden="true" />
           編集
         </button>
+        <button
+          disabled={workspace.nodes.length === 0}
+          onClick={onArrangeMap}
+          title="見やすく整列"
+          type="button"
+        >
+          <MapIcon size={14} aria-hidden="true" />
+          整える
+        </button>
         <span className={`layout-save-status layout-save-status-${layoutSaveStatus}`}>
           {layoutSaveStatus === "saving"
             ? "保存中"
@@ -1016,6 +1129,19 @@ function MapWorkspace({
                 ? "未変更"
                 : "保存済み"}
         </span>
+        <span
+          className={`map-ai-status ${
+            isFallbackRun(latestAiRun) ? "map-ai-status-fallback" : ""
+          }`}
+          title={latestAiRun?.error ?? aiRunStatusLabel(latestAiRun)}
+        >
+          {aiRunSourceLabel(latestAiRun)}
+        </span>
+        {editMode ? (
+          <span className="map-edit-hint">
+            ノードをドラッグ。選択後、角で大きさを調整。
+          </span>
+        ) : null}
       </div>
 
       {mapViewMode === "customer_journey" ? (
@@ -1858,12 +1984,16 @@ function HistoryView({ workspace }: { workspace: ProjectWorkspace }) {
           <p>どの実行がどのschemaと出力に対応するかを確認します。</p>
         </div>
       </div>
-      <div className="data-table">
+      <div className="data-table history-table">
         {workspace.aiRuns.map((run) => (
-          <div className="table-row" key={run.id}>
+          <div
+            className={`table-row ${isFallbackRun(run) ? "table-row-warning" : ""}`}
+            key={run.id}
+          >
             <span>{run.runType}</span>
             <span>{run.schemaName}</span>
-            <span>{run.status}</span>
+            <span>{aiRunSourceLabel(run)}</span>
+            <span>{aiRunStatusLabel(run)}</span>
             <span>{formatTime(run.completedAt)}</span>
           </div>
         ))}
@@ -1899,13 +2029,70 @@ function InspectorPanel({
   suggestion: SuggestionRow | null;
   workspace: ProjectWorkspace;
 }) {
+  const [askBusy, setAskBusy] = useState(false);
+  const [askError, setAskError] = useState<string | null>(null);
+  const insightTargetKind = node ? "node" : edge ? "edge" : "map";
+  const insightTargetId = node?.id ?? edge?.id ?? null;
+
+  async function askMapInsight(questionType: string) {
+    if (!projectId) return;
+    setAskBusy(true);
+    setAskError(null);
+    try {
+      if (!isTauriRuntime) {
+        const now = new Date().toISOString();
+        const targetLabel = node
+          ? `ノード「${node.label}」`
+          : edge
+            ? "選択中の導線"
+            : "マップ全体";
+        onWorkspaceChange({
+          ...workspace,
+          aiComments: [
+            {
+              id: `local-insight-${Date.now()}`,
+              projectId,
+              aiRunId: null,
+              commentType: "map_insight",
+              title: "壁打ち: ローカルドラフト",
+              body: `${targetLabel}について、資料要約とマップ構造から確認するための下書きです。実際の商談では、重要度、担当、成果指標を確認してください。`,
+              confidenceStatus: "estimated",
+              createdAt: now,
+            },
+            ...workspace.aiComments,
+          ],
+        });
+        return;
+      }
+      const result = await invoke<MvpRunResult>("ask_map_insight", {
+        projectId,
+        targetKind: insightTargetKind,
+        targetId: insightTargetId,
+        questionType,
+      });
+      onWorkspaceChange(result.workspace);
+    } catch (caughtError) {
+      setAskError(String(caughtError));
+    } finally {
+      setAskBusy(false);
+    }
+  }
+
   if (!item && !node && !edge && !suggestion) {
     return (
       <aside className="inspector">
         <div className="panel-heading">
           <span>インスペクター</span>
         </div>
-        <div className="empty-panel">ノード、導線、抽出カードを選択してください。</div>
+        <div className="empty-panel">
+          ノード、導線、抽出カードを選択してください。マップ全体についてCodexに聞くこともできます。
+        </div>
+        <MapInsightActions
+          busy={askBusy}
+          error={askError}
+          onAsk={askMapInsight}
+          targetLabel="マップ全体"
+        />
       </aside>
     );
   }
@@ -2030,6 +2217,14 @@ function InspectorPanel({
         </span>
         <small>編集</small>
       </div>
+      {!item && !suggestion ? (
+        <MapInsightActions
+          busy={askBusy}
+          error={askError}
+          onAsk={askMapInsight}
+          targetLabel={node ? node.label : edge ? "選択中の導線" : "マップ全体"}
+        />
+      ) : null}
       {item ? <ItemForm item={item} onSubmit={submitItem} /> : null}
       {node ? <NodeForm node={node} onSubmit={submitNode} /> : null}
       {edge ? <EdgeForm edge={edge} onHide={hideEdge} onSubmit={submitEdge} /> : null}
@@ -2041,6 +2236,47 @@ function InspectorPanel({
         />
       ) : null}
     </aside>
+  );
+}
+
+function MapInsightActions({
+  busy,
+  error,
+  onAsk,
+  targetLabel,
+}: {
+  busy: boolean;
+  error: string | null;
+  onAsk: (questionType: string) => void;
+  targetLabel: string;
+}) {
+  return (
+    <div className="map-insight-actions">
+      <div className="map-insight-header">
+        <MessageSquareText size={14} aria-hidden="true" />
+        <span>Codexに聞く</span>
+        <small>{targetLabel}</small>
+      </div>
+      <div className="map-insight-buttons">
+        <button disabled={busy} onClick={() => onAsk("explain")} type="button">
+          これは何？
+        </button>
+        <button disabled={busy} onClick={() => onAsk("importance")} type="button">
+          なぜ重要？
+        </button>
+        <button disabled={busy} onClick={() => onAsk("bottleneck")} type="button">
+          詰まりは？
+        </button>
+        <button disabled={busy} onClick={() => onAsk("next_questions")} type="button">
+          次に聞くこと
+        </button>
+        <button disabled={busy} onClick={() => onAsk("revenue_action")} type="button">
+          売上への一手
+        </button>
+      </div>
+      {busy ? <small className="map-insight-status">Codex確認中...</small> : null}
+      {error ? <small className="map-insight-error">{error}</small> : null}
+    </div>
   );
 }
 

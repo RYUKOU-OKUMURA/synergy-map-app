@@ -945,6 +945,7 @@ pub fn run() {
             mvp1::save_map_layout,
             mvp1::save_view_layout,
             mvp1::generate_suggestions_from_map,
+            mvp1::ask_map_insight,
             mvp1::update_suggestion,
             mvp1::export_markdown,
             mvp1::export_csv_bundle

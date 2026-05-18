@@ -14,8 +14,9 @@ use uuid::Uuid;
 
 use crate::ai_schema::{
     ai_analysis_json_schema, extracted_items_json_schema, map_draft_json_schema,
-    suggestion_cards_json_schema, validate_ai_analysis_json, validate_extracted_items_json,
-    validate_map_draft_json, validate_suggestion_cards_json, SCHEMA_VERSION,
+    map_insight_json_schema, suggestion_cards_json_schema, validate_ai_analysis_json,
+    validate_extracted_items_json, validate_map_draft_json, validate_map_insight_json,
+    validate_suggestion_cards_json, SCHEMA_VERSION,
 };
 use crate::codex_app_server;
 use crate::DbState;
@@ -1169,7 +1170,9 @@ pub fn generate_suggestions_from_map(
         .map_err(|error| error.to_string())?;
     transaction
         .execute(
-            "DELETE FROM ai_comments WHERE project_id = ?1",
+            "DELETE FROM ai_comments
+             WHERE project_id = ?1
+               AND comment_type IN ('summary', 'strong_flow', 'bottleneck', 'unconnected', 'question')",
             [project_id.as_str()],
         )
         .map_err(|error| error.to_string())?;
@@ -1195,6 +1198,113 @@ pub fn generate_suggestions_from_map(
     Ok(MvpRunResult {
         ok: true,
         ai_run_id: Some(suggestions_run_id),
+        message,
+        workspace: load_workspace(&connection, &project_id)?,
+    })
+}
+
+#[tauri::command]
+pub fn ask_map_insight(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    project_id: String,
+    target_kind: String,
+    target_id: Option<String>,
+    question_type: String,
+) -> Result<MvpRunResult, String> {
+    let app_data_dir = app_data_dir_from_db(&state.db_path)?.to_path_buf();
+    let mut connection = open_connection(&state.db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+    ensure_allowed_input("target_kind", &target_kind, &["map", "node", "edge"])?;
+    ensure_allowed_input(
+        "question_type",
+        &question_type,
+        &[
+            "explain",
+            "importance",
+            "bottleneck",
+            "next_questions",
+            "revenue_action",
+        ],
+    )?;
+    let workspace = load_workspace(&connection, &project_id)?;
+    let (active_nodes, _) = active_map_scope(&workspace);
+    if active_nodes.is_empty() {
+        return Err("シナジーマップがありません。先にマップを生成してください。".to_string());
+    }
+
+    let prompt = map_insight_prompt(
+        &workspace,
+        &target_kind,
+        target_id.as_deref(),
+        &question_type,
+    )?;
+    let prompt_hash = hash_text(&prompt);
+    let codex_result = try_structured_codex(app, &prompt, map_insight_json_schema());
+    let (output_json, model, status, error, fallback_used, message) = match codex_result {
+        Ok(value) => (
+            value,
+            CODEX_MODEL,
+            "completed",
+            None,
+            false,
+            "Codex理解メモを生成しました。".to_string(),
+        ),
+        Err(error) => (
+            build_map_insight_output(
+                &workspace,
+                &target_kind,
+                target_id.as_deref(),
+                &question_type,
+            ),
+            LOCAL_MODEL,
+            "fallback_completed",
+            Some(error),
+            true,
+            "Codex AI実行に失敗したため、ローカルドラフトで理解メモを生成しました。".to_string(),
+        ),
+    };
+    let output = validate_map_insight_json(&output_json)?;
+    let validated_output_json = serde_json::to_value(&output).map_err(|error| error.to_string())?;
+    let ai_run_id = save_ai_run(
+        &connection,
+        &app_data_dir,
+        &project_id,
+        "ask_map_insight",
+        "MapInsightOutput",
+        model,
+        pending_ai_run_status(status),
+        json!({
+            "mode": "map_context_question",
+            "fallbackUsed": fallback_used,
+            "promptHash": prompt_hash,
+            "targetKind": target_kind.as_str(),
+            "targetId": target_id.as_deref(),
+            "questionType": question_type.as_str(),
+        }),
+        &validated_output_json,
+        error,
+    )?;
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    insert_map_insight_comment(
+        &transaction,
+        &project_id,
+        &ai_run_id,
+        &output,
+        &target_kind,
+        target_id.as_deref(),
+        &question_type,
+    )?;
+    finalize_ai_run_in_transaction(&transaction, &ai_run_id, status)?;
+    record_snapshot_in_transaction(&transaction, &project_id, "ai_map_insight")?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    Ok(MvpRunResult {
+        ok: true,
+        ai_run_id: Some(ai_run_id),
         message,
         workspace: load_workspace(&connection, &project_id)?,
     })
@@ -2629,14 +2739,20 @@ fn clear_map_analysis_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     project_id: &str,
 ) -> Result<(), String> {
-    for table_name in ["suggestions", "ai_comments"] {
-        transaction
-            .execute(
-                &format!("DELETE FROM {table_name} WHERE project_id = ?1"),
-                [project_id],
-            )
-            .map_err(|error| error.to_string())?;
-    }
+    transaction
+        .execute(
+            "DELETE FROM suggestions WHERE project_id = ?1",
+            [project_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM ai_comments
+             WHERE project_id = ?1
+               AND comment_type IN ('summary', 'strong_flow', 'bottleneck', 'unconnected', 'question')",
+            [project_id],
+        )
+        .map_err(|error| error.to_string())?;
 
     Ok(())
 }
@@ -2646,6 +2762,12 @@ fn clear_map_outputs_in_transaction(
     project_id: &str,
 ) -> Result<(), String> {
     clear_map_analysis_in_transaction(transaction, project_id)?;
+    transaction
+        .execute(
+            "DELETE FROM ai_comments WHERE project_id = ?1",
+            [project_id],
+        )
+        .map_err(|error| error.to_string())?;
     transaction
         .execute("DELETE FROM edges WHERE project_id = ?1", [project_id])
         .map_err(|error| error.to_string())?;
@@ -2774,6 +2896,193 @@ fn business_impact_prompt(workspace: &ProjectWorkspace) -> String {
          不確実な情報はunknownまたはneeds_reviewにしてください。schemaVersionは{}です。\n\nNodes:\n{}\n\nEdges:\n{}",
         SCHEMA_VERSION, nodes, edges
     )
+}
+
+fn map_insight_prompt(
+    workspace: &ProjectWorkspace,
+    target_kind: &str,
+    target_id: Option<&str>,
+    question_type: &str,
+) -> Result<String, String> {
+    let target_context = map_insight_target_context(workspace, target_kind, target_id)?;
+    let question = map_insight_question_label(question_type);
+    let (active_nodes, active_edges) = active_map_scope(workspace);
+    let nodes = active_nodes
+        .iter()
+        .map(|node| {
+            format!(
+                "- {} ({}) / confidence={} / influence={} / summary={} / sourceTrace={}",
+                node.label,
+                node.node_type,
+                node.confidence_status.as_deref().unwrap_or("estimated"),
+                node.influence_level.as_deref().unwrap_or("2"),
+                node.description.as_deref().unwrap_or("説明なし"),
+                source_trace_for_node(node, workspace)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let edges = active_edges
+        .iter()
+        .map(|edge| {
+            let source = node_label(workspace, &edge.source_node_id);
+            let target = node_label(workspace, &edge.target_node_id);
+            format!(
+                "- {} -> {} / label={} / flow={} / strength={} / confidence={} / evidence={}",
+                source,
+                target,
+                edge.label.as_deref().unwrap_or("導線"),
+                edge.flow_type.as_deref().unwrap_or("unknown"),
+                edge.strength.as_deref().unwrap_or("normal"),
+                edge.confidence_status.as_deref().unwrap_or("estimated"),
+                edge.evidence.as_deref().unwrap_or("資料要約からの推定")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(format!(
+        "以下のシナジーマップ文脈をもとに、非IT寄りの相談者にも分かる短い壁打ち回答を日本語で返してください。\
+         対象を断定しすぎず、資料根拠が薄い場合はneeds_reviewにしてください。\
+         answerは2-4文、keyPointsは1-5件、followUpQuestionsは次に確認すべき質問を最大5件にしてください。\
+         schemaVersionは{}です。\n\nQuestionType: {}\nQuestion: {}\nTarget:\n{}\n\nMap nodes:\n{}\n\nMap edges:\n{}",
+        SCHEMA_VERSION, question_type, question, target_context, nodes, edges
+    ))
+}
+
+fn map_insight_target_context(
+    workspace: &ProjectWorkspace,
+    target_kind: &str,
+    target_id: Option<&str>,
+) -> Result<String, String> {
+    match target_kind {
+        "map" => Ok("マップ全体".to_string()),
+        "node" => {
+            let node_id = target_id.ok_or_else(|| "target_id is required.".to_string())?;
+            let node = workspace
+                .nodes
+                .iter()
+                .find(|node| node.id == node_id && node.adoption_status != "rejected")
+                .ok_or_else(|| "対象ノードが見つかりません。".to_string())?;
+            Ok(format!(
+                "ノード: {} ({}) / confidence={} / influence={} / description={} / sourceTrace={}",
+                node.label,
+                node.node_type,
+                node.confidence_status.as_deref().unwrap_or("estimated"),
+                node.influence_level.as_deref().unwrap_or("2"),
+                node.description.as_deref().unwrap_or("説明なし"),
+                source_trace_for_node(node, workspace)
+            ))
+        }
+        "edge" => {
+            let edge_id = target_id.ok_or_else(|| "target_id is required.".to_string())?;
+            let edge = workspace
+                .edges
+                .iter()
+                .find(|edge| edge.id == edge_id && edge.adoption_status != "rejected")
+                .ok_or_else(|| "対象導線が見つかりません。".to_string())?;
+            Ok(format!(
+                "導線: {} -> {} / label={} / flow={} / strength={} / confidence={} / evidence={}",
+                node_label(workspace, &edge.source_node_id),
+                node_label(workspace, &edge.target_node_id),
+                edge.label.as_deref().unwrap_or("導線"),
+                edge.flow_type.as_deref().unwrap_or("unknown"),
+                edge.strength.as_deref().unwrap_or("normal"),
+                edge.confidence_status.as_deref().unwrap_or("estimated"),
+                edge.evidence.as_deref().unwrap_or("資料要約からの推定")
+            ))
+        }
+        _ => Err(format!("Unsupported target_kind: {target_kind}")),
+    }
+}
+
+fn map_insight_question_label(question_type: &str) -> &'static str {
+    match question_type {
+        "importance" => "なぜ重要そうに見えるかを説明してください。",
+        "bottleneck" => "詰まりや弱い導線になりそうな点を説明してください。",
+        "next_questions" => "次にクライアントへ確認すべき質問を整理してください。",
+        "revenue_action" => "売上や利益に効きそうな次の一手を説明してください。",
+        _ => "この対象の意味を分かりやすく説明してください。",
+    }
+}
+
+fn build_map_insight_output(
+    workspace: &ProjectWorkspace,
+    target_kind: &str,
+    target_id: Option<&str>,
+    question_type: &str,
+) -> Value {
+    let target = map_insight_target_title(workspace, target_kind, target_id);
+    let question = map_insight_question_label(question_type);
+    let (nodes, edges) = active_map_scope(workspace);
+    let answer = match question_type {
+        "importance" => format!(
+            "{target}は、顧客導線上の接続や施策優先度を考えるうえで確認価値があります。資料要約ベースの推定を含むため、会議では重要度と実態を確認してください。"
+        ),
+        "bottleneck" => format!(
+            "{target}は、前後の導線や根拠が薄い場合に詰まりの候補になります。接続先、担当、次のアクションが明確かを確認すると理解が深まります。"
+        ),
+        "next_questions" => format!(
+            "{target}について、実際の顧客行動、担当者、成果指標を確認するとマップの納得感が上がります。"
+        ),
+        "revenue_action" => format!(
+            "{target}を売上・利益へつなげるには、強い導線を伸ばすか、弱い接点を補強する小さな施策から確認するのが現実的です。"
+        ),
+        _ => format!(
+            "{target}は、現在のマップにある{}件のノードと{}件の導線の中で理解を深める対象です。資料要約からの初期整理なので、確定情報と推定を分けて確認してください。",
+            nodes.len(),
+            edges.len()
+        ),
+    };
+
+    json!({
+        "schemaVersion": SCHEMA_VERSION,
+        "answer": answer,
+        "keyPoints": [
+            format!("対象: {target}"),
+            "資料要約とマップ構造からの確認メモです。",
+            "確定情報ではなく、会議中に確認するための下書きとして扱います。"
+        ],
+        "followUpQuestions": [
+            question,
+            "この対象の成果指標は何ですか？",
+            "この導線や項目を担当している人は誰ですか？"
+        ],
+        "confidenceStatus": "estimated"
+    })
+}
+
+fn map_insight_target_title(
+    workspace: &ProjectWorkspace,
+    target_kind: &str,
+    target_id: Option<&str>,
+) -> String {
+    match target_kind {
+        "node" => target_id
+            .and_then(|id| workspace.nodes.iter().find(|node| node.id == id))
+            .map(|node| format!("ノード「{}」", node.label))
+            .unwrap_or_else(|| "選択中ノード".to_string()),
+        "edge" => target_id
+            .and_then(|id| workspace.edges.iter().find(|edge| edge.id == id))
+            .map(|edge| {
+                format!(
+                    "導線「{} -> {}」",
+                    node_label(workspace, &edge.source_node_id),
+                    node_label(workspace, &edge.target_node_id)
+                )
+            })
+            .unwrap_or_else(|| "選択中導線".to_string()),
+        _ => "マップ全体".to_string(),
+    }
+}
+
+fn node_label<'a>(workspace: &'a ProjectWorkspace, node_id: &str) -> &'a str {
+    workspace
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .map(|node| node.label.as_str())
+        .unwrap_or("node")
 }
 
 fn source_trace_for_node(node: &MapNodeRow, workspace: &ProjectWorkspace) -> String {
@@ -3001,6 +3310,63 @@ fn insert_suggestions(
             )
             .map_err(|error| error.to_string())?;
     }
+
+    Ok(())
+}
+
+fn insert_map_insight_comment(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+    ai_run_id: &str,
+    output: &crate::ai_schema::MapInsightOutput,
+    target_kind: &str,
+    target_id: Option<&str>,
+    question_type: &str,
+) -> Result<(), String> {
+    let now = now_rfc3339()?;
+    let title = format!(
+        "壁打ち: {}",
+        match question_type {
+            "importance" => "重要度",
+            "bottleneck" => "詰まり",
+            "next_questions" => "確認質問",
+            "revenue_action" => "売上への一手",
+            _ => "説明",
+        }
+    );
+    let mut body = output.answer.clone();
+    if !output.key_points.is_empty() {
+        body.push_str("\n要点: ");
+        body.push_str(&output.key_points.join(" / "));
+    }
+    if !output.follow_up_questions.is_empty() {
+        body.push_str("\n次に聞くこと: ");
+        body.push_str(&output.follow_up_questions.join(" / "));
+    }
+
+    transaction
+        .execute(
+            "INSERT INTO ai_comments (
+                id, project_id, ai_run_id, comment_type, title, body, confidence_status, created_at
+             ) VALUES (?1, ?2, ?3, 'map_insight', ?4, ?5, ?6, ?7)",
+            params![
+                Uuid::new_v4().to_string(),
+                project_id,
+                ai_run_id,
+                format!(
+                    "{} [{}{}]",
+                    title,
+                    target_kind,
+                    target_id
+                        .map(|value| format!(":{value}"))
+                        .unwrap_or_default()
+                ),
+                body,
+                output.confidence_status,
+                now
+            ],
+        )
+        .map_err(|error| error.to_string())?;
 
     Ok(())
 }

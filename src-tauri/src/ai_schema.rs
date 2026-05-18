@@ -114,6 +114,17 @@ pub struct SuggestionCard {
     pub related_node_labels: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct MapInsightOutput {
+    pub schema_version: String,
+    pub answer: String,
+    pub key_points: Vec<String>,
+    pub follow_up_questions: Vec<String>,
+    pub confidence_status: String,
+}
+
 pub fn extracted_items_json_schema() -> Value {
     json!({
         "type": "object",
@@ -391,6 +402,39 @@ pub fn suggestion_cards_json_schema() -> Value {
     })
 }
 
+pub fn map_insight_json_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "schemaVersion",
+            "answer",
+            "keyPoints",
+            "followUpQuestions",
+            "confidenceStatus"
+        ],
+        "properties": {
+            "schemaVersion": { "type": "string", "const": SCHEMA_VERSION },
+            "answer": { "type": "string", "minLength": 1 },
+            "keyPoints": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 5,
+                "items": { "type": "string", "minLength": 1 }
+            },
+            "followUpQuestions": {
+                "type": "array",
+                "maxItems": 5,
+                "items": { "type": "string", "minLength": 1 }
+            },
+            "confidenceStatus": {
+                "type": "string",
+                "enum": ["confirmed", "estimated", "needs_review"]
+            }
+        }
+    })
+}
+
 pub fn validate_extracted_items_json(value: &Value) -> Result<ExtractedItemsOutput, String> {
     let output: ExtractedItemsOutput =
         serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
@@ -543,6 +587,36 @@ pub fn validate_suggestion_cards_json(value: &Value) -> Result<SuggestionCardsOu
     Ok(output)
 }
 
+pub fn validate_map_insight_json(value: &Value) -> Result<MapInsightOutput, String> {
+    let output: MapInsightOutput =
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+
+    ensure_schema_version(&output.schema_version)?;
+    ensure_non_empty("answer", &output.answer)?;
+    if output.key_points.is_empty() {
+        return Err("key_points must include at least one item.".to_string());
+    }
+    for point in &output.key_points {
+        ensure_non_empty("key_points", point)?;
+    }
+    for question in &output.follow_up_questions {
+        ensure_non_empty("follow_up_questions", question)?;
+    }
+    if output.key_points.len() > 5 {
+        return Err("key_points must include at most 5 items.".to_string());
+    }
+    if output.follow_up_questions.len() > 5 {
+        return Err("follow_up_questions must include at most 5 items.".to_string());
+    }
+    ensure_allowed(
+        "confidence_status",
+        &output.confidence_status,
+        &["confirmed", "estimated", "needs_review"],
+    )?;
+
+    Ok(output)
+}
+
 fn ensure_schema_version(schema_version: &str) -> Result<(), String> {
     if schema_version != SCHEMA_VERSION {
         return Err(format!("Unsupported schema_version: {schema_version}"));
@@ -675,5 +749,36 @@ mod tests {
             validate_suggestion_cards_json(&value).expect_err("score outside range should fail");
 
         assert!(error.contains("impact_score"));
+    }
+
+    #[test]
+    fn map_insight_rejects_unknown_fields() {
+        let value = json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "answer": "このノードは問い合わせ導線の確認対象です。",
+            "keyPoints": ["接点の意味を確認する"],
+            "followUpQuestions": ["担当者は誰ですか？"],
+            "confidenceStatus": "estimated",
+            "unexpected": "reject me"
+        });
+
+        let error = validate_map_insight_json(&value).expect_err("unknown field should fail");
+
+        assert!(error.contains("unknown field"));
+    }
+
+    #[test]
+    fn map_insight_rejects_too_many_key_points() {
+        let value = json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "answer": "このノードは問い合わせ導線の確認対象です。",
+            "keyPoints": ["1", "2", "3", "4", "5", "6"],
+            "followUpQuestions": [],
+            "confidenceStatus": "estimated"
+        });
+
+        let error = validate_map_insight_json(&value).expect_err("too many points should fail");
+
+        assert!(error.contains("key_points"));
     }
 }
