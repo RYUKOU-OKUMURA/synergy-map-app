@@ -9,9 +9,11 @@ import {
   ExternalLink,
   FileText,
   FolderKanban,
+  FolderOpen,
   Gauge,
   Globe2,
   History,
+  Home,
   Info,
   Layers3,
   Link as LinkIcon,
@@ -75,6 +77,7 @@ import {
 } from "@/lib/onboardingOptions";
 
 type ViewId =
+  | "home"
   | "projects"
   | "sources"
   | "extract"
@@ -113,16 +116,21 @@ type InformationSourceDraft = {
   url: string;
 };
 
-const navItems: Array<{ id: ViewId; label: string; icon: typeof FolderKanban }> = [
-  { id: "projects", label: "案件", icon: FolderKanban },
-  { id: "sources", label: "情報", icon: Upload },
-  { id: "extract", label: "抽出", icon: ListChecks },
-  { id: "map", label: "マップ", icon: MapIcon },
-  { id: "suggestions", label: "施策", icon: MessageSquareText },
-  { id: "export", label: "出力", icon: Download },
-  { id: "history", label: "履歴", icon: History },
-  { id: "settings", label: "設定", icon: Settings },
-];
+const globalNavItems: Array<{ id: ViewId; label: string; icon: typeof FolderKanban }> =
+  [
+    { id: "home", label: "ホーム", icon: Home },
+    { id: "projects", label: "案件一覧", icon: FolderKanban },
+  ];
+
+const projectNavItems: Array<{ id: ViewId; label: string; icon: typeof FolderKanban }> =
+  [
+    { id: "map", label: "マップ", icon: MapIcon },
+    { id: "sources", label: "情報ソース", icon: Upload },
+    { id: "extract", label: "抽出カード", icon: ListChecks },
+    { id: "suggestions", label: "施策", icon: MessageSquareText },
+    { id: "export", label: "出力", icon: Download },
+    { id: "history", label: "履歴", icon: History },
+  ];
 
 const informationSourceOptions: Array<{
   id: InformationSourceKind;
@@ -388,16 +396,12 @@ function applyLocalMapLayouts(
 
 function App() {
   const isTauriRuntime = hasTauriRuntime();
-  const [view, setView] = useState<ViewId>("map");
+  const [view, setView] = useState<ViewId>("home");
   const [projects, setProjects] = useState<Project[]>(
     isTauriRuntime ? [] : [demoProject],
   );
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
-    isTauriRuntime ? null : demoProject.id,
-  );
-  const [workspace, setWorkspace] = useState<ProjectWorkspace>(
-    isTauriRuntime ? emptyWorkspace : demoWorkspace,
-  );
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [workspace, setWorkspace] = useState<ProjectWorkspace>(emptyWorkspace);
   const [mapViewMode, setMapViewMode] = useState<MapViewMode>("customer_journey");
   const [selectedMapElement, setSelectedMapElement] =
     useState<SelectedMapElement>(null);
@@ -430,9 +434,9 @@ function App() {
 
   const activeProject = useMemo(
     () =>
-      projects.find((project) => project.id === selectedProjectId) ??
-      projects[0] ??
-      null,
+      selectedProjectId
+        ? (projects.find((project) => project.id === selectedProjectId) ?? null)
+        : null,
     [projects, selectedProjectId],
   );
   const activeProjectId = activeProject?.id ?? null;
@@ -516,33 +520,38 @@ function App() {
     }
   }
 
-  async function handleCreateProject() {
-    await runAction(
-      async () => {
-        const project = await invoke<Project>("create_project", {
-          name: `新規案件 ${projects.length + 1}`,
-          clientName: "",
-          industry: "",
-          description: "",
-          memo: "",
-        });
-        const nextProjects = await invoke<Project[]>("list_projects");
-        const nextWorkspace = await invoke<ProjectWorkspace>("get_project_workspace", {
-          projectId: project.id,
-        });
-        return { nextProjects, nextWorkspace, project };
-      },
-      ({ nextProjects, nextWorkspace, project }) => {
-        setProjects(nextProjects);
-        setSelectedProjectId(project.id);
-        setWorkspace(nextWorkspace);
-        setExcludedChunkIds([]);
-        setSelectedSuggestionId(null);
-        setApprovedChunkSignature(null);
-        setView("sources");
-        setNotice("新規案件を作成しました。");
-      },
-    );
+  function resetProjectScopedSelection() {
+    setSelectedItemId(null);
+    setSelectedMapElement(null);
+    setSelectedSuggestionId(null);
+    setExcludedChunkIds([]);
+    setApprovedChunkSignature(null);
+    setIsDrawerOpen(false);
+    setIsMapEditMode(false);
+  }
+
+  function handleStartNewMap() {
+    setSelectedProjectId(null);
+    setWorkspace(emptyWorkspace);
+    resetProjectScopedSelection();
+    setView("map");
+  }
+
+  function handleSelectProject(projectId: string, nextView: ViewId = "map") {
+    setSelectedProjectId(projectId);
+    setWorkspace(emptyWorkspace);
+    resetProjectScopedSelection();
+    if (!isTauriRuntime && projectId === demoProject.id) {
+      setWorkspace(demoWorkspace);
+    }
+    setView(nextView);
+  }
+
+  function handleClearProjectSelection(nextView: ViewId = "home") {
+    setSelectedProjectId(null);
+    setWorkspace(emptyWorkspace);
+    resetProjectScopedSelection();
+    setView(nextView);
   }
 
   async function handleUpdateProject(projectId: string, values: ProjectFormValues) {
@@ -582,23 +591,11 @@ function App() {
       async () => {
         await invoke("delete_project", { projectId });
         const nextProjects = await invoke<Project[]>("list_projects");
-        const nextProjectId = nextProjects[0]?.id ?? null;
-        const nextWorkspace = nextProjectId
-          ? await invoke<ProjectWorkspace>("get_project_workspace", {
-              projectId: nextProjectId,
-            })
-          : emptyWorkspace;
-        return { nextProjects, nextProjectId, nextWorkspace };
+        return { nextProjects };
       },
-      ({ nextProjectId, nextProjects, nextWorkspace }) => {
+      ({ nextProjects }) => {
         setProjects(nextProjects);
-        setSelectedProjectId(nextProjectId);
-        setWorkspace(nextWorkspace);
-        setSelectedItemId(null);
-        setSelectedMapElement(null);
-        setSelectedSuggestionId(null);
-        setExcludedChunkIds([]);
-        setApprovedChunkSignature(null);
+        handleClearProjectSelection("projects");
         setView("projects");
         setNotice("案件と関連データを削除しました。");
       },
@@ -1121,9 +1118,7 @@ function App() {
       if (cancelled) return;
       setProjects(rows);
       setSelectedProjectId((current) =>
-        current && rows.some((project) => project.id === current)
-          ? current
-          : (rows[0]?.id ?? null),
+        current && rows.some((project) => project.id === current) ? current : null,
       );
     }
 
@@ -1210,77 +1205,48 @@ function App() {
 
   return (
     <main className="app-root">
-      <aside className="side-rail" aria-label="主要ナビゲーション">
-        <div className="brand-mark">
-          <Layers3 size={19} aria-hidden="true" />
-        </div>
-        <nav className="rail-nav">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button
-                className={`rail-item ${view === item.id ? "rail-item-active" : ""}`}
-                key={item.id}
-                onClick={() => setView(item.id)}
-                title={item.label}
-                type="button"
-              >
-                <Icon size={17} aria-hidden="true" />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
-        </nav>
-      </aside>
+      <AppSidebar
+        activeProject={activeProject}
+        onOpenProjects={() => setView("projects")}
+        onSelectView={(nextView) => {
+          if (nextView === "home") {
+            handleClearProjectSelection("home");
+          } else {
+            setView(nextView);
+          }
+        }}
+        onStartNewMap={handleStartNewMap}
+        view={view}
+      />
 
       <section className="app-shell">
-        <header className="top-bar">
-          <div className="project-heading">
-            <div className="project-title">{activeProject?.name ?? "案件未選択"}</div>
-            <div className="project-meta">
-              {activeProject?.clientName ?? "クライアント未設定"}
-            </div>
-          </div>
-          <div className="top-status">
-            <span className="save-status">
-              <Save size={13} aria-hidden="true" />
-              {saveStatus}
-            </span>
-            <StatusChip>{workspace.extractedItems.length}カード</StatusChip>
-            <StatusChip>{workspace.nodes.length}ノード</StatusChip>
-            <StatusChip>{workspace.edges.length}導線</StatusChip>
-            <span
-              className={`ai-source-chip ${
-                isFallbackRun(latestAiRun) ? "ai-source-chip-fallback" : ""
-              }`}
-              title={latestAiRun?.error ?? aiRunStatusLabel(latestAiRun)}
-            >
-              {aiRunSourceLabel(latestAiRun)}
-            </span>
-            <button
-              className="ghost-button"
-              onClick={() => setView("history")}
-              type="button"
-            >
-              <Clock3 size={15} aria-hidden="true" />
-              履歴
-            </button>
-            <button
-              className="primary-button"
-              disabled={!activeProject || isBusy}
-              onClick={handleAiUpdate}
-              type="button"
-            >
-              <Sparkles size={15} aria-hidden="true" />
-              {isBusy ? "処理中" : primaryActionLabel}
-            </button>
-          </div>
-        </header>
+        <WorkspaceTopBar
+          activeProject={activeProject}
+          isBusy={isBusy}
+          latestAiRun={latestAiRun}
+          onAiUpdate={handleAiUpdate}
+          onOpenHistory={() => setView("history")}
+          onRefreshCodexRuntime={handleRefreshCodexRuntime}
+          primaryActionLabel={primaryActionLabel}
+          saveStatus={saveStatus}
+          view={view}
+          workspace={workspace}
+        />
 
         {error ? <div className="toast toast-error">{error}</div> : null}
         {notice ? <div className="toast">{notice}</div> : null}
 
         <div className="workspace">
+          {view === "home" ? (
+            <HomeView
+              activeProject={activeProject}
+              onOpenProjects={() => setView("projects")}
+              onSelectProject={(projectId) => handleSelectProject(projectId, "map")}
+              onStartNewMap={handleStartNewMap}
+              projects={projects}
+              workspace={workspace}
+            />
+          ) : null}
           {view === "map" ? (
             <MapWorkspace
               activeProject={activeProject}
@@ -1347,20 +1313,16 @@ function App() {
             <ProjectsView
               activeProject={activeProject}
               activeProjectId={activeProject?.id ?? null}
-              onCreateProject={handleCreateProject}
+              onCreateProject={handleStartNewMap}
               onDeleteProject={handleDeleteProject}
               onSelectProject={(projectId) => {
-                setSelectedProjectId(projectId);
-                setSelectedSuggestionId(null);
-                setExcludedChunkIds([]);
-                setApprovedChunkSignature(null);
-                setView("sources");
+                handleSelectProject(projectId, "map");
               }}
               onUpdateProject={handleUpdateProject}
               projects={projects}
             />
           ) : null}
-          {view === "sources" ? (
+          {view === "sources" && activeProject ? (
             <SourcesView
               canPickFiles={Boolean(activeProjectId && isTauriRuntime)}
               canSaveTextSource={Boolean(activeProjectId && isTauriRuntime)}
@@ -1369,7 +1331,7 @@ function App() {
               workspace={workspace}
             />
           ) : null}
-          {view === "extract" ? (
+          {view === "extract" && activeProject ? (
             <ExtractView
               aiSendApproved={isAiSendApproved}
               onCreateManualItem={handleCreateManualItem}
@@ -1399,7 +1361,7 @@ function App() {
               workspace={workspace}
             />
           ) : null}
-          {view === "suggestions" ? (
+          {view === "suggestions" && activeProject ? (
             <SuggestionsView
               onGenerate={handleGenerateSuggestions}
               onSelectSuggestion={(suggestionId) => {
@@ -1411,10 +1373,12 @@ function App() {
               workspace={workspace}
             />
           ) : null}
-          {view === "export" ? (
+          {view === "export" && activeProject ? (
             <ExportView onExport={handleExport} workspace={workspace} />
           ) : null}
-          {view === "history" ? <HistoryView workspace={workspace} /> : null}
+          {view === "history" && activeProject ? (
+            <HistoryView workspace={workspace} />
+          ) : null}
           {view === "settings" ? (
             <SettingsView
               codexBusy={codexBusy}
@@ -1428,16 +1392,18 @@ function App() {
           ) : null}
         </div>
 
-        <InspectorPanel
-          edge={selectedEdge}
-          isTauriRuntime={isTauriRuntime}
-          item={selectedItem}
-          node={selectedNode}
-          onWorkspaceChange={setWorkspace}
-          projectId={activeProject?.id ?? null}
-          suggestion={selectedSuggestion}
-          workspace={workspace}
-        />
+        {activeProject ? (
+          <InspectorPanel
+            edge={selectedEdge}
+            isTauriRuntime={isTauriRuntime}
+            item={selectedItem}
+            node={selectedNode}
+            onWorkspaceChange={setWorkspace}
+            projectId={activeProject.id}
+            suggestion={selectedSuggestion}
+            workspace={workspace}
+          />
+        ) : null}
       </section>
     </main>
   );
@@ -1445,6 +1411,327 @@ function App() {
 
 function StatusChip({ children }: { children: React.ReactNode }) {
   return <span className="status-chip">{children}</span>;
+}
+
+function AppSidebar({
+  activeProject,
+  onOpenProjects,
+  onSelectView,
+  onStartNewMap,
+  view,
+}: {
+  activeProject: Project | null;
+  onOpenProjects: () => void;
+  onSelectView: (view: ViewId) => void;
+  onStartNewMap: () => void;
+  view: ViewId;
+}) {
+  return (
+    <aside className="side-rail" aria-label="主要ナビゲーション">
+      <div className="sidebar-brand">
+        <div className="brand-mark">
+          <Layers3 size={19} aria-hidden="true" />
+        </div>
+        <div>
+          <strong>Synergy Map</strong>
+          <span>売上マップ作成</span>
+        </div>
+      </div>
+
+      <button className="sidebar-create-button" onClick={onStartNewMap} type="button">
+        <Plus size={16} aria-hidden="true" />
+        新しいマップを作る
+      </button>
+
+      <section className="project-switcher">
+        <span className="sidebar-section-label">現在の案件</span>
+        <div className="project-switcher-card">
+          <strong>{activeProject?.name ?? "案件が選択されていません"}</strong>
+          <small>
+            {activeProject?.clientName ?? "案件を選ぶか、新しく作成してください"}
+          </small>
+          <button className="ghost-button" onClick={onOpenProjects} type="button">
+            <FolderOpen size={14} aria-hidden="true" />
+            案件を切り替え
+          </button>
+        </div>
+      </section>
+
+      <nav className="sidebar-nav" aria-label="全体メニュー">
+        <span className="sidebar-section-label">全体メニュー</span>
+        {globalNavItems.map((item) => {
+          const Icon = item.icon;
+          return (
+            <button
+              className={`sidebar-nav-item ${
+                view === item.id ? "sidebar-nav-item-active" : ""
+              }`}
+              key={item.id}
+              onClick={() => onSelectView(item.id)}
+              type="button"
+            >
+              <Icon size={16} aria-hidden="true" />
+              <span>{item.label}</span>
+            </button>
+          );
+        })}
+      </nav>
+
+      {activeProject ? (
+        <nav className="sidebar-nav project-nav" aria-label="案件内メニュー">
+          <span className="sidebar-section-label">案件内メニュー</span>
+          {projectNavItems.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                className={`sidebar-nav-item ${
+                  view === item.id ? "sidebar-nav-item-active" : ""
+                } ${item.id === "map" ? "sidebar-nav-item-primary" : ""}`}
+                key={item.id}
+                onClick={() => onSelectView(item.id)}
+                type="button"
+              >
+                <Icon size={16} aria-hidden="true" />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+      ) : (
+        <div className="project-nav-disabled">
+          <span className="sidebar-section-label">案件を選択後に利用</span>
+          <span>マップ、情報ソース、抽出カード、施策、出力、履歴</span>
+        </div>
+      )}
+
+      <button
+        className={`sidebar-nav-item sidebar-settings ${
+          view === "settings" ? "sidebar-nav-item-active" : ""
+        }`}
+        onClick={() => onSelectView("settings")}
+        type="button"
+      >
+        <Settings size={16} aria-hidden="true" />
+        <span>設定</span>
+      </button>
+    </aside>
+  );
+}
+
+function WorkspaceTopBar({
+  activeProject,
+  isBusy,
+  latestAiRun,
+  onAiUpdate,
+  onOpenHistory,
+  onRefreshCodexRuntime,
+  primaryActionLabel,
+  saveStatus,
+  view,
+  workspace,
+}: {
+  activeProject: Project | null;
+  isBusy: boolean;
+  latestAiRun: AiRunRow | null;
+  onAiUpdate: () => void;
+  onOpenHistory: () => void;
+  onRefreshCodexRuntime: () => void;
+  primaryActionLabel: string;
+  saveStatus: string;
+  view: ViewId;
+  workspace: ProjectWorkspace;
+}) {
+  const title = activeProject
+    ? `案件 / ${activeProject.name}`
+    : view === "map"
+      ? "新しいマップ"
+      : view === "projects"
+        ? "案件一覧"
+        : view === "settings"
+          ? "設定"
+          : "ホーム";
+  const meta = activeProject
+    ? (activeProject.clientName ?? "クライアント未設定")
+    : view === "map"
+      ? "企業名と目的を入力してマップ作成を開始"
+      : "案件を選ぶか、新しいマップを作成してください";
+
+  return (
+    <header className="top-bar">
+      <div className="project-heading">
+        <div className="project-title">{title}</div>
+        <div className="project-meta">{meta}</div>
+      </div>
+      {activeProject ? (
+        <div className="top-status">
+          <span className="save-status">
+            <Save size={13} aria-hidden="true" />
+            {saveStatus}
+          </span>
+          <StatusChip>{workspace.extractedItems.length}カード</StatusChip>
+          <StatusChip>{workspace.nodes.length}ノード</StatusChip>
+          <StatusChip>{workspace.edges.length}導線</StatusChip>
+          <span
+            className={`ai-source-chip ${
+              isFallbackRun(latestAiRun) ? "ai-source-chip-fallback" : ""
+            }`}
+            title={latestAiRun?.error ?? aiRunStatusLabel(latestAiRun)}
+          >
+            {aiRunSourceLabel(latestAiRun)}
+          </span>
+          <button className="ghost-button" onClick={onOpenHistory} type="button">
+            <Clock3 size={15} aria-hidden="true" />
+            履歴
+          </button>
+          <button
+            className="primary-button"
+            disabled={isBusy}
+            onClick={onAiUpdate}
+            type="button"
+          >
+            <Sparkles size={15} aria-hidden="true" />
+            {isBusy ? "処理中" : primaryActionLabel}
+          </button>
+        </div>
+      ) : (
+        <div className="top-status">
+          <StatusChip>Codex接続 未確認</StatusChip>
+          <button
+            className="ghost-button"
+            onClick={onRefreshCodexRuntime}
+            type="button"
+          >
+            <Settings size={15} aria-hidden="true" />
+            接続を確認
+          </button>
+        </div>
+      )}
+    </header>
+  );
+}
+
+function projectHasMap(
+  project: Project,
+  activeProject: Project | null,
+  workspace: ProjectWorkspace,
+) {
+  return activeProject?.id === project.id && workspace.nodes.length > 0;
+}
+
+function projectHasUncertainty(
+  project: Project,
+  activeProject: Project | null,
+  workspace: ProjectWorkspace,
+) {
+  return (
+    activeProject?.id === project.id &&
+    (workspace.extractedItems.some((item) => item.confidenceStatus !== "confirmed") ||
+      workspace.nodes.some((node) => node.confidenceStatus !== "confirmed"))
+  );
+}
+
+function HomeView({
+  activeProject,
+  onOpenProjects,
+  onSelectProject,
+  onStartNewMap,
+  projects,
+  workspace,
+}: {
+  activeProject: Project | null;
+  onOpenProjects: () => void;
+  onSelectProject: (projectId: string) => void;
+  onStartNewMap: () => void;
+  projects: Project[];
+  workspace: ProjectWorkspace;
+}) {
+  const recentProjects = [...projects]
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .slice(0, 5);
+
+  return (
+    <section className="home-view">
+      <div className="home-start-panel">
+        <div>
+          <span className="eyebrow">ホーム</span>
+          <h1>案件を選ぶか、新しいマップを作成してください</h1>
+          <p>
+            企業名、目的、情報ソースを入れると、AIが商品・集客・売上の流れを1枚のマップに整理します。
+          </p>
+          <div className="home-actions">
+            <button className="primary-button" onClick={onStartNewMap} type="button">
+              <Plus size={16} aria-hidden="true" />
+              新しいマップを作る
+            </button>
+            <button className="ghost-button" onClick={onOpenProjects} type="button">
+              <FolderOpen size={16} aria-hidden="true" />
+              既存案件を開く
+            </button>
+          </div>
+          <div className="home-checklist" aria-label="新規マップ作成に必要な情報">
+            <span>企業名</span>
+            <span>目的</span>
+            <span>情報ソース</span>
+          </div>
+        </div>
+      </div>
+
+      <section className="recent-projects-panel">
+        <div className="panel-heading-inline">
+          <div>
+            <h2>最近の案件</h2>
+            <p>続きから開く案件を選んでください。</p>
+          </div>
+          <button className="ghost-button" onClick={onOpenProjects} type="button">
+            案件一覧
+          </button>
+        </div>
+        <div className="recent-project-list">
+          {recentProjects.map((project) => (
+            <button
+              className="recent-project-row"
+              key={project.id}
+              onClick={() => onSelectProject(project.id)}
+              type="button"
+            >
+              <span>
+                <strong>{project.name}</strong>
+                <small>{project.clientName ?? project.industry ?? "詳細未設定"}</small>
+              </span>
+              <span>{formatTime(project.updatedAt)}</span>
+              <span className="recent-project-tags">
+                {projectHasMap(project, activeProject, workspace) ? (
+                  <StatusChip>マップあり</StatusChip>
+                ) : null}
+                {projectHasUncertainty(project, activeProject, workspace) ? (
+                  <StatusChip>推定あり</StatusChip>
+                ) : null}
+              </span>
+              <span className="open-label">開く</span>
+            </button>
+          ))}
+          {recentProjects.length === 0 ? (
+            <div className="empty-panel">まだ案件がありません。</div>
+          ) : null}
+        </div>
+      </section>
+
+      <section className="home-guidance-band">
+        <div>
+          <strong>情報を入れる</strong>
+          <span>ファイル、メモ、URL、SNS、商品情報を材料にします。</span>
+        </div>
+        <div>
+          <strong>マップを見る</strong>
+          <span>商品・集客・顧客接点・売上の流れを整理します。</span>
+        </div>
+        <div>
+          <strong>施策を考える</strong>
+          <span>詰まり、確認質問、次に試す一手へつなげます。</span>
+        </div>
+      </section>
+    </section>
+  );
 }
 
 function MapWorkspace({
@@ -2523,12 +2810,12 @@ function ProjectsView({
     <section className="page-panel">
       <div className="page-header">
         <div>
-          <h1>案件</h1>
+          <h1>案件一覧</h1>
           <p>新規案件を作成し、既存案件を再開します。</p>
         </div>
         <button className="primary-button" onClick={onCreateProject} type="button">
           <Plus size={15} aria-hidden="true" />
-          新規案件
+          新しいマップを作る
         </button>
       </div>
       {activeProject ? (
