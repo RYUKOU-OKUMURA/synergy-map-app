@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   Archive,
@@ -31,6 +32,7 @@ import {
   TriangleAlert,
   TrendingUp,
   Upload,
+  X,
 } from "lucide-react";
 import type * as React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -56,6 +58,7 @@ import {
 } from "@/lib/mvp1Labels";
 import type {
   AiRunRow,
+  CodexUiEvent,
   CodexRuntimeInfo,
   CodexSmokeResult,
   DeviceCodeLoginResult,
@@ -67,6 +70,7 @@ import type {
   Project,
   ProjectWorkspace,
   SelectedMapElement,
+  SourceFileRow,
   SuggestionRow,
   ViewLayoutRow,
 } from "@/lib/mvp1Types";
@@ -100,8 +104,8 @@ type OnboardingDraft = {
   purposeId: MapPurposeId | "";
   industry: string;
   memo: string;
-  websiteUrl: string;
-  snsUrl: string;
+  websiteUrls: string[];
+  snsUrls: string[];
   productInfo: string;
 };
 
@@ -115,6 +119,52 @@ type InformationSourceDraft = {
   body: string;
   url: string;
 };
+
+const CODEX_EVENT_NAME = "codex-app-server-event";
+
+type SourceReflectionState =
+  | "needs_extraction"
+  | "extracted"
+  | "no_cards"
+  | "needs_map"
+  | "mapped"
+  | "not_ready";
+
+type SourceReflectionRow = {
+  source: SourceFileRow;
+  title: string;
+  detail: string | null;
+  extractedItemCount: number;
+  mappedItemCount: number;
+  extractionState: SourceReflectionState;
+  mapState: SourceReflectionState;
+};
+
+type WorkspaceReflectionSummary = {
+  rows: SourceReflectionRow[];
+  sourceCount: number;
+  pendingExtractionCount: number;
+  extractedSourceCount: number;
+  noCardSourceCount: number;
+  pendingMapCount: number;
+  mappedSourceCount: number;
+  mapRefreshNeeded: boolean;
+};
+
+function emptyDeviceCodeResult(): DeviceCodeLoginResult {
+  return {
+    ok: false,
+    loginId: null,
+    verificationUrl: null,
+    userCode: null,
+    completionSuccess: null,
+    cancelStatus: null,
+    events: [],
+    stderr: [],
+    errors: [],
+    warnings: [],
+  };
+}
 
 const globalNavItems: Array<{ id: ViewId; label: string; icon: typeof FolderKanban }> =
   [
@@ -158,6 +208,10 @@ function shortText(value: string, limit = 92) {
   const trimmed = value.trim();
   if (trimmed.length <= limit) return trimmed;
   return `${trimmed.slice(0, limit)}...`;
+}
+
+function compactStringList(values: string[]) {
+  return values.map((value) => value.trim()).filter(Boolean);
 }
 
 function hasOnboardingBrief(workspace: ProjectWorkspace) {
@@ -207,6 +261,233 @@ function aiRunStatusLabel(run: AiRunRow | null | undefined) {
   return run.status;
 }
 
+function parseMetadataJson(metadataJson: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(metadataJson) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function metadataString(metadataJson: string, key: string) {
+  const value = parseMetadataJson(metadataJson)[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function timestampMillis(value: string | null | undefined) {
+  if (!value) return null;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : null;
+}
+
+function latestRunCreatedAt(workspace: ProjectWorkspace, runType: string) {
+  return (
+    workspace.aiRuns.find((run) => run.runType === runType)?.completedAt ??
+    workspace.aiRuns.find((run) => run.runType === runType)?.createdAt ??
+    null
+  );
+}
+
+function hasAcceptedItemWithoutMapNode(workspace: ProjectWorkspace) {
+  const mappedItemIds = new Set(
+    workspace.nodes
+      .map((node) => node.extractedItemId)
+      .filter((id): id is string => Boolean(id)),
+  );
+
+  return workspace.extractedItems.some(
+    (item) => item.adoptionStatus !== "rejected" && !mappedItemIds.has(item.id),
+  );
+}
+
+function hasItemEditedAfterMapGeneration(workspace: ProjectWorkspace) {
+  const latestMapRunAt = latestRunCreatedAt(workspace, "generate_map");
+  if (!latestMapRunAt) return false;
+
+  const latestMapTime = Date.parse(latestMapRunAt);
+  if (!Number.isFinite(latestMapTime)) return false;
+
+  return workspace.extractedItems.some((item) => {
+    const itemUpdatedTime = Date.parse(item.updatedAt);
+    return Number.isFinite(itemUpdatedTime) && itemUpdatedTime > latestMapTime;
+  });
+}
+
+function shouldRegenerateMap(workspace: ProjectWorkspace) {
+  return (
+    workspace.nodes.length > 0 &&
+    (hasAcceptedItemWithoutMapNode(workspace) ||
+      hasItemEditedAfterMapGeneration(workspace))
+  );
+}
+
+function sourceDisplayTitle(source: SourceFileRow) {
+  return (
+    metadataString(source.metadataJson, "title") ??
+    metadataString(source.metadataJson, "url") ??
+    source.fileName
+  );
+}
+
+function sourceDisplayDetail(source: SourceFileRow) {
+  const url = metadataString(source.metadataJson, "url");
+  if (url) return url;
+  if (source.fileType === "onboarding_brief") return "初回マップ作成で入力した情報";
+  return null;
+}
+
+function buildWorkspaceReflectionSummary(
+  workspace: ProjectWorkspace,
+): WorkspaceReflectionSummary {
+  const latestExtractTime = timestampMillis(
+    latestRunCreatedAt(workspace, "extract_items"),
+  );
+  const latestMapTime = timestampMillis(latestRunCreatedAt(workspace, "generate_map"));
+  const chunksBySource = new Map<string, typeof workspace.sourceChunks>();
+
+  for (const chunk of workspace.sourceChunks) {
+    const current = chunksBySource.get(chunk.sourceFileId) ?? [];
+    current.push(chunk);
+    chunksBySource.set(chunk.sourceFileId, current);
+  }
+
+  const mappedItemIds = new Set(
+    workspace.nodes
+      .filter((node) => node.adoptionStatus !== "rejected")
+      .map((node) => node.extractedItemId)
+      .filter((id): id is string => Boolean(id)),
+  );
+
+  const rows = workspace.sourceFiles.map((source) => {
+    const sourceChunks = chunksBySource.get(source.id) ?? [];
+    const sourceChunkIds = new Set(sourceChunks.map((chunk) => chunk.id));
+    const linkedItems = workspace.extractedItems.filter(
+      (item) =>
+        item.adoptionStatus !== "rejected" &&
+        item.sources.some(
+          (itemSource) =>
+            itemSource.sourceFileId === source.id ||
+            (itemSource.sourceChunkId
+              ? sourceChunkIds.has(itemSource.sourceChunkId)
+              : false),
+        ),
+    );
+    const acceptedLinkedItems = linkedItems.filter(
+      (item) => item.adoptionStatus === "accepted",
+    );
+    const mappedItemCount = acceptedLinkedItems.filter((item) =>
+      mappedItemIds.has(item.id),
+    ).length;
+    const sourceTimes = [
+      timestampMillis(source.createdAt),
+      timestampMillis(source.updatedAt),
+      ...sourceChunks.map((chunk) => timestampMillis(chunk.createdAt)),
+    ].filter((time): time is number => typeof time === "number");
+    const latestSourceTime = sourceTimes.length > 0 ? Math.max(...sourceTimes) : null;
+    const hasReadableChunks =
+      (sourceChunks.length > 0 || source.chunkCount > 0) && source.status !== "error";
+    const addedAfterExtraction =
+      latestSourceTime !== null &&
+      latestExtractTime !== null &&
+      latestSourceTime > latestExtractTime;
+    const addedAfterMap =
+      latestSourceTime !== null &&
+      latestMapTime !== null &&
+      latestSourceTime > latestMapTime;
+    const itemEditedAfterMap =
+      latestMapTime !== null &&
+      acceptedLinkedItems.some((item) => {
+        const itemTime = timestampMillis(item.updatedAt);
+        return itemTime !== null && itemTime > latestMapTime;
+      });
+
+    let extractionState: SourceReflectionState;
+    if (!hasReadableChunks) {
+      extractionState = "not_ready";
+    } else if (!latestExtractTime || addedAfterExtraction) {
+      extractionState = "needs_extraction";
+    } else if (linkedItems.length === 0) {
+      extractionState = "no_cards";
+    } else {
+      extractionState = "extracted";
+    }
+
+    let mapState: SourceReflectionState;
+    if (extractionState === "not_ready") {
+      mapState = "not_ready";
+    } else if (extractionState === "needs_extraction") {
+      mapState = "needs_extraction";
+    } else if (acceptedLinkedItems.length === 0) {
+      mapState = "no_cards";
+    } else if (
+      workspace.nodes.length === 0 ||
+      !latestMapTime ||
+      addedAfterMap ||
+      itemEditedAfterMap ||
+      mappedItemCount < acceptedLinkedItems.length
+    ) {
+      mapState = "needs_map";
+    } else {
+      mapState = "mapped";
+    }
+
+    return {
+      source,
+      title: sourceDisplayTitle(source),
+      detail: sourceDisplayDetail(source),
+      extractedItemCount: linkedItems.length,
+      mappedItemCount,
+      extractionState,
+      mapState,
+    };
+  });
+
+  const pendingExtractionCount = rows.filter(
+    (row) => row.extractionState === "needs_extraction",
+  ).length;
+  const pendingMapCount = rows.filter((row) => row.mapState === "needs_map").length;
+
+  return {
+    rows,
+    sourceCount: rows.length,
+    pendingExtractionCount,
+    extractedSourceCount: rows.filter((row) => row.extractionState === "extracted")
+      .length,
+    noCardSourceCount: rows.filter((row) => row.extractionState === "no_cards").length,
+    pendingMapCount,
+    mappedSourceCount: rows.filter((row) => row.mapState === "mapped").length,
+    mapRefreshNeeded: pendingMapCount > 0 || shouldRegenerateMap(workspace),
+  };
+}
+
+function reflectionStateLabel(state: SourceReflectionState, phase: "extract" | "map") {
+  if (state === "needs_extraction") return "抽出未反映";
+  if (state === "extracted") return "抽出済み";
+  if (state === "no_cards")
+    return phase === "extract" ? "カードなし" : "マップ対象なし";
+  if (state === "needs_map") return "マップ未反映";
+  if (state === "mapped") return "マップ反映済み";
+  return "読み取り待ち";
+}
+
+function reflectionSummaryText(summary: WorkspaceReflectionSummary) {
+  if (summary.sourceCount === 0) {
+    return "情報ソースはまだありません。";
+  }
+  if (summary.pendingExtractionCount > 0) {
+    return `追加・更新された情報ソース ${summary.pendingExtractionCount}件が、まだ抽出カードに反映されていません。`;
+  }
+  if (summary.pendingMapCount > 0 || summary.mapRefreshNeeded) {
+    const countText =
+      summary.pendingMapCount > 0 ? ` ${summary.pendingMapCount}件分` : "";
+    return `抽出カードの内容${countText}が、まだマップに反映されていません。`;
+  }
+  return "登録済みの情報ソースは現在のマップに反映されています。";
+}
+
 function getPrimaryActionLabel(workspace: ProjectWorkspace) {
   if (workspace.sourceChunks.length === 0 && workspace.extractedItems.length === 0) {
     return "情報を追加";
@@ -216,6 +497,9 @@ function getPrimaryActionLabel(workspace: ProjectWorkspace) {
   }
   if (workspace.nodes.length === 0) {
     return "マップ生成";
+  }
+  if (shouldRegenerateMap(workspace)) {
+    return "マップ再生成";
   }
   if (workspace.suggestions.length === 0 && workspace.aiComments.length === 0) {
     return "施策と確認質問";
@@ -407,7 +691,7 @@ function App() {
     useState<SelectedMapElement>(null);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
-  const [isTrayOpen, setIsTrayOpen] = useState(true);
+  const [isTrayOpen, setIsTrayOpen] = useState(false);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isMapEditMode, setIsMapEditMode] = useState(false);
   const [layoutSaveStatus, setLayoutSaveStatus] = useState<
@@ -487,6 +771,10 @@ function App() {
     ? `保存済み ${formatTime(workspace.versions[0].createdAt)}`
     : "保存済み";
   const latestAiRun = workspace.aiRuns[0] ?? null;
+  const reflectionSummary = useMemo(
+    () => buildWorkspaceReflectionSummary(workspace),
+    [workspace],
+  );
   const currentLayoutScope = `${activeProjectId ?? "none"}:${mapViewMode}`;
   const visibleLayoutSaveStatus =
     layoutSaveScope === currentLayoutScope ? layoutSaveStatus : "idle";
@@ -497,6 +785,53 @@ function App() {
     const timeoutId = window.setTimeout(() => setNotice(null), 3200);
     return () => window.clearTimeout(timeoutId);
   }, [notice]);
+
+  useEffect(() => {
+    if (!isTauriRuntime) return;
+    let disposed = false;
+    let cleanup: (() => void) | null = null;
+
+    void listen<CodexUiEvent>(CODEX_EVENT_NAME, (event) => {
+      const payload = event.payload;
+      if (payload.kind !== "device-code") return;
+
+      setDeviceCodeResult((current) => {
+        const base = current ?? emptyDeviceCodeResult();
+        const warnings =
+          payload.detail && payload.cancelStatus
+            ? [...base.warnings, payload.detail]
+            : base.warnings;
+
+        return {
+          ...base,
+          ok: payload.completionSuccess === true ? true : base.ok,
+          verificationUrl: payload.verificationUrl ?? base.verificationUrl,
+          userCode: payload.userCode ?? base.userCode,
+          completionSuccess: payload.completionSuccess ?? base.completionSuccess,
+          cancelStatus: payload.cancelStatus ?? base.cancelStatus,
+          events: [...base.events, payload],
+          warnings,
+        };
+      });
+
+      if (payload.completionSuccess === true) {
+        setNotice("ChatGPT認証が完了しました。接続テストでCodex生成を確認できます。");
+      } else if (payload.cancelStatus) {
+        setNotice("認証待機を終了しました。必要なら認証コードを再取得してください。");
+      }
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        cleanup = unlisten;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      cleanup?.();
+    };
+  }, [isTauriRuntime]);
 
   useEffect(() => {
     void handleRefreshCodexRuntime();
@@ -632,7 +967,7 @@ function App() {
       );
       return;
     }
-    if (workspace.nodes.length === 0) {
+    if (workspace.nodes.length === 0 || shouldRegenerateMap(workspace)) {
       await runAction(
         () =>
           invoke<MvpRunResult>("generate_map_from_items", {
@@ -641,6 +976,9 @@ function App() {
         (result) => {
           setWorkspace(result.workspace);
           setNotice(result.message);
+          setSelectedMapElement(null);
+          setSelectedSuggestionId(null);
+          setIsDrawerOpen(false);
           setView("map");
         },
       );
@@ -679,6 +1017,24 @@ function App() {
         setSelectedMapElement(null);
         setSelectedSuggestionId(null);
         setIsDrawerOpen(false);
+      },
+    );
+  }
+
+  async function handleRegenerateMap() {
+    if (!activeProjectId) return;
+    await runAction(
+      () =>
+        invoke<MvpRunResult>("generate_map_from_items", {
+          projectId: activeProjectId,
+        }),
+      (result) => {
+        setWorkspace(result.workspace);
+        setNotice(result.message);
+        setSelectedMapElement(null);
+        setSelectedSuggestionId(null);
+        setIsDrawerOpen(false);
+        setView("map");
       },
     );
   }
@@ -790,6 +1146,19 @@ function App() {
     }
   }
 
+  async function handleOpenExternalUrl(url: string) {
+    if (!url) return;
+    if (!isTauriRuntime) {
+      window.open(url, "_blank", "noopener,noreferrer");
+      return;
+    }
+    try {
+      await invoke("open_external_url", { url });
+    } catch (caughtError) {
+      setError(String(caughtError));
+    }
+  }
+
   async function handleCreateOnboardingMap(draft: OnboardingDraft) {
     const purposeLabel = mapPurposeLabel(draft.purposeId);
     if (!draft.companyName.trim() || !purposeLabel) {
@@ -835,8 +1204,8 @@ function App() {
           purposeLabel,
           industry: draft.industry.trim(),
           memo: draft.memo.trim(),
-          websiteUrl: draft.websiteUrl.trim(),
-          snsUrl: draft.snsUrl.trim(),
+          websiteUrls: compactStringList(draft.websiteUrls),
+          snsUrls: compactStringList(draft.snsUrls),
           productInfo: draft.productInfo.trim(),
         },
       );
@@ -1268,13 +1637,16 @@ function App() {
               onCreateOnboardingMap={handleCreateOnboardingMap}
               onDrawerOpenChange={setIsDrawerOpen}
               onEditModeChange={setIsMapEditMode}
+              onGenerateMap={handleRegenerateMap}
               onGenerateSuggestions={handleGenerateSuggestions}
               onOpenExtractReview={() => {
                 setSelectedItemId(workspace.extractedItems[0]?.id ?? null);
                 setIsDrawerOpen(false);
                 setView("extract");
               }}
+              reflectionSummary={reflectionSummary}
               onPickFiles={handlePickOnboardingFiles}
+              onOpenExternalUrl={handleOpenExternalUrl}
               onRefreshCodexRuntime={handleRefreshCodexRuntime}
               onRunCodexLoginCheck={handleRunCodexLoginCheck}
               onRunCodexSmokeTest={handleRunCodexSmokeTest}
@@ -1326,9 +1698,15 @@ function App() {
             <SourcesView
               canPickFiles={Boolean(activeProjectId && isTauriRuntime)}
               canSaveTextSource={Boolean(activeProjectId && isTauriRuntime)}
+              generationBusy={isBusy}
+              onGenerateMap={handleRegenerateMap}
               onCreateInformationSource={handleCreateInformationSource}
+              onOpenExtractReview={() => {
+                setSelectedItemId(workspace.extractedItems[0]?.id ?? null);
+                setView("extract");
+              }}
               onPickFiles={handlePickSourceFiles}
-              workspace={workspace}
+              reflectionSummary={reflectionSummary}
             />
           ) : null}
           {view === "extract" && activeProject ? (
@@ -1385,6 +1763,7 @@ function App() {
               codexRuntimeInfo={codexRuntimeInfo}
               codexSmokeResult={codexSmokeResult}
               deviceCodeResult={deviceCodeResult}
+              onOpenExternalUrl={handleOpenExternalUrl}
               onRefreshCodexRuntime={handleRefreshCodexRuntime}
               onRunCodexLoginCheck={handleRunCodexLoginCheck}
               onRunCodexSmokeTest={handleRunCodexSmokeTest}
@@ -1755,12 +2134,15 @@ function MapWorkspace({
   onDrawerOpenChange,
   onEditModeChange,
   onGenerateSuggestions,
+  onGenerateMap,
   onOpenExtractReview,
+  onOpenExternalUrl,
   onPickFiles,
   onRefreshCodexRuntime,
   onRunCodexLoginCheck,
   onRunCodexSmokeTest,
   onMapViewModeChange,
+  reflectionSummary,
   onSavePositions,
   onSelectItem,
   onSelectMapElement,
@@ -1791,12 +2173,15 @@ function MapWorkspace({
   onDrawerOpenChange: (open: boolean) => void;
   onEditModeChange: (enabled: boolean) => void;
   onGenerateSuggestions: () => void;
+  onGenerateMap: () => void;
   onOpenExtractReview: () => void;
+  onOpenExternalUrl: (url: string) => void;
   onPickFiles: (draft: OnboardingDraft) => void;
   onRefreshCodexRuntime: () => void;
   onRunCodexLoginCheck: () => void;
   onRunCodexSmokeTest: () => void;
   onMapViewModeChange: (mode: MapViewMode) => void;
+  reflectionSummary: WorkspaceReflectionSummary;
   onSavePositions: (viewMode: MapViewMode, positions: MapNodeLayout[]) => void;
   onSelectItem: (itemId: string) => void;
   onSelectMapElement: (selection: SelectedMapElement) => void;
@@ -1813,8 +2198,15 @@ function MapWorkspace({
     [impactStats, workspace],
   );
   const hasGeneratedMap = workspace.nodes.length > 0;
+  const canGenerateFromItems = !hasGeneratedMap && workspace.extractedItems.length > 0;
   const shouldReviewDraft =
     hasOnboardingBrief(workspace) && hasUnconfirmedGeneratedItems(workspace);
+  const mapRegenerationLabel =
+    reflectionSummary.pendingExtractionCount > 0
+      ? "追加ソースあり"
+      : reflectionSummary.mapRefreshNeeded
+        ? "未反映を再生成"
+        : "再生成";
   const handleCanvasPositionsChange = useCallback(
     (positions: MapNodeLayout[]) => onSavePositions(mapViewMode, positions),
     [mapViewMode, onSavePositions],
@@ -1867,6 +2259,15 @@ function MapWorkspace({
               整える
             </button>
             <button
+              disabled={generationBusy}
+              onClick={onGenerateMap}
+              title="抽出カードからマップを再生成"
+              type="button"
+            >
+              <Sparkles size={14} aria-hidden="true" />
+              {mapRegenerationLabel}
+            </button>
+            <button
               disabled={mapInsightBusy}
               onClick={() => onAskWholeMap("explain")}
               title="マップ全体をCodexに聞く"
@@ -1907,12 +2308,22 @@ function MapWorkspace({
         <button
           className={`tray-tab ${trayOpen ? "tray-tab-open" : ""}`}
           aria-expanded={trayOpen}
-          aria-label={trayOpen ? "抽出カードを閉じる" : "抽出カードを開く"}
+          aria-label={trayOpen ? "マップ材料を閉じる" : "マップ材料を開く"}
           onClick={() => onTrayOpenChange(!trayOpen)}
           type="button"
         >
-          抽出カード {workspace.extractedItems.length}
+          材料候補 {workspace.extractedItems.length}
         </button>
+      ) : null}
+
+      {hasGeneratedMap && reflectionSummary.sourceCount > 0 ? (
+        <MapReflectionBanner
+          generationBusy={generationBusy}
+          onGenerateMap={onGenerateMap}
+          onOpenExtractReview={onOpenExtractReview}
+          summary={reflectionSummary}
+          trayOpen={trayOpen && mapViewMode === "customer_journey"}
+        />
       ) : null}
       {hasGeneratedMap && mapViewMode === "customer_journey" ? (
         <aside
@@ -1922,8 +2333,18 @@ function MapWorkspace({
           aria-hidden={!trayOpen}
         >
           <div className="panel-heading">
-            <span>抽出カード</span>
-            <small>{workspace.extractedItems.length}件</small>
+            <div>
+              <span>マップ材料</span>
+              <small>AIが情報ソースから見つけた候補</small>
+            </div>
+            <button
+              aria-label="マップ材料を閉じる"
+              className="panel-close-button"
+              onClick={() => onTrayOpenChange(false)}
+              type="button"
+            >
+              <X size={15} aria-hidden="true" />
+            </button>
           </div>
           <div className="tray-list">
             {workspace.extractedItems.map((item) => (
@@ -1989,6 +2410,14 @@ function MapWorkspace({
             selected={selectedMapElement}
             viewMode={mapViewMode}
           />
+        ) : canGenerateFromItems ? (
+          <MapRebuildPanel
+            activeProject={activeProject}
+            generationBusy={generationBusy}
+            onGenerateMap={onGenerateMap}
+            onOpenExtractReview={onOpenExtractReview}
+            workspace={workspace}
+          />
         ) : (
           <MapCreationFlow
             activeProject={activeProject}
@@ -2000,6 +2429,7 @@ function MapWorkspace({
             generationBusy={generationBusy}
             key={activeProject?.id ?? "new-map"}
             onCreateMap={onCreateOnboardingMap}
+            onOpenExternalUrl={onOpenExternalUrl}
             onPickFiles={onPickFiles}
             onRefreshCodexRuntime={onRefreshCodexRuntime}
             onRunCodexLoginCheck={onRunCodexLoginCheck}
@@ -2090,6 +2520,110 @@ function MapWorkspace({
   );
 }
 
+function MapReflectionBanner({
+  generationBusy,
+  onGenerateMap,
+  onOpenExtractReview,
+  summary,
+  trayOpen,
+}: {
+  generationBusy: boolean;
+  onGenerateMap: () => void;
+  onOpenExtractReview: () => void;
+  summary: WorkspaceReflectionSummary;
+  trayOpen: boolean;
+}) {
+  const needsExtraction = summary.pendingExtractionCount > 0;
+  const needsMapRefresh = summary.pendingMapCount > 0 || summary.mapRefreshNeeded;
+  const className = `map-reflection-banner ${
+    trayOpen ? "map-reflection-banner-shifted" : ""
+  }`;
+
+  if (!needsExtraction && !needsMapRefresh) {
+    return (
+      <div className={`${className} map-reflection-banner-ok`}>
+        <Info size={15} aria-hidden="true" />
+        <span>{reflectionSummaryText(summary)}</span>
+        <StatusChip>
+          {summary.mappedSourceCount}/{summary.sourceCount}反映済み
+        </StatusChip>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`${className} map-reflection-banner-warning`}>
+      <TriangleAlert size={15} aria-hidden="true" />
+      <span>{reflectionSummaryText(summary)}</span>
+      {needsExtraction ? (
+        <button className="ghost-button" onClick={onOpenExtractReview} type="button">
+          <ListChecks size={15} aria-hidden="true" />
+          抽出カードを更新
+        </button>
+      ) : (
+        <button
+          className="primary-button"
+          disabled={generationBusy}
+          onClick={onGenerateMap}
+          type="button"
+        >
+          <Sparkles size={15} aria-hidden="true" />
+          {generationBusy ? "再生成中" : "追加内容で再生成"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function MapRebuildPanel({
+  activeProject,
+  generationBusy,
+  onGenerateMap,
+  onOpenExtractReview,
+  workspace,
+}: {
+  activeProject: Project | null;
+  generationBusy: boolean;
+  onGenerateMap: () => void;
+  onOpenExtractReview: () => void;
+  workspace: ProjectWorkspace;
+}) {
+  return (
+    <div className="map-rebuild-panel">
+      <section className="map-rebuild-card">
+        <div className="section-title">
+          <MapIcon size={16} aria-hidden="true" />
+          <span>マップ未生成</span>
+        </div>
+        <h1>{activeProject?.name ?? "この案件"} のマップを生成できます</h1>
+        <p>
+          抽出カードは保存済みですが、表示するマップがまだありません。カード内容から顧客導線マップを生成してください。
+        </p>
+        <div className="map-rebuild-stats">
+          <StatusChip>{workspace.extractedItems.length}カード</StatusChip>
+          <StatusChip>{workspace.sourceFiles.length}情報ソース</StatusChip>
+          <StatusChip>{aiRunSourceLabel(workspace.aiRuns[0] ?? null)}</StatusChip>
+        </div>
+        <div className="map-rebuild-actions">
+          <button
+            className="primary-button"
+            disabled={generationBusy}
+            onClick={onGenerateMap}
+            type="button"
+          >
+            <Sparkles size={15} aria-hidden="true" />
+            {generationBusy ? "生成中" : "抽出カードからマップを生成"}
+          </button>
+          <button className="ghost-button" onClick={onOpenExtractReview} type="button">
+            <ListChecks size={15} aria-hidden="true" />
+            抽出カードを確認
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function MapCreationFlow({
   activeProject,
   canPickFiles,
@@ -2099,6 +2633,7 @@ function MapCreationFlow({
   deviceCodeResult,
   generationBusy,
   onCreateMap,
+  onOpenExternalUrl,
   onPickFiles,
   onRefreshCodexRuntime,
   onRunCodexLoginCheck,
@@ -2113,6 +2648,7 @@ function MapCreationFlow({
   deviceCodeResult: DeviceCodeLoginResult | null;
   generationBusy: boolean;
   onCreateMap: (draft: OnboardingDraft) => void;
+  onOpenExternalUrl: (url: string) => void;
   onPickFiles: (draft: OnboardingDraft) => void;
   onRefreshCodexRuntime: () => void;
   onRunCodexLoginCheck: () => void;
@@ -2124,20 +2660,20 @@ function MapCreationFlow({
     purposeId: "",
     industry: activeProject?.industry ?? "",
     memo: activeProject?.memo ?? "",
-    websiteUrl: "",
-    snsUrl: "",
+    websiteUrls: [""],
+    snsUrls: [""],
     productInfo: "",
   });
   const [sendApproved, setSendApproved] = useState(false);
 
   const purposeLabel = mapPurposeLabel(draft.purposeId);
   const sourceCount = workspace.sourceFiles.length;
-  const additionalInputs = [
-    draft.memo,
-    draft.websiteUrl,
-    draft.snsUrl,
-    draft.productInfo,
-  ].filter((value) => value.trim().length > 0).length;
+  const websiteUrls = compactStringList(draft.websiteUrls);
+  const snsUrls = compactStringList(draft.snsUrls);
+  const additionalInputs =
+    [draft.memo, draft.productInfo].filter((value) => value.trim().length > 0).length +
+    websiteUrls.length +
+    snsUrls.length;
   const informationScore = sourceCount + additionalInputs;
   const informationLevel =
     informationScore >= 4 ? "高" : informationScore >= 2 ? "中" : "低";
@@ -2150,8 +2686,8 @@ function MapCreationFlow({
     }`,
     draft.industry.trim() ? `業種: ${draft.industry.trim()}` : "",
     draft.memo.trim() ? `メモ: ${shortText(draft.memo)}` : "",
-    draft.websiteUrl.trim() ? `ホームページURL: ${draft.websiteUrl.trim()}` : "",
-    draft.snsUrl.trim() ? `SNS URL: ${draft.snsUrl.trim()}` : "",
+    ...websiteUrls.map((url) => `ホームページURL: ${url}`),
+    ...snsUrls.map((url) => `SNS URL: ${url}`),
     draft.productInfo.trim() ? `商品情報: ${shortText(draft.productInfo)}` : "",
     ...workspace.sourceFiles
       .slice(0, 6)
@@ -2166,6 +2702,11 @@ function MapCreationFlow({
     value: OnboardingDraft[K],
   ) {
     setDraft((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateUrlList(key: "websiteUrls" | "snsUrls", values: string[]) {
+    setDraft((current) => ({ ...current, [key]: values }));
+    setSendApproved(false);
   }
 
   return (
@@ -2247,20 +2788,20 @@ function MapCreationFlow({
               <span>マップの材料</span>
             </div>
             <div className="source-input-grid">
-              <Field label="ホームページURL">
-                <input
-                  onChange={(event) => updateDraft("websiteUrl", event.target.value)}
-                  placeholder="https://example.com"
-                  value={draft.websiteUrl}
-                />
-              </Field>
-              <Field label="SNSアカウントURL">
-                <input
-                  onChange={(event) => updateDraft("snsUrl", event.target.value)}
-                  placeholder="Instagram、X、YouTubeなど"
-                  value={draft.snsUrl}
-                />
-              </Field>
+              <UrlListField
+                addLabel="ホームページURLを追加"
+                label="ホームページURL"
+                onChange={(values) => updateUrlList("websiteUrls", values)}
+                placeholder="https://example.com"
+                values={draft.websiteUrls}
+              />
+              <UrlListField
+                addLabel="SNS URLを追加"
+                label="SNSアカウントURL"
+                onChange={(values) => updateUrlList("snsUrls", values)}
+                placeholder="Instagram、X、YouTubeなど"
+                values={draft.snsUrls}
+              />
             </div>
             <Field label="商品 / サービス情報">
               <textarea
@@ -2292,6 +2833,7 @@ function MapCreationFlow({
           smokeResult={codexSmokeResult}
           deviceCodeResult={deviceCodeResult}
           onLoginCheck={onRunCodexLoginCheck}
+          onOpenExternalUrl={onOpenExternalUrl}
           onRefresh={onRefreshCodexRuntime}
           onSmokeTest={onRunCodexSmokeTest}
         />
@@ -2365,10 +2907,80 @@ function MapCreationFlow({
   );
 }
 
+function UrlListField({
+  addLabel,
+  label,
+  onChange,
+  placeholder,
+  values,
+}: {
+  addLabel: string;
+  label: string;
+  onChange: (values: string[]) => void;
+  placeholder: string;
+  values: string[];
+}) {
+  const visibleValues = values.length > 0 ? values : [""];
+
+  function updateValue(index: number, value: string) {
+    onChange(
+      visibleValues.map((current, currentIndex) =>
+        currentIndex === index ? value : current,
+      ),
+    );
+  }
+
+  function addValue() {
+    onChange([...visibleValues, ""]);
+  }
+
+  function removeValue(index: number) {
+    const nextValues = visibleValues.filter(
+      (_, currentIndex) => currentIndex !== index,
+    );
+    onChange(nextValues.length > 0 ? nextValues : [""]);
+  }
+
+  return (
+    <div className="url-list-field">
+      <div className="url-list-header">
+        <span>{label}</span>
+      </div>
+      <div className="url-list-rows">
+        {visibleValues.map((value, index) => (
+          <div className="url-list-row" key={`${label}-${index}`}>
+            <input
+              aria-label={`${label} ${index + 1}`}
+              onChange={(event) => updateValue(index, event.target.value)}
+              placeholder={placeholder}
+              value={value}
+            />
+            <button
+              aria-label={`${label} ${index + 1}を削除`}
+              className="url-remove-button"
+              disabled={visibleValues.length === 1 && !value.trim()}
+              onClick={() => removeValue(index)}
+              title="削除"
+              type="button"
+            >
+              <Trash2 size={14} aria-hidden="true" />
+            </button>
+          </div>
+        ))}
+      </div>
+      <button className="inline-add-button" onClick={addValue} type="button">
+        <Plus size={14} aria-hidden="true" />
+        {addLabel}
+      </button>
+    </div>
+  );
+}
+
 function CodexConnectionCard({
   busy,
   deviceCodeResult,
   onLoginCheck,
+  onOpenExternalUrl,
   onRefresh,
   onSmokeTest,
   runtimeInfo,
@@ -2377,6 +2989,7 @@ function CodexConnectionCard({
   busy: CodexConnectionAction | null;
   deviceCodeResult: DeviceCodeLoginResult | null;
   onLoginCheck: () => void;
+  onOpenExternalUrl: (url: string) => void;
   onRefresh: () => void;
   onSmokeTest: () => void;
   runtimeInfo: CodexRuntimeInfo | null;
@@ -2384,6 +2997,11 @@ function CodexConnectionCard({
 }) {
   const cliDetected = Boolean(runtimeInfo?.resolvedPath);
   const deviceCodeCompleted = deviceCodeResult?.completionSuccess === true;
+  const loginCodeIssued = Boolean(
+    deviceCodeResult?.verificationUrl &&
+    !deviceCodeCompleted &&
+    !deviceCodeResult?.cancelStatus,
+  );
   const authenticated = (smokeResult?.authenticated ?? false) || deviceCodeCompleted;
   const hasSmokeResult = Boolean(smokeResult);
   const hasAuthSignal = hasSmokeResult || deviceCodeResult !== null;
@@ -2391,9 +3009,11 @@ function CodexConnectionCard({
     ? deviceCodeCompleted && !smokeResult?.authenticated
       ? "認証完了"
       : "接続済み"
-    : hasAuthSignal
-      ? "未接続"
-      : "未確認";
+    : loginCodeIssued
+      ? "認証待ち"
+      : hasAuthSignal
+        ? "未接続"
+        : "未確認";
   const authTone = authenticated ? "good" : hasAuthSignal ? "warn" : "neutral";
 
   return (
@@ -2423,10 +3043,14 @@ function CodexConnectionCard({
       {deviceCodeResult?.verificationUrl ? (
         <div className="device-code-box">
           <span>認証URL</span>
-          <a href={deviceCodeResult.verificationUrl} rel="noreferrer" target="_blank">
+          <button
+            className="inline-link-button"
+            onClick={() => onOpenExternalUrl(deviceCodeResult.verificationUrl ?? "")}
+            type="button"
+          >
             {deviceCodeResult.verificationUrl}
             <ExternalLink size={12} aria-hidden="true" />
-          </a>
+          </button>
           <strong>{deviceCodeResult.userCode ?? ""}</strong>
         </div>
       ) : null}
@@ -2438,9 +3062,11 @@ function CodexConnectionCard({
           <span>
             {deviceCodeCompleted
               ? "ChatGPT認証が完了しました。接続テストでCodex生成を確認できます。"
-              : (deviceCodeResult.errors[0] ??
-                deviceCodeResult.warnings[0] ??
-                "ChatGPT認証は未完了です。URLとコードを確認してください。")}
+              : loginCodeIssued
+                ? "認証URLを開き、表示されたコードを入力してください。完了後は接続テストで確認できます。"
+                : (deviceCodeResult.errors[0] ??
+                  deviceCodeResult.warnings[0] ??
+                  "ChatGPT認証は未完了です。URLとコードを確認してください。")}
           </span>
         </div>
       ) : null}
@@ -2470,7 +3096,7 @@ function CodexConnectionCard({
           type="button"
         >
           <ExternalLink size={14} aria-hidden="true" />
-          {busy === "login" ? "取得中" : "ChatGPT接続"}
+          {busy === "login" ? "取得中" : "認証コード取得"}
         </button>
       </div>
     </section>
@@ -2889,6 +3515,7 @@ function SettingsView({
   onRefreshCodexRuntime,
   onRunCodexLoginCheck,
   onRunCodexSmokeTest,
+  onOpenExternalUrl,
 }: {
   codexBusy: CodexConnectionAction | null;
   codexRuntimeInfo: CodexRuntimeInfo | null;
@@ -2897,6 +3524,7 @@ function SettingsView({
   onRefreshCodexRuntime: () => void;
   onRunCodexLoginCheck: () => void;
   onRunCodexSmokeTest: () => void;
+  onOpenExternalUrl: (url: string) => void;
 }) {
   return (
     <section className="page-panel settings-panel">
@@ -2913,6 +3541,7 @@ function SettingsView({
           smokeResult={codexSmokeResult}
           deviceCodeResult={deviceCodeResult}
           onLoginCheck={onRunCodexLoginCheck}
+          onOpenExternalUrl={onOpenExternalUrl}
           onRefresh={onRefreshCodexRuntime}
           onSmokeTest={onRunCodexSmokeTest}
         />
@@ -2942,15 +3571,21 @@ function SettingsView({
 function SourcesView({
   canPickFiles,
   canSaveTextSource,
+  generationBusy,
+  onGenerateMap,
   onCreateInformationSource,
+  onOpenExtractReview,
   onPickFiles,
-  workspace,
+  reflectionSummary,
 }: {
   canPickFiles: boolean;
   canSaveTextSource: boolean;
+  generationBusy: boolean;
+  onGenerateMap: () => void;
   onCreateInformationSource: (draft: InformationSourceDraft) => void;
+  onOpenExtractReview: () => void;
   onPickFiles: () => void;
-  workspace: ProjectWorkspace;
+  reflectionSummary: WorkspaceReflectionSummary;
 }) {
   const [draft, setDraft] = useState<InformationSourceDraft>({
     sourceKind: "manual_note",
@@ -2993,24 +3628,19 @@ function SourcesView({
           <p>ファイル、メモ、URL、SNS、商品情報をマップの材料として追加します。</p>
         </div>
       </div>
-      <div className="source-type-strip">
-        {[
-          [FileText, "ファイル"],
-          [MessageSquareText, "自由メモ"],
-          [Globe2, "ホームページURL"],
-          [LinkIcon, "SNS URL"],
-          [Archive, "商品情報"],
-        ].map(([Icon, label]) => {
-          const SourceIcon = Icon as typeof FileText;
-          return (
-            <div className="source-type-chip" key={String(label)}>
-              <SourceIcon size={14} aria-hidden="true" />
-              <span>{String(label)}</span>
-            </div>
-          );
-        })}
-      </div>
+      <SourceReflectionOverview
+        generationBusy={generationBusy}
+        onGenerateMap={onGenerateMap}
+        onOpenExtractReview={onOpenExtractReview}
+        summary={reflectionSummary}
+      />
       <form className="source-add-panel" onSubmit={submitInformationSource}>
+        <div className="source-add-heading">
+          <strong>情報ソースを追加</strong>
+          <span>
+            URLやSNSは本文を自動取得せず、入力したURLと補足メモを材料として扱います。
+          </span>
+        </div>
         <div className="source-kind-tabs" role="tablist" aria-label="情報ソース種別">
           {informationSourceOptions.map((option) => {
             const SourceIcon = option.icon;
@@ -3080,18 +3710,124 @@ function SourcesView({
         <strong>ここにファイルをドロップ / クリックして選択</strong>
         <span>PDF / CSV / Excel / Markdown / Textを追加できます。</span>
       </button>
+      <SourceReflectionList summary={reflectionSummary} />
+    </section>
+  );
+}
+
+function SourceReflectionOverview({
+  generationBusy,
+  onGenerateMap,
+  onOpenExtractReview,
+  summary,
+}: {
+  generationBusy: boolean;
+  onGenerateMap: () => void;
+  onOpenExtractReview: () => void;
+  summary: WorkspaceReflectionSummary;
+}) {
+  const needsExtraction = summary.pendingExtractionCount > 0;
+  const needsMapRefresh = summary.pendingMapCount > 0 || summary.mapRefreshNeeded;
+
+  return (
+    <section
+      className={`source-overview ${
+        needsExtraction || needsMapRefresh ? "source-overview-warning" : ""
+      }`}
+    >
+      <div>
+        <span className="section-kicker">反映状況</span>
+        <strong>{reflectionSummaryText(summary)}</strong>
+      </div>
+      <div className="source-overview-stats">
+        <StatusChip>{summary.sourceCount}ソース</StatusChip>
+        <StatusChip>{summary.extractedSourceCount}抽出済み</StatusChip>
+        <StatusChip>{summary.mappedSourceCount}マップ反映済み</StatusChip>
+      </div>
+      <div className="source-overview-actions">
+        {needsExtraction ? (
+          <button
+            className="primary-button"
+            onClick={onOpenExtractReview}
+            type="button"
+          >
+            <ListChecks size={15} aria-hidden="true" />
+            抽出カードを更新
+          </button>
+        ) : needsMapRefresh ? (
+          <button
+            className="primary-button"
+            disabled={generationBusy}
+            onClick={onGenerateMap}
+            type="button"
+          >
+            <Sparkles size={15} aria-hidden="true" />
+            {generationBusy ? "再生成中" : "追加内容でマップ再生成"}
+          </button>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function SourceReflectionList({ summary }: { summary: WorkspaceReflectionSummary }) {
+  if (summary.rows.length === 0) {
+    return (
+      <div className="source-empty-state">
+        <Database size={18} aria-hidden="true" />
+        <strong>まだ情報ソースがありません</strong>
+        <span>ファイル、メモ、URL、SNS、商品情報を追加するとここに表示されます。</span>
+      </div>
+    );
+  }
+
+  return (
+    <section className="source-inventory">
+      <div className="source-inventory-header">
+        <strong>登録済みソース</strong>
+        <span>抽出カードとマップへの反映状態</span>
+      </div>
       <div className="source-grid">
-        {workspace.sourceFiles.map((source) => (
-          <div className="source-row" key={source.id}>
-            <FileText size={15} aria-hidden="true" />
-            <strong>{source.fileName}</strong>
-            <span>{sourceTypeLabel(source.fileType)}</span>
-            <span>{source.status}</span>
-            <span>{source.chunkCount} chunks</span>
-          </div>
+        {summary.rows.map((row) => (
+          <SourceReflectionCard key={row.source.id} row={row} />
         ))}
       </div>
     </section>
+  );
+}
+
+function SourceReflectionCard({ row }: { row: SourceReflectionRow }) {
+  const SourceIcon =
+    informationSourceOptions.find((option) => option.id === row.source.fileType)
+      ?.icon ?? FileText;
+
+  return (
+    <article className={`source-row source-row-${row.mapState}`}>
+      <SourceIcon size={16} aria-hidden="true" />
+      <div className="source-row-main">
+        <div className="source-row-title">
+          <strong>{row.title}</strong>
+          <span>{sourceTypeLabel(row.source.fileType)}</span>
+        </div>
+        {row.detail ? <small>{row.detail}</small> : null}
+        <small>
+          追加 {formatTime(row.source.createdAt)} / 読み取り {row.source.chunkCount}
+          chunks
+        </small>
+      </div>
+      <div className="source-row-progress">
+        <span className={`reflection-pill reflection-pill-${row.extractionState}`}>
+          {reflectionStateLabel(row.extractionState, "extract")}
+        </span>
+        <span className={`reflection-pill reflection-pill-${row.mapState}`}>
+          {reflectionStateLabel(row.mapState, "map")}
+        </span>
+      </div>
+      <div className="source-row-counts">
+        <span>{row.extractedItemCount}カード</span>
+        <span>{row.mappedItemCount}ノード</span>
+      </div>
+    </article>
   );
 }
 

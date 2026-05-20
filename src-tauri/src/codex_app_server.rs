@@ -22,6 +22,8 @@ pub struct CodexUiEvent {
     pub detail: Option<String>,
     pub verification_url: Option<String>,
     pub user_code: Option<String>,
+    pub completion_success: Option<bool>,
+    pub cancel_status: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -602,13 +604,13 @@ fn run_smoke_sequence(
 pub fn run_device_code_login_check(app: AppHandle) -> DeviceCodeLoginResult {
     let mut events = Vec::new();
     let mut errors = Vec::new();
-    let mut warnings = Vec::new();
+    let warnings = Vec::new();
     let mut assistant_text = String::new();
     let mut login_id = None;
     let mut verification_url = None;
     let mut user_code = None;
-    let mut completion_success = None;
-    let mut cancel_status = None;
+    let completion_success = None;
+    let cancel_status = None;
 
     let mut process = match CodexProcess::spawn() {
         Ok(process) => process,
@@ -668,49 +670,6 @@ pub fn run_device_code_login_check(app: AppHandle) -> DeviceCodeLoginResult {
             user_code.clone(),
         );
 
-        match process.wait_for_notification(
-            "account/login/completed",
-            LOGIN_TIMEOUT,
-            &app,
-            &mut events,
-            &mut assistant_text,
-        ) {
-            Ok(notification) => {
-                completion_success = notification.get("success").and_then(Value::as_bool);
-            }
-            Err(error) => {
-                if error.starts_with("Timed out waiting for account/login/completed.") {
-                    warnings.push(
-                        "認証完了通知は未受信。検証用にログイン待機をキャンセルします。"
-                            .to_string(),
-                    );
-                } else {
-                    errors.push(error);
-                }
-                if let Some(login_id) = login_id.as_deref() {
-                    let cancel = process.request(
-                        "account/login/cancel",
-                        json!({ "loginId": login_id }),
-                        REQUEST_TIMEOUT,
-                        &app,
-                        &mut events,
-                        &mut assistant_text,
-                    )?;
-                    cancel_status = cancel
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .map(ToString::to_string);
-                    push_event(
-                        &app,
-                        &mut events,
-                        "device-code",
-                        "ログイン待機をキャンセル",
-                        cancel_status.clone(),
-                    );
-                }
-            }
-        }
-
         Ok(())
     })();
 
@@ -722,8 +681,20 @@ pub fn run_device_code_login_check(app: AppHandle) -> DeviceCodeLoginResult {
     let ok = login_id.is_some()
         && verification_url.is_some()
         && user_code.is_some()
-        && errors.is_empty()
-        && (completion_success == Some(true) || cancel_status.as_deref() == Some("canceled"));
+        && errors.is_empty();
+
+    if ok {
+        let mut background_process = process;
+        let app_for_background = app.clone();
+        let login_id_for_background = login_id.clone();
+        thread::spawn(move || {
+            wait_for_device_code_completion(
+                &mut background_process,
+                app_for_background,
+                login_id_for_background,
+            );
+        });
+    }
 
     DeviceCodeLoginResult {
         ok,
@@ -736,6 +707,82 @@ pub fn run_device_code_login_check(app: AppHandle) -> DeviceCodeLoginResult {
         stderr,
         errors,
         warnings,
+    }
+}
+
+fn wait_for_device_code_completion(
+    process: &mut CodexProcess,
+    app: AppHandle,
+    login_id: Option<String>,
+) {
+    let mut events = Vec::new();
+    let mut assistant_text = String::new();
+    match process.wait_for_notification(
+        "account/login/completed",
+        LOGIN_TIMEOUT,
+        &app,
+        &mut events,
+        &mut assistant_text,
+    ) {
+        Ok(notification) => {
+            let completion_success = notification.get("success").and_then(Value::as_bool);
+            push_device_code_status_event(
+                &app,
+                "ChatGPT認証が完了",
+                completion_success,
+                None,
+                None,
+            );
+        }
+        Err(error) => {
+            if !error.starts_with("Timed out waiting for account/login/completed.") {
+                push_event(
+                    &app,
+                    &mut events,
+                    "device-code",
+                    "ChatGPT認証待機でエラー",
+                    Some(error),
+                );
+                return;
+            }
+
+            if let Some(login_id) = login_id.as_deref() {
+                match process.request(
+                    "account/login/cancel",
+                    json!({ "loginId": login_id }),
+                    REQUEST_TIMEOUT,
+                    &app,
+                    &mut events,
+                    &mut assistant_text,
+                ) {
+                    Ok(cancel) => {
+                        let cancel_status = cancel
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .map(ToString::to_string);
+                        push_device_code_status_event(
+                            &app,
+                            "ログイン待機をキャンセル",
+                            None,
+                            cancel_status,
+                            Some(
+                                "認証完了通知は未受信。必要なら認証コードを再取得してください。"
+                                    .to_string(),
+                            ),
+                        );
+                    }
+                    Err(cancel_error) => {
+                        push_event(
+                            &app,
+                            &mut events,
+                            "device-code",
+                            "ログイン待機キャンセルに失敗",
+                            Some(cancel_error),
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -865,6 +912,8 @@ fn push_event(
         detail,
         verification_url: None,
         user_code: None,
+        completion_success: None,
+        cancel_status: None,
     };
 
     let _ = app.emit(EVENT_NAME, &event);
@@ -885,10 +934,32 @@ fn push_device_code_event(
         detail,
         verification_url,
         user_code,
+        completion_success: None,
+        cancel_status: None,
     };
 
     let _ = app.emit(EVENT_NAME, &event);
     events.push(event);
+}
+
+fn push_device_code_status_event(
+    app: &AppHandle,
+    label: &str,
+    completion_success: Option<bool>,
+    cancel_status: Option<String>,
+    detail: Option<String>,
+) {
+    let event = CodexUiEvent {
+        kind: "device-code".to_string(),
+        label: label.to_string(),
+        detail,
+        verification_url: None,
+        user_code: None,
+        completion_success,
+        cancel_status,
+    };
+
+    let _ = app.emit(EVENT_NAME, &event);
 }
 
 fn command_stdout<const N: usize>(program: &str, args: [&str; N]) -> Option<String> {

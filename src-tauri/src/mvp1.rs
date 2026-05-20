@@ -592,7 +592,7 @@ pub fn create_extracted_item(
             ],
         )
         .map_err(|error| error.to_string())?;
-    clear_map_outputs_in_transaction(&transaction, &project_id)?;
+    clear_map_analysis_in_transaction(&transaction, &project_id)?;
     record_snapshot_in_transaction(&transaction, &project_id, "human_edit_items")?;
     transaction.commit().map_err(|error| error.to_string())?;
 
@@ -611,10 +611,14 @@ pub fn create_onboarding_brief_source(
     memo: Option<String>,
     website_url: Option<String>,
     sns_url: Option<String>,
+    website_urls: Option<Vec<String>>,
+    sns_urls: Option<Vec<String>>,
     product_info: Option<String>,
 ) -> Result<ProjectWorkspace, String> {
     let trimmed_company_name = company_name.trim();
     let trimmed_purpose_label = purpose_label.trim();
+    let normalized_website_urls = normalize_url_inputs(website_url, website_urls);
+    let normalized_sns_urls = normalize_url_inputs(sns_url, sns_urls);
 
     if trimmed_company_name.is_empty() {
         return Err("企業名 / 案件名を入力してください。".to_string());
@@ -639,8 +643,8 @@ pub fn create_onboarding_brief_source(
         trimmed_purpose_label,
         industry.as_deref(),
         memo.as_deref(),
-        website_url.as_deref(),
-        sns_url.as_deref(),
+        &normalized_website_urls,
+        &normalized_sns_urls,
         product_info.as_deref(),
     );
     let content_hash = hash_text(&content);
@@ -648,8 +652,10 @@ pub fn create_onboarding_brief_source(
         "sourceKind": "onboarding_brief",
         "purposeId": purpose_id,
         "purposeLabel": trimmed_purpose_label,
-        "informationLevel": onboarding_information_level(&content, website_url.as_deref(), sns_url.as_deref(), product_info.as_deref()),
-        "hypothesisMode": onboarding_hypothesis_mode(memo.as_deref(), website_url.as_deref(), sns_url.as_deref(), product_info.as_deref()),
+        "websiteUrls": &normalized_website_urls,
+        "snsUrls": &normalized_sns_urls,
+        "informationLevel": onboarding_information_level(&content, &normalized_website_urls, &normalized_sns_urls, product_info.as_deref()),
+        "hypothesisMode": onboarding_hypothesis_mode(memo.as_deref(), &normalized_website_urls, &normalized_sns_urls, product_info.as_deref()),
     })
     .to_string();
 
@@ -859,8 +865,8 @@ fn onboarding_brief_markdown(
     purpose_label: &str,
     industry: Option<&str>,
     memo: Option<&str>,
-    website_url: Option<&str>,
-    sns_url: Option<&str>,
+    website_urls: &[String],
+    sns_urls: &[String],
     product_info: Option<&str>,
 ) -> String {
     let mut sections = vec![
@@ -871,8 +877,8 @@ fn onboarding_brief_markdown(
     ];
 
     push_optional_markdown_line(&mut sections, "業種", industry);
-    push_optional_markdown_line(&mut sections, "ホームページURL", website_url);
-    push_optional_markdown_line(&mut sections, "SNSアカウントURL", sns_url);
+    push_optional_markdown_lines(&mut sections, "ホームページURL", website_urls);
+    push_optional_markdown_lines(&mut sections, "SNSアカウントURL", sns_urls);
     push_optional_section(&mut sections, "今わかっていること / 困っていること", memo);
     push_optional_section(&mut sections, "商品 / サービス情報", product_info);
 
@@ -883,6 +889,22 @@ fn onboarding_brief_markdown(
     );
 
     sections.join("\n\n")
+}
+
+fn normalize_url_inputs(primary_url: Option<String>, urls: Option<Vec<String>>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized_urls = Vec::new();
+    let candidates = primary_url.into_iter().chain(urls.unwrap_or_default());
+
+    for candidate in candidates {
+        let trimmed = candidate.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+            continue;
+        }
+        normalized_urls.push(trimmed.to_string());
+    }
+
+    normalized_urls
 }
 
 fn information_source_markdown(
@@ -953,6 +975,15 @@ fn push_optional_markdown_line(lines: &mut Vec<String>, label: &str, value: Opti
     lines.push(format!("- {label}: {value}"));
 }
 
+fn push_optional_markdown_lines(lines: &mut Vec<String>, label: &str, values: &[String]) {
+    for value in values {
+        let Some(value) = trimmed_non_empty(Some(value.as_str())) else {
+            continue;
+        };
+        lines.push(format!("- {label}: {value}"));
+    }
+}
+
 fn push_optional_section(lines: &mut Vec<String>, title: &str, value: Option<&str>) {
     let Some(value) = trimmed_non_empty(value) else {
         return;
@@ -966,20 +997,20 @@ fn trimmed_non_empty(value: Option<&str>) -> Option<&str> {
 
 fn onboarding_hypothesis_mode(
     memo: Option<&str>,
-    website_url: Option<&str>,
-    sns_url: Option<&str>,
+    website_urls: &[String],
+    sns_urls: &[String],
     product_info: Option<&str>,
 ) -> bool {
     trimmed_non_empty(memo).is_none()
-        && trimmed_non_empty(website_url).is_none()
-        && trimmed_non_empty(sns_url).is_none()
+        && website_urls.is_empty()
+        && sns_urls.is_empty()
         && trimmed_non_empty(product_info).is_none()
 }
 
 fn onboarding_information_level(
     content: &str,
-    website_url: Option<&str>,
-    sns_url: Option<&str>,
+    website_urls: &[String],
+    sns_urls: &[String],
     product_info: Option<&str>,
 ) -> &'static str {
     let mut score = 0;
@@ -990,12 +1021,8 @@ fn onboarding_information_level(
     if content_length > 700 {
         score += 1;
     }
-    if trimmed_non_empty(website_url).is_some() {
-        score += 1;
-    }
-    if trimmed_non_empty(sns_url).is_some() {
-        score += 1;
-    }
+    score += website_urls.len().min(2);
+    score += sns_urls.len().min(3);
     if trimmed_non_empty(product_info).is_some() {
         score += 1;
     }
@@ -1025,6 +1052,8 @@ pub fn update_extracted_item(
     let mut connection = open_connection(&state.db_path)?;
     ensure_project_exists(&connection, &project_id)?;
     let now = now_rfc3339()?;
+    let normalized_description = empty_to_none(description);
+    let normalized_memo = empty_to_none(memo);
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
@@ -1039,19 +1068,31 @@ pub fn update_extracted_item(
             params![
                 name,
                 item_type,
-                empty_to_none(description),
+                normalized_description.as_deref(),
                 confidence_status,
                 impact_score,
                 subjective_importance,
                 adoption_status,
-                empty_to_none(memo),
+                normalized_memo.as_deref(),
                 now,
                 item_id,
                 project_id
             ],
         )
         .map_err(|error| error.to_string())?;
-    clear_map_outputs_in_transaction(&transaction, &project_id)?;
+    sync_nodes_for_updated_item_in_transaction(
+        &transaction,
+        &project_id,
+        &item_id,
+        &name,
+        &item_type,
+        normalized_description.as_deref(),
+        &confidence_status,
+        impact_score,
+        &adoption_status,
+        now.as_str(),
+    )?;
+    clear_map_analysis_in_transaction(&transaction, &project_id)?;
     record_snapshot_in_transaction(&transaction, &project_id, "human_edit_items")?;
     transaction.commit().map_err(|error| error.to_string())?;
 
@@ -3210,6 +3251,8 @@ fn map_prompt(items: &[MapItem], purpose_context: &PromptPurposeContext) -> Stri
 
     format!(
         "MVP-1の顧客導線ビューとして、抽出カードから1枚のシナジーマップを生成してください。\
+         配置は中心事業を中央に置き、集客チャネルとデータ資料を左、顧客接点を右、商品・サービスをさらに右へ置くhub-and-flow型を優先してください。\
+         同じ分類のノードは縦に重ならないように並べ、中心事業との関係が読める余白を残してください。\
          PurposeContextの目的に合う配置と導線を優先し、目的に関係しない要素は補助ノードとして扱ってください。\
          nodesは読みやすい2D座標で配置し、edgesはawareness/inquiry/proposal/purchase/retention/referral/data_referenceから選んでください。\
          nodeTypeはbusiness/service/channel/touchpoint/finance/data_source、schemaVersionは{}です。\n\n{}\n\nExtracted items:\n{}",
@@ -3229,6 +3272,79 @@ fn default_position(item_type: &str, index: usize) -> (f64, f64) {
         "finance" => (910.0, y + 150.0),
         "data_source" => (90.0, y + 270.0),
         _ => (360.0, y),
+    }
+}
+
+fn structured_map_positions(output: &crate::ai_schema::MapDraftOutput) -> Vec<(f64, f64)> {
+    let core_index = central_node_index(output);
+    let mut counters = HashMap::<&str, usize>::new();
+
+    output
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            if index == core_index {
+                return (520.0, 300.0);
+            }
+
+            let count = counters.entry(node.node_type.as_str()).or_default();
+            let position = peripheral_position(node.node_type.as_str(), *count);
+            *count += 1;
+            position
+        })
+        .collect()
+}
+
+fn central_node_index(output: &crate::ai_schema::MapDraftOutput) -> usize {
+    let mut degrees = HashMap::<&str, i64>::new();
+    for edge in &output.edges {
+        *degrees.entry(edge.source_node_label.as_str()).or_default() += 1;
+        *degrees.entry(edge.target_node_label.as_str()).or_default() += 1;
+    }
+
+    output
+        .nodes
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, node)| {
+            let category_score = match node.node_type.as_str() {
+                "business" => 1_000,
+                "service" => 500,
+                "touchpoint" => 300,
+                "channel" => 200,
+                _ => 0,
+            };
+            let degree_score = degrees.get(node.name.as_str()).copied().unwrap_or_default() * 50;
+            category_score + degree_score + node.impact_score
+        })
+        .map(|(index, _)| index)
+        .unwrap_or_default()
+}
+
+fn peripheral_position(node_type: &str, index: usize) -> (f64, f64) {
+    let row = index as f64;
+    match node_type {
+        "channel" => (160.0, 130.0 + row * 150.0),
+        "data_source" => (160.0, 520.0 + row * 140.0),
+        "finance" => (500.0, 520.0 + row * 140.0),
+        "touchpoint" => (840.0, 130.0 + row * 150.0),
+        "service" => (1160.0, 150.0 + row * 150.0),
+        "business" => {
+            let offsets = [
+                (-250.0, -170.0),
+                (-250.0, 170.0),
+                (0.0, -200.0),
+                (0.0, 200.0),
+            ];
+            let (x_offset, y_offset) = offsets[index % offsets.len()];
+            let ring = (index / offsets.len()) as f64;
+            (
+                520.0 + x_offset - ring * 40.0,
+                300.0 + y_offset + ring * 40.0,
+            )
+        }
+        _ => (520.0, 120.0 + row * 150.0),
     }
 }
 
@@ -3301,10 +3417,15 @@ fn insert_map(
 ) -> Result<(), String> {
     let now = now_rfc3339()?;
     let mut label_to_id = HashMap::<String, String>::new();
+    let positions = structured_map_positions(output);
 
-    for node in &output.nodes {
+    for (index, node) in output.nodes.iter().enumerate() {
         let id = Uuid::new_v4().to_string();
         label_to_id.insert(node.name.clone(), id.clone());
+        let position = positions
+            .get(index)
+            .copied()
+            .unwrap_or((node.position_x, node.position_y));
         transaction
             .execute(
                 "INSERT INTO nodes (
@@ -3323,7 +3444,7 @@ fn insert_map(
                     node.information_richness.to_string(),
                     node.confidence_status,
                     json!(["AI注目"]).to_string(),
-                    json!({ "x": node.position_x, "y": node.position_y }).to_string(),
+                    json!({ "x": position.0, "y": position.1 }).to_string(),
                     now,
                     now
                 ],
@@ -3359,6 +3480,66 @@ fn insert_map(
                     now,
                     now
                 ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sync_nodes_for_updated_item_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+    item_id: &str,
+    name: &str,
+    item_type: &str,
+    description: Option<&str>,
+    confidence_status: &str,
+    impact_score: i64,
+    adoption_status: &str,
+    updated_at: &str,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "UPDATE nodes
+             SET label = ?1,
+                 node_type = ?2,
+                 description = ?3,
+                 confidence_status = ?4,
+                 influence_level = ?5,
+                 adoption_status = ?6,
+                 updated_at = ?7
+             WHERE project_id = ?8 AND extracted_item_id = ?9",
+            params![
+                name,
+                item_type,
+                empty_to_none(description.map(str::to_string)),
+                confidence_status,
+                impact_score.to_string(),
+                adoption_status,
+                updated_at,
+                project_id,
+                item_id
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    if adoption_status == "rejected" {
+        transaction
+            .execute(
+                "UPDATE edges
+                 SET adoption_status = 'rejected', updated_at = ?1
+                 WHERE project_id = ?2
+                   AND (
+                     source_node_id IN (
+                       SELECT id FROM nodes WHERE project_id = ?2 AND extracted_item_id = ?3
+                     )
+                     OR target_node_id IN (
+                       SELECT id FROM nodes WHERE project_id = ?2 AND extracted_item_id = ?3
+                     )
+                   )",
+                params![updated_at, project_id, item_id],
             )
             .map_err(|error| error.to_string())?;
     }
@@ -4748,8 +4929,8 @@ mod tests {
             "売上導線を整理したい",
             None,
             None,
-            None,
-            None,
+            &[],
+            &[],
             None,
         );
 
@@ -4769,18 +4950,25 @@ mod tests {
             "SNS / Webから売上につなげたい",
             Some("製造業"),
             Some("Web問い合わせから商談につながる導線を確認したい。"),
-            Some("https://example.com"),
-            Some("https://instagram.com/example"),
+            &[
+                "https://example.com".to_string(),
+                "https://lp.example.com".to_string(),
+            ],
+            &["https://instagram.com/example".to_string()],
             Some("保守サービスと部品販売を提供している。"),
         );
 
         assert!(content.contains("https://example.com"));
+        assert!(content.contains("https://lp.example.com"));
         assert!(content.contains("https://instagram.com/example"));
         assert_eq!(
             onboarding_information_level(
                 &content,
-                Some("https://example.com"),
-                Some("https://instagram.com/example"),
+                &[
+                    "https://example.com".to_string(),
+                    "https://lp.example.com".to_string(),
+                ],
+                &["https://instagram.com/example".to_string()],
                 Some("保守サービスと部品販売を提供している。"),
             ),
             "high"
@@ -4827,8 +5015,8 @@ mod tests {
             "SNS / Webから売上につなげたい",
             Some("製造業"),
             Some("Web問い合わせはあるが、商談化と保守サービスへの導線が弱い。"),
-            Some("https://example.com"),
-            Some("https://instagram.com/example"),
+            &["https://example.com".to_string()],
+            &["https://instagram.com/example".to_string()],
             Some("保守サービスと部品販売を提供している。"),
         );
         let chunk = ExtractionChunk {
@@ -4846,6 +5034,76 @@ mod tests {
         assert!(summary.contains("Web問い合わせ"));
         assert!(summary.contains("保守サービス"));
         assert!(summary.contains("https://example.com"));
+    }
+
+    #[test]
+    fn structured_map_positions_place_business_at_center() {
+        let output = crate::ai_schema::MapDraftOutput {
+            schema_version: SCHEMA_VERSION.to_string(),
+            nodes: vec![
+                crate::ai_schema::MapNodeDraft {
+                    extracted_item_id: Some("channel-1".to_string()),
+                    name: "Instagram".to_string(),
+                    node_type: "channel".to_string(),
+                    description: "SNS集客".to_string(),
+                    confidence_status: "estimated".to_string(),
+                    impact_score: 2,
+                    information_richness: 60,
+                    position_x: 0.0,
+                    position_y: 0.0,
+                },
+                crate::ai_schema::MapNodeDraft {
+                    extracted_item_id: Some("business-1".to_string()),
+                    name: "整体院".to_string(),
+                    node_type: "business".to_string(),
+                    description: "中心事業".to_string(),
+                    confidence_status: "confirmed".to_string(),
+                    impact_score: 3,
+                    information_richness: 80,
+                    position_x: 0.0,
+                    position_y: 0.0,
+                },
+                crate::ai_schema::MapNodeDraft {
+                    extracted_item_id: Some("service-1".to_string()),
+                    name: "継続ケア".to_string(),
+                    node_type: "service".to_string(),
+                    description: "継続商品".to_string(),
+                    confidence_status: "estimated".to_string(),
+                    impact_score: 2,
+                    information_richness: 70,
+                    position_x: 0.0,
+                    position_y: 0.0,
+                },
+            ],
+            edges: vec![
+                crate::ai_schema::MapEdgeDraft {
+                    source_node_label: "Instagram".to_string(),
+                    target_node_label: "整体院".to_string(),
+                    edge_type: "normal".to_string(),
+                    flow_type: "awareness".to_string(),
+                    strength: "normal".to_string(),
+                    confidence_status: "estimated".to_string(),
+                    label: "認知".to_string(),
+                    evidence: "test".to_string(),
+                },
+                crate::ai_schema::MapEdgeDraft {
+                    source_node_label: "整体院".to_string(),
+                    target_node_label: "継続ケア".to_string(),
+                    edge_type: "strong".to_string(),
+                    flow_type: "retention".to_string(),
+                    strength: "strong".to_string(),
+                    confidence_status: "estimated".to_string(),
+                    label: "継続".to_string(),
+                    evidence: "test".to_string(),
+                },
+            ],
+        };
+
+        let positions = structured_map_positions(&output);
+
+        assert_eq!(positions[1], (520.0, 300.0));
+        assert!(positions[0].0 < positions[1].0);
+        assert!(positions[2].0 > positions[1].0);
     }
 
     #[test]

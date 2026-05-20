@@ -223,6 +223,8 @@ export type CodexUiEvent = {
   detail: string | null;
   verificationUrl: string | null;
   userCode: string | null;
+  completionSuccess: boolean | null;
+  cancelStatus: string | null;
 };
 
 export type CodexSmokeResult = {

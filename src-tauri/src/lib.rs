@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -625,6 +626,45 @@ fn get_codex_runtime_info() -> CodexRuntimeInfo {
 }
 
 #[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    if !is_allowed_external_url(&url) {
+        return Err("許可されていないURLです。".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(&url);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", &url]);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(&url);
+        command
+    };
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("外部ブラウザを開けませんでした: {error}"))
+}
+
+fn is_allowed_external_url(url: &str) -> bool {
+    url == "https://auth.openai.com/codex/device"
+        || url.starts_with("https://chatgpt.com/")
+        || url.starts_with("https://chat.openai.com/")
+}
+
+#[tauri::command]
 fn run_ai_schema_poc(
     app: tauri::AppHandle,
     state: State<'_, DbState>,
@@ -966,6 +1006,7 @@ pub fn run() {
             run_codex_smoke_test,
             run_codex_device_code_check,
             get_codex_runtime_info,
+            open_external_url,
             run_ai_schema_poc,
             mvp1::get_project_workspace,
             mvp1::update_project,
