@@ -488,6 +488,14 @@ function reflectionSummaryText(summary: WorkspaceReflectionSummary) {
   return "登録済みの情報ソースは現在のマップに反映されています。";
 }
 
+function needsReflectionAttention(summary: WorkspaceReflectionSummary) {
+  return (
+    summary.pendingExtractionCount > 0 ||
+    summary.pendingMapCount > 0 ||
+    summary.mapRefreshNeeded
+  );
+}
+
 function getPrimaryActionLabel(workspace: ProjectWorkspace) {
   if (workspace.sourceChunks.length === 0 && workspace.extractedItems.length === 0) {
     return "情報を追加";
@@ -2207,6 +2215,7 @@ function MapWorkspace({
       : reflectionSummary.mapRefreshNeeded
         ? "未反映を再生成"
         : "再生成";
+  const reflectionAttention = needsReflectionAttention(reflectionSummary);
   const handleCanvasPositionsChange = useCallback(
     (positions: MapNodeLayout[]) => onSavePositions(mapViewMode, positions),
     [mapViewMode, onSavePositions],
@@ -2235,70 +2244,81 @@ function MapWorkspace({
             </button>
           </div>
 
-          <div className="map-edit-toolbar" aria-label="マップ編集モード">
-            <button
-              className={!editMode ? "active" : ""}
-              onClick={() => onEditModeChange(false)}
-              title="閲覧"
-              type="button"
-            >
-              <MousePointer2 size={14} aria-hidden="true" />
-              閲覧
-            </button>
-            <button
-              className={editMode ? "active" : ""}
-              onClick={() => onEditModeChange(true)}
-              title="編集"
-              type="button"
-            >
-              <PencilRuler size={14} aria-hidden="true" />
-              編集
-            </button>
-            <button onClick={onArrangeMap} title="見やすく整列" type="button">
-              <MapIcon size={14} aria-hidden="true" />
-              整える
-            </button>
-            <button
-              disabled={generationBusy}
-              onClick={onGenerateMap}
-              title="抽出カードからマップを再生成"
-              type="button"
-            >
-              <Sparkles size={14} aria-hidden="true" />
-              {mapRegenerationLabel}
-            </button>
-            <button
-              disabled={mapInsightBusy}
-              onClick={() => onAskWholeMap("explain")}
-              title="マップ全体をCodexに聞く"
-              type="button"
-            >
-              <MessageSquareText size={14} aria-hidden="true" />
-              聞く
-            </button>
-            <span
-              className={`layout-save-status layout-save-status-${layoutSaveStatus}`}
-            >
-              {layoutSaveStatus === "saving"
-                ? "保存中"
-                : layoutSaveStatus === "error"
-                  ? "保存失敗"
-                  : layoutSaveStatus === "idle"
-                    ? "未変更"
-                    : "保存済み"}
-            </span>
-            <span
-              className={`map-ai-status ${
-                isFallbackRun(latestAiRun) ? "map-ai-status-fallback" : ""
-              }`}
-              title={latestAiRun?.error ?? aiRunStatusLabel(latestAiRun)}
-            >
-              {aiRunSourceLabel(latestAiRun)}
-            </span>
-            {editMode ? (
-              <span className="map-edit-hint">
-                ノードをドラッグ。選択後、角で大きさを調整。
+          <div className="map-workbench-top-stack">
+            <div className="map-edit-toolbar" aria-label="マップ編集モード">
+              <button
+                className={!editMode ? "active" : ""}
+                onClick={() => onEditModeChange(false)}
+                title="閲覧"
+                type="button"
+              >
+                <MousePointer2 size={14} aria-hidden="true" />
+                閲覧
+              </button>
+              <button
+                className={editMode ? "active" : ""}
+                onClick={() => onEditModeChange(true)}
+                title="編集"
+                type="button"
+              >
+                <PencilRuler size={14} aria-hidden="true" />
+                編集
+              </button>
+              <button onClick={onArrangeMap} title="見やすく整列" type="button">
+                <MapIcon size={14} aria-hidden="true" />
+                整える
+              </button>
+              <button
+                disabled={generationBusy}
+                onClick={onGenerateMap}
+                title="抽出カードからマップを再生成"
+                type="button"
+              >
+                <Sparkles size={14} aria-hidden="true" />
+                {mapRegenerationLabel}
+              </button>
+              <button
+                disabled={mapInsightBusy}
+                onClick={() => onAskWholeMap("explain")}
+                title="マップ全体をCodexに聞く"
+                type="button"
+              >
+                <MessageSquareText size={14} aria-hidden="true" />
+                聞く
+              </button>
+              <span
+                className={`layout-save-status layout-save-status-${layoutSaveStatus}`}
+              >
+                {layoutSaveStatus === "saving"
+                  ? "保存中"
+                  : layoutSaveStatus === "error"
+                    ? "保存失敗"
+                    : layoutSaveStatus === "idle"
+                      ? "未変更"
+                      : "保存済み"}
               </span>
+              <span
+                className={`map-ai-status ${
+                  isFallbackRun(latestAiRun) ? "map-ai-status-fallback" : ""
+                }`}
+                title={latestAiRun?.error ?? aiRunStatusLabel(latestAiRun)}
+              >
+                {aiRunSourceLabel(latestAiRun)}
+              </span>
+              {editMode ? (
+                <span className="map-edit-hint">
+                  ノードをドラッグ。選択後、角で大きさを調整。
+                </span>
+              ) : null}
+            </div>
+
+            {reflectionSummary.sourceCount > 0 ? (
+              <MapReflectionBanner
+                generationBusy={generationBusy}
+                onGenerateMap={onGenerateMap}
+                onOpenExtractReview={onOpenExtractReview}
+                summary={reflectionSummary}
+              />
             ) : null}
           </div>
         </>
@@ -2306,9 +2326,17 @@ function MapWorkspace({
 
       {hasGeneratedMap && mapViewMode === "customer_journey" ? (
         <button
-          className={`tray-tab ${trayOpen ? "tray-tab-open" : ""}`}
+          className={`tray-tab ${trayOpen ? "tray-tab-open" : ""} ${
+            !trayOpen && reflectionAttention ? "tray-tab-warning" : ""
+          }`}
           aria-expanded={trayOpen}
-          aria-label={trayOpen ? "マップ材料を閉じる" : "マップ材料を開く"}
+          aria-label={
+            trayOpen
+              ? "マップ材料を閉じる"
+              : reflectionAttention
+                ? "マップ材料を開く（未反映あり）"
+                : "マップ材料を開く"
+          }
           onClick={() => onTrayOpenChange(!trayOpen)}
           type="button"
         >
@@ -2316,15 +2344,6 @@ function MapWorkspace({
         </button>
       ) : null}
 
-      {hasGeneratedMap && reflectionSummary.sourceCount > 0 ? (
-        <MapReflectionBanner
-          generationBusy={generationBusy}
-          onGenerateMap={onGenerateMap}
-          onOpenExtractReview={onOpenExtractReview}
-          summary={reflectionSummary}
-          trayOpen={trayOpen && mapViewMode === "customer_journey"}
-        />
-      ) : null}
       {hasGeneratedMap && mapViewMode === "customer_journey" ? (
         <aside
           className={`extraction-tray ${
@@ -2525,23 +2544,18 @@ function MapReflectionBanner({
   onGenerateMap,
   onOpenExtractReview,
   summary,
-  trayOpen,
 }: {
   generationBusy: boolean;
   onGenerateMap: () => void;
   onOpenExtractReview: () => void;
   summary: WorkspaceReflectionSummary;
-  trayOpen: boolean;
 }) {
   const needsExtraction = summary.pendingExtractionCount > 0;
   const needsMapRefresh = summary.pendingMapCount > 0 || summary.mapRefreshNeeded;
-  const className = `map-reflection-banner ${
-    trayOpen ? "map-reflection-banner-shifted" : ""
-  }`;
 
   if (!needsExtraction && !needsMapRefresh) {
     return (
-      <div className={`${className} map-reflection-banner-ok`}>
+      <div className="map-reflection-banner map-reflection-banner-ok">
         <Info size={15} aria-hidden="true" />
         <span>{reflectionSummaryText(summary)}</span>
         <StatusChip>
@@ -2552,7 +2566,7 @@ function MapReflectionBanner({
   }
 
   return (
-    <div className={`${className} map-reflection-banner-warning`}>
+    <div className="map-reflection-banner map-reflection-banner-warning">
       <TriangleAlert size={15} aria-hidden="true" />
       <span>{reflectionSummaryText(summary)}</span>
       {needsExtraction ? (

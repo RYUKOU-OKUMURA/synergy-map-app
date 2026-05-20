@@ -626,11 +626,19 @@ button:disabled {
   color: var(--primary-dark);
 }
 
-.map-edit-toolbar {
+.map-workbench-top-stack {
   position: absolute;
   top: 16px;
   right: 336px;
   z-index: 24;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: calc(100% - 360px);
+}
+
+.map-edit-toolbar {
   display: inline-flex;
   align-items: center;
   overflow: hidden;
@@ -661,34 +669,52 @@ button:disabled {
 }
 
 .map-reflection-banner {
-  position: absolute;
-  top: 62px;
-  left: 18px;
-  z-index: 23;
   display: flex;
-  max-width: min(560px, calc(100vw - 380px));
+  width: max-content;
+  max-width: min(720px, calc(100vw - 360px));
   min-height: 38px;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.97);
   box-shadow: 0 10px 26px rgba(15, 23, 42, 0.12);
   color: var(--text);
-  padding: 6px 8px 6px 11px;
+  padding: 7px 10px 7px 12px;
   font-size: 12px;
   font-weight: 700;
 }
 
-.map-reflection-banner-shifted {
-  left: 340px;
-  max-width: min(520px, calc(100vw - 700px));
+.map-reflection-banner > svg {
+  flex-shrink: 0;
 }
 
 .map-reflection-banner span {
+  flex: 1;
   min-width: 0;
+  line-height: 1.35;
+}
+
+.map-reflection-banner-warning span {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+}
+
+.map-reflection-banner-ok span {
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.map-reflection-banner .ghost-button,
+.map-reflection-banner .primary-button {
+  flex-shrink: 0;
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -835,6 +861,25 @@ button:disabled {
     border-color 180ms ease,
     background 180ms ease,
     box-shadow 180ms ease;
+}
+
+.tray-tab-warning {
+  border-color: #fdba74;
+  background: #fff7ed;
+  color: #9a3412;
+  box-shadow: 0 8px 22px rgba(154, 52, 18, 0.14);
+}
+
+.tray-tab-warning::after {
+  content: "";
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  width: 7px;
+  height: 7px;
+  border: 1.5px solid #fff7ed;
+  border-radius: 50%;
+  background: #ea580c;
 }
 
 .tray-tab-open {
@@ -2694,10 +2739,9 @@ button:disabled {
 }
 
 @media (max-width: 1100px) {
-  .map-reflection-banner {
+  .map-workbench-top-stack {
     right: 18px;
-    left: 18px;
-    max-width: none;
+    max-width: calc(100% - 36px);
   }
 
   .source-overview,
