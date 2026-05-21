@@ -12,17 +12,16 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::ai_provider::StructuredAiResult;
 use crate::ai_schema::{
     ai_analysis_json_schema, extracted_items_json_schema, map_draft_json_schema,
     map_insight_json_schema, suggestion_cards_json_schema, validate_ai_analysis_json,
     validate_extracted_items_json, validate_map_draft_json, validate_map_insight_json,
     validate_suggestion_cards_json, SCHEMA_VERSION,
 };
-use crate::codex_app_server;
 use crate::DbState;
 
 const LOCAL_MODEL: &str = "mvp-local-draft";
-const CODEX_MODEL: &str = "codex-app-server";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -331,26 +330,30 @@ fn workspace_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
 }
 
-fn try_structured_codex(app: AppHandle, prompt: &str, schema: Value) -> Result<Value, String> {
+fn try_structured_ai(
+    app: AppHandle,
+    db_path: &Path,
+    prompt: &str,
+    schema: Value,
+) -> StructuredAiResult {
+    let settings = crate::app_settings::load_ai_settings(db_path);
     let cwd = workspace_dir();
-    let result = codex_app_server::run_structured_output_turn(
+    crate::ai_provider::run_structured_ai(
         app,
         &cwd.display().to_string(),
         prompt,
         schema,
-    );
+        &settings,
+    )
+}
 
-    if result.ok {
+fn provider_metadata(result: &StructuredAiResult) -> (Option<String>, u64) {
+    (
         result
-            .response_json
-            .ok_or_else(|| "Codex structured output was empty.".to_string())
-    } else {
-        Err(if result.errors.is_empty() {
-            "Codex structured output failed.".to_string()
-        } else {
-            result.errors.join("; ")
-        })
-    }
+            .provider_used
+            .map(|provider| provider.as_str().to_string()),
+        result.duration_ms,
+    )
 }
 
 fn read_text_preview(path: &str, limit: usize) -> String {
@@ -482,23 +485,30 @@ pub fn run_extract_items(
     let purpose_context = prompt_purpose_context_from_chunks(&chunks);
     let prompt = extraction_prompt(&chunks, &purpose_context);
     let prompt_hash = hash_text(&prompt);
-    let codex_result = try_structured_codex(app, &prompt, extracted_items_json_schema());
-    let (output_json, model, status, error, fallback_used, message) = match codex_result {
-        Ok(value) => (
+    let ai_result = try_structured_ai(
+        app,
+        &state.db_path,
+        &prompt,
+        extracted_items_json_schema(),
+    );
+    let (provider_used, duration_ms) = provider_metadata(&ai_result);
+    let (output_json, model, status, error, fallback_used, message) = match ai_result.response_json
+    {
+        Some(value) => (
             value,
-            CODEX_MODEL,
+            ai_result.model_label,
             "completed",
             None,
             false,
             "抽出カードを生成しました。".to_string(),
         ),
-        Err(error) => (
+        None => (
             build_extracted_items_output(&chunks),
-            LOCAL_MODEL,
+            LOCAL_MODEL.to_string(),
             "fallback_completed",
-            Some(error),
+            Some(ai_result.errors.join("; ")),
             true,
-            "Codex AI実行に失敗したため、ローカルドラフトで抽出カードを生成しました。".to_string(),
+            "AI実行に失敗したため、ローカルドラフトで抽出カードを生成しました。".to_string(),
         ),
     };
     let output = validate_extracted_items_json(&output_json)?;
@@ -509,7 +519,7 @@ pub fn run_extract_items(
         &project_id,
         "extract_items",
         "ExtractedItemsOutput",
-        model,
+        &model,
         pending_ai_run_status(status),
         json!({
             "mode": "local_summary_only",
@@ -519,6 +529,8 @@ pub fn run_extract_items(
             "sourceChunkIds": chunks.iter().map(|chunk| chunk.id.clone()).collect::<Vec<_>>(),
             "purpose": purpose_context.request_summary(),
             "generationMode": purpose_context.generation_mode(),
+            "providerUsed": provider_used,
+            "durationMs": duration_ms,
         }),
         &output_json,
         error,
@@ -1120,24 +1132,25 @@ pub fn generate_map_from_items(
     let purpose_context = load_prompt_purpose_context(&connection, &project_id)?;
     let prompt = map_prompt(&items, &purpose_context);
     let prompt_hash = hash_text(&prompt);
-    let codex_result = try_structured_codex(app, &prompt, map_draft_json_schema());
-    let (output_json, model, status, error, fallback_used, message) = match codex_result {
-        Ok(value) => (
+    let ai_result = try_structured_ai(app, &state.db_path, &prompt, map_draft_json_schema());
+    let (provider_used, duration_ms) = provider_metadata(&ai_result);
+    let (output_json, model, status, error, fallback_used, message) = match ai_result.response_json
+    {
+        Some(value) => (
             value,
-            CODEX_MODEL,
+            ai_result.model_label,
             "completed",
             None,
             false,
             "シナジーマップを生成しました。".to_string(),
         ),
-        Err(error) => (
+        None => (
             build_map_output(&items),
-            LOCAL_MODEL,
+            LOCAL_MODEL.to_string(),
             "fallback_completed",
-            Some(error),
+            Some(ai_result.errors.join("; ")),
             true,
-            "Codex AI実行に失敗したため、ローカルドラフトでシナジーマップを生成しました。"
-                .to_string(),
+            "AI実行に失敗したため、ローカルドラフトでシナジーマップを生成しました。".to_string(),
         ),
     };
     let output = validate_map_draft_json(&output_json)?;
@@ -1147,7 +1160,7 @@ pub fn generate_map_from_items(
         &project_id,
         "generate_map",
         "MapDraftOutput",
-        model,
+        &model,
         pending_ai_run_status(status),
         json!({
             "mode": "accepted_extracted_items",
@@ -1157,6 +1170,8 @@ pub fn generate_map_from_items(
             "extractedItemIds": items.iter().map(|item| item.id.clone()).collect::<Vec<_>>(),
             "purpose": purpose_context.request_summary(),
             "generationMode": purpose_context.generation_mode(),
+            "providerUsed": provider_used,
+            "durationMs": duration_ms,
         }),
         &output_json,
         error,
@@ -1553,17 +1568,29 @@ pub fn generate_suggestions_from_map(
     let suggestions_prompt = business_impact_prompt(&workspace, &purpose_context);
     let prompt_hash = hash_text(&prompt);
     let suggestions_prompt_hash = hash_text(&suggestions_prompt);
-    let analysis_result = try_structured_codex(app.clone(), &prompt, ai_analysis_json_schema());
-    let suggestions_result =
-        try_structured_codex(app, &suggestions_prompt, suggestion_cards_json_schema());
+    let analysis_result = try_structured_ai(
+        app.clone(),
+        &state.db_path,
+        &prompt,
+        ai_analysis_json_schema(),
+    );
+    let suggestions_result = try_structured_ai(
+        app,
+        &state.db_path,
+        &suggestions_prompt,
+        suggestion_cards_json_schema(),
+    );
+    let (analysis_provider_used, analysis_duration_ms) = provider_metadata(&analysis_result);
+    let (suggestions_provider_used, suggestions_duration_ms) =
+        provider_metadata(&suggestions_result);
     let (analysis_json, analysis_model, analysis_status, analysis_error, analysis_fallback_used) =
-        match analysis_result {
-            Ok(value) => (value, CODEX_MODEL, "completed", None, false),
-            Err(error) => (
+        match analysis_result.response_json {
+            Some(value) => (value, analysis_result.model_label, "completed", None, false),
+            None => (
                 build_analysis_output(&workspace),
-                LOCAL_MODEL,
+                LOCAL_MODEL.to_string(),
                 "fallback_completed",
-                Some(error),
+                Some(analysis_result.errors.join("; ")),
                 true,
             ),
         };
@@ -1573,13 +1600,13 @@ pub fn generate_suggestions_from_map(
         suggestions_status,
         suggestions_error,
         suggestions_fallback_used,
-    ) = match suggestions_result {
-        Ok(value) => (value, CODEX_MODEL, "completed", None, false),
-        Err(error) => (
+    ) = match suggestions_result.response_json {
+        Some(value) => (value, suggestions_result.model_label, "completed", None, false),
+        None => (
             build_suggestions_output(&workspace),
-            LOCAL_MODEL,
+            LOCAL_MODEL.to_string(),
             "fallback_completed",
-            Some(error),
+            Some(suggestions_result.errors.join("; ")),
             true,
         ),
     };
@@ -1591,7 +1618,7 @@ pub fn generate_suggestions_from_map(
         &project_id,
         "analyze_map",
         "AiAnalysisOutput",
-        analysis_model,
+        &analysis_model,
         pending_ai_run_status(analysis_status),
         json!({
             "mode": "map_summary",
@@ -1601,6 +1628,8 @@ pub fn generate_suggestions_from_map(
             "edgeCount": active_edges.len(),
             "purpose": purpose_context.request_summary(),
             "generationMode": purpose_context.generation_mode(),
+            "providerUsed": analysis_provider_used,
+            "durationMs": analysis_duration_ms,
         }),
         &analysis_json,
         analysis_error,
@@ -1611,7 +1640,7 @@ pub fn generate_suggestions_from_map(
         &project_id,
         "generate_suggestions",
         "SuggestionCardsOutput",
-        suggestions_model,
+        &suggestions_model,
         pending_ai_run_status(suggestions_status),
         json!({
             "mode": "map_summary",
@@ -1622,6 +1651,8 @@ pub fn generate_suggestions_from_map(
             "view": "business_impact",
             "purpose": purpose_context.request_summary(),
             "generationMode": purpose_context.generation_mode(),
+            "providerUsed": suggestions_provider_used,
+            "durationMs": suggestions_duration_ms,
         }),
         &suggestions_json,
         suggestions_error,
@@ -1658,7 +1689,7 @@ pub fn generate_suggestions_from_map(
     transaction.commit().map_err(|error| error.to_string())?;
 
     let message = if analysis_fallback_used || suggestions_fallback_used {
-        "Codex AI実行に失敗した一部出力をローカルドラフトで補完しました。".to_string()
+        "AI実行に失敗した一部出力をローカルドラフトで補完しました。".to_string()
     } else {
         "AIコメントと事業インパクト施策を生成しました。".to_string()
     };
@@ -1710,28 +1741,30 @@ pub fn ask_map_insight(
         &purpose_context,
     )?;
     let prompt_hash = hash_text(&prompt);
-    let codex_result = try_structured_codex(app, &prompt, map_insight_json_schema());
-    let (output_json, model, status, error, fallback_used, message) = match codex_result {
-        Ok(value) => (
+    let ai_result = try_structured_ai(app, &state.db_path, &prompt, map_insight_json_schema());
+    let (provider_used, duration_ms) = provider_metadata(&ai_result);
+    let (output_json, model, status, error, fallback_used, message) = match ai_result.response_json
+    {
+        Some(value) => (
             value,
-            CODEX_MODEL,
+            ai_result.model_label,
             "completed",
             None,
             false,
-            "Codex理解メモを生成しました。".to_string(),
+            "理解メモを生成しました。".to_string(),
         ),
-        Err(error) => (
+        None => (
             build_map_insight_output(
                 &workspace,
                 &target_kind,
                 target_id.as_deref(),
                 &question_type,
             ),
-            LOCAL_MODEL,
+            LOCAL_MODEL.to_string(),
             "fallback_completed",
-            Some(error),
+            Some(ai_result.errors.join("; ")),
             true,
-            "Codex AI実行に失敗したため、ローカルドラフトで理解メモを生成しました。".to_string(),
+            "AI実行に失敗したため、ローカルドラフトで理解メモを生成しました。".to_string(),
         ),
     };
     let output = validate_map_insight_json(&output_json)?;
@@ -1742,7 +1775,7 @@ pub fn ask_map_insight(
         &project_id,
         "ask_map_insight",
         "MapInsightOutput",
-        model,
+        &model,
         pending_ai_run_status(status),
         json!({
             "mode": "map_context_question",
@@ -1753,6 +1786,8 @@ pub fn ask_map_insight(
             "questionType": question_type.as_str(),
             "purpose": purpose_context.request_summary(),
             "generationMode": purpose_context.generation_mode(),
+            "providerUsed": provider_used,
+            "durationMs": duration_ms,
         }),
         &validated_output_json,
         error,

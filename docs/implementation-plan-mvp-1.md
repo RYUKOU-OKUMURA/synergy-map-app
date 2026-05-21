@@ -340,6 +340,22 @@ MVP-1では、最小の業務価値を一気通貫で実装する。
 
 - [ ] MVP-1の中心導線がmacOS / Windowsで通る。
 
+## M1-19 Cursor SDK プロバイダ（個人実運用）
+
+- [x] `scripts/cursor-structured-turn.mts` で構造化 JSON ターンを実行する。
+- [x] `ai_provider.rs` で Codex / Cursor の primary + fallback を実装する。
+- [x] 構造化 AI 呼び出しすべてを `try_structured_ai` 経由に統一する。
+- [x] `app-settings.json` でプロバイダ設定を永続化する。
+- [x] 設定画面で Codex / Composer 切替と接続テストを提供する。
+- [x] `ai_runs` request summary に `providerUsed` / `durationMs` を記録する。
+- [x] [cursor-sdk-integration.md](cursor-sdk-integration.md) に運用メモを書く。
+- [ ] Composer 常駐セッション（v2）で起動コストを削減する。
+
+完了条件:
+
+- [x] 設定で Composer を選び、マップ生成まで Tauri 上で実行できる。
+- [x] 失敗時フォールバックが動作する。
+
 ## MVP-1完了判定
 
 - [x] 資料投入からMarkdown / CSV出力まで一気通貫で動く。

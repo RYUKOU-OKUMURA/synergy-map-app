@@ -58,10 +58,14 @@ import {
   timeToImpactOptions,
 } from "@/lib/mvp1Labels";
 import type {
+  AiProviderKind,
   AiRunRow,
+  AiSettings,
   CodexUiEvent,
   CodexRuntimeInfo,
   CodexSmokeResult,
+  CursorSdkSmokeResult,
+  CursorSdkStatus,
   DeviceCodeLoginResult,
   ExportResult,
   ExtractedItemRow,
@@ -111,6 +115,13 @@ type OnboardingDraft = {
 };
 
 type CodexConnectionAction = "refresh" | "smoke" | "login";
+type CursorConnectionAction = "refresh" | "smoke";
+
+const defaultAiSettings = (): AiSettings => ({
+  primaryProvider: "codex",
+  fallbackEnabled: true,
+  cursorModelId: "composer-2.5",
+});
 
 type InformationSourceKind = "manual_note" | "website_url" | "sns_url" | "product_info";
 
@@ -250,7 +261,11 @@ function isFallbackRun(run: AiRunRow | null | undefined) {
 
 function aiRunSourceLabel(run: AiRunRow | null | undefined) {
   if (!run) return "AI未実行";
-  return isFallbackRun(run) ? "ローカルドラフト" : "Codex生成";
+  if (isFallbackRun(run)) return "ローカルドラフト";
+  const model = run.model ?? "";
+  if (model.startsWith("cursor-sdk/")) return "Composer生成";
+  if (model === "codex-app-server") return "Codex生成";
+  return "AI生成";
 }
 
 function aiRunStatusLabel(run: AiRunRow | null | undefined) {
@@ -719,6 +734,14 @@ function App() {
   const [deviceCodeResult, setDeviceCodeResult] =
     useState<DeviceCodeLoginResult | null>(null);
   const [codexBusy, setCodexBusy] = useState<CodexConnectionAction | null>(null);
+  const [aiSettings, setAiSettings] = useState<AiSettings>(defaultAiSettings);
+  const [cursorSdkStatus, setCursorSdkStatus] = useState<CursorSdkStatus | null>(
+    null,
+  );
+  const [cursorSdkSmokeResult, setCursorSdkSmokeResult] =
+    useState<CursorSdkSmokeResult | null>(null);
+  const [cursorBusy, setCursorBusy] = useState<CursorConnectionAction | null>(null);
+  const [aiSettingsBusy, setAiSettingsBusy] = useState(false);
   const [approvedChunkSignature, setApprovedChunkSignature] = useState<string | null>(
     null,
   );
@@ -1157,6 +1180,65 @@ function App() {
     }
   }
 
+  async function handleSaveAiSettings(nextSettings: AiSettings) {
+    if (!isTauriRuntime) return;
+    setAiSettingsBusy(true);
+    setError(null);
+    try {
+      const saved = await invoke<AiSettings>("save_ai_settings_command", {
+        settings: nextSettings,
+      });
+      setAiSettings(saved);
+      setNotice("AIプロバイダ設定を保存しました。");
+    } catch (caughtError) {
+      setError(String(caughtError));
+    } finally {
+      setAiSettingsBusy(false);
+    }
+  }
+
+  async function handleRefreshCursorSdkStatus() {
+    if (!isTauriRuntime) {
+      setCursorSdkStatus({
+        apiKeyConfigured: false,
+        pnpmAvailable: false,
+        tsxAvailable: false,
+        repoRoot: null,
+        scriptExists: false,
+      });
+      return;
+    }
+    setCursorBusy("refresh");
+    setError(null);
+    try {
+      const result = await invoke<CursorSdkStatus>("get_cursor_sdk_status");
+      setCursorSdkStatus(result);
+    } catch (caughtError) {
+      setError(String(caughtError));
+    } finally {
+      setCursorBusy(null);
+    }
+  }
+
+  async function handleRunCursorSdkSmokeTest() {
+    if (!isTauriRuntime) return;
+    setCursorBusy("smoke");
+    setError(null);
+    try {
+      const result = await invoke<CursorSdkSmokeResult>("run_cursor_sdk_smoke_test");
+      setCursorSdkSmokeResult(result);
+      setNotice(
+        result.ok
+          ? `Composer接続を確認しました（${result.durationMs}ms）。`
+          : "Composer接続確認に失敗しました。",
+      );
+    } catch (caughtError) {
+      setError(String(caughtError));
+    } finally {
+      setCursorBusy(null);
+    }
+  }
+
   async function handleOpenExternalUrl(url: string) {
     if (!url) return;
     if (!isTauriRuntime) {
@@ -1493,6 +1575,33 @@ function App() {
     if (!isTauriRuntime) return;
     let cancelled = false;
 
+    async function loadAiProviderState() {
+      try {
+        const [settings, status] = await Promise.all([
+          invoke<AiSettings>("get_ai_settings"),
+          invoke<CursorSdkStatus>("get_cursor_sdk_status"),
+        ]);
+        if (cancelled) return;
+        setAiSettings(settings);
+        setCursorSdkStatus(status);
+      } catch (caughtError) {
+        if (!cancelled) {
+          setError(String(caughtError));
+        }
+      }
+    }
+
+    void loadAiProviderState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isTauriRuntime]);
+
+  useEffect(() => {
+    if (!isTauriRuntime) return;
+    let cancelled = false;
+
     async function loadInitialProjects() {
       const rows = await invoke<Project[]>("list_projects");
       if (cancelled) return;
@@ -1630,10 +1739,14 @@ function App() {
           {view === "map" ? (
             <MapWorkspace
               activeProject={activeProject}
+              aiSettings={aiSettings}
               canPickFiles={isTauriRuntime}
               codexBusy={codexBusy}
               codexRuntimeInfo={codexRuntimeInfo}
               codexSmokeResult={codexSmokeResult}
+              cursorBusy={cursorBusy}
+              cursorSdkSmokeResult={cursorSdkSmokeResult}
+              cursorSdkStatus={cursorSdkStatus}
               deviceCodeResult={deviceCodeResult}
               drawerOpen={isDrawerOpen}
               editMode={isMapEditMode}
@@ -1661,8 +1774,10 @@ function App() {
               onPickFiles={handlePickOnboardingFiles}
               onOpenExternalUrl={handleOpenExternalUrl}
               onRefreshCodexRuntime={handleRefreshCodexRuntime}
+              onRefreshCursorSdkStatus={handleRefreshCursorSdkStatus}
               onRunCodexLoginCheck={handleRunCodexLoginCheck}
               onRunCodexSmokeTest={handleRunCodexSmokeTest}
+              onRunCursorSdkSmokeTest={handleRunCursorSdkSmokeTest}
               onMapViewModeChange={(nextMode) => {
                 setMapViewMode(nextMode);
                 setSelectedMapElement(null);
@@ -1772,14 +1887,22 @@ function App() {
           ) : null}
           {view === "settings" ? (
             <SettingsView
+              aiSettings={aiSettings}
+              aiSettingsBusy={aiSettingsBusy}
               codexBusy={codexBusy}
               codexRuntimeInfo={codexRuntimeInfo}
               codexSmokeResult={codexSmokeResult}
+              cursorBusy={cursorBusy}
+              cursorSdkSmokeResult={cursorSdkSmokeResult}
+              cursorSdkStatus={cursorSdkStatus}
               deviceCodeResult={deviceCodeResult}
               onOpenExternalUrl={handleOpenExternalUrl}
               onRefreshCodexRuntime={handleRefreshCodexRuntime}
+              onRefreshCursorSdkStatus={handleRefreshCursorSdkStatus}
               onRunCodexLoginCheck={handleRunCodexLoginCheck}
               onRunCodexSmokeTest={handleRunCodexSmokeTest}
+              onRunCursorSdkSmokeTest={handleRunCursorSdkSmokeTest}
+              onSaveAiSettings={handleSaveAiSettings}
             />
           ) : null}
         </div>
@@ -2128,10 +2251,14 @@ function HomeView({
 
 function MapWorkspace({
   activeProject,
+  aiSettings,
   canPickFiles,
   codexBusy,
   codexRuntimeInfo,
   codexSmokeResult,
+  cursorBusy,
+  cursorSdkSmokeResult,
+  cursorSdkStatus,
   deviceCodeResult,
   drawerOpen,
   editMode,
@@ -2154,8 +2281,10 @@ function MapWorkspace({
   onOpenExternalUrl,
   onPickFiles,
   onRefreshCodexRuntime,
+  onRefreshCursorSdkStatus,
   onRunCodexLoginCheck,
   onRunCodexSmokeTest,
+  onRunCursorSdkSmokeTest,
   onMapViewModeChange,
   reflectionSummary,
   onSavePositions,
@@ -2169,10 +2298,14 @@ function MapWorkspace({
   workspace,
 }: {
   activeProject: Project | null;
+  aiSettings: AiSettings;
   canPickFiles: boolean;
   codexBusy: CodexConnectionAction | null;
   codexRuntimeInfo: CodexRuntimeInfo | null;
   codexSmokeResult: CodexSmokeResult | null;
+  cursorBusy: CursorConnectionAction | null;
+  cursorSdkSmokeResult: CursorSdkSmokeResult | null;
+  cursorSdkStatus: CursorSdkStatus | null;
   deviceCodeResult: DeviceCodeLoginResult | null;
   drawerOpen: boolean;
   editMode: boolean;
@@ -2195,8 +2328,10 @@ function MapWorkspace({
   onOpenExternalUrl: (url: string) => void;
   onPickFiles: (draft: OnboardingDraft) => void;
   onRefreshCodexRuntime: () => void;
+  onRefreshCursorSdkStatus: () => void;
   onRunCodexLoginCheck: () => void;
   onRunCodexSmokeTest: () => void;
+  onRunCursorSdkSmokeTest: () => void;
   onMapViewModeChange: (mode: MapViewMode) => void;
   reflectionSummary: WorkspaceReflectionSummary;
   onSavePositions: (viewMode: MapViewMode, positions: MapNodeLayout[]) => void;
@@ -2464,10 +2599,14 @@ function MapWorkspace({
         ) : (
           <MapCreationFlow
             activeProject={activeProject}
+            aiSettings={aiSettings}
             canPickFiles={canPickFiles}
             codexBusy={codexBusy}
             codexRuntimeInfo={codexRuntimeInfo}
             codexSmokeResult={codexSmokeResult}
+            cursorBusy={cursorBusy}
+            cursorSdkSmokeResult={cursorSdkSmokeResult}
+            cursorSdkStatus={cursorSdkStatus}
             deviceCodeResult={deviceCodeResult}
             generationBusy={generationBusy}
             key={activeProject?.id ?? "new-map"}
@@ -2475,8 +2614,10 @@ function MapWorkspace({
             onOpenExternalUrl={onOpenExternalUrl}
             onPickFiles={onPickFiles}
             onRefreshCodexRuntime={onRefreshCodexRuntime}
+            onRefreshCursorSdkStatus={onRefreshCursorSdkStatus}
             onRunCodexLoginCheck={onRunCodexLoginCheck}
             onRunCodexSmokeTest={onRunCodexSmokeTest}
+            onRunCursorSdkSmokeTest={onRunCursorSdkSmokeTest}
             workspace={workspace}
           />
         )}
@@ -2664,33 +2805,45 @@ function MapRebuildPanel({
 
 function MapCreationFlow({
   activeProject,
+  aiSettings,
   canPickFiles,
   codexBusy,
   codexRuntimeInfo,
   codexSmokeResult,
+  cursorBusy,
+  cursorSdkSmokeResult,
+  cursorSdkStatus,
   deviceCodeResult,
   generationBusy,
   onCreateMap,
   onOpenExternalUrl,
   onPickFiles,
   onRefreshCodexRuntime,
+  onRefreshCursorSdkStatus,
   onRunCodexLoginCheck,
   onRunCodexSmokeTest,
+  onRunCursorSdkSmokeTest,
   workspace,
 }: {
   activeProject: Project | null;
+  aiSettings: AiSettings;
   canPickFiles: boolean;
   codexBusy: CodexConnectionAction | null;
   codexRuntimeInfo: CodexRuntimeInfo | null;
   codexSmokeResult: CodexSmokeResult | null;
+  cursorBusy: CursorConnectionAction | null;
+  cursorSdkSmokeResult: CursorSdkSmokeResult | null;
+  cursorSdkStatus: CursorSdkStatus | null;
   deviceCodeResult: DeviceCodeLoginResult | null;
   generationBusy: boolean;
   onCreateMap: (draft: OnboardingDraft) => void;
   onOpenExternalUrl: (url: string) => void;
   onPickFiles: (draft: OnboardingDraft) => void;
   onRefreshCodexRuntime: () => void;
+  onRefreshCursorSdkStatus: () => void;
   onRunCodexLoginCheck: () => void;
   onRunCodexSmokeTest: () => void;
+  onRunCursorSdkSmokeTest: () => void;
   workspace: ProjectWorkspace;
 }) {
   const [draft, setDraft] = useState<OnboardingDraft>({
@@ -2865,16 +3018,28 @@ function MapCreationFlow({
       </section>
 
       <aside className="creation-side">
-        <CodexConnectionCard
-          busy={codexBusy}
-          runtimeInfo={codexRuntimeInfo}
-          smokeResult={codexSmokeResult}
-          deviceCodeResult={deviceCodeResult}
-          onLoginCheck={onRunCodexLoginCheck}
-          onOpenExternalUrl={onOpenExternalUrl}
-          onRefresh={onRefreshCodexRuntime}
-          onSmokeTest={onRunCodexSmokeTest}
-        />
+        {aiSettings.primaryProvider === "cursor" ? (
+          <CursorSdkConnectionCard
+            busy={cursorBusy}
+            modelId={aiSettings.cursorModelId}
+            onOpenExternalUrl={onOpenExternalUrl}
+            onRefresh={onRefreshCursorSdkStatus}
+            onSmokeTest={onRunCursorSdkSmokeTest}
+            smokeResult={cursorSdkSmokeResult}
+            status={cursorSdkStatus}
+          />
+        ) : (
+          <CodexConnectionCard
+            busy={codexBusy}
+            runtimeInfo={codexRuntimeInfo}
+            smokeResult={codexSmokeResult}
+            deviceCodeResult={deviceCodeResult}
+            onLoginCheck={onRunCodexLoginCheck}
+            onOpenExternalUrl={onOpenExternalUrl}
+            onRefresh={onRefreshCodexRuntime}
+            onSmokeTest={onRunCodexSmokeTest}
+          />
+        )}
 
         <div className="generation-card">
           <div className="section-title">
@@ -3545,44 +3710,242 @@ function ProjectsView({
   );
 }
 
+function AiProviderSettingsCard({
+  busy,
+  settings,
+  onSave,
+}: {
+  busy: boolean;
+  settings: AiSettings;
+  onSave: (settings: AiSettings) => void;
+}) {
+  function updateProvider(provider: AiProviderKind) {
+    onSave({ ...settings, primaryProvider: provider });
+  }
+
+  return (
+    <section className="codex-card ai-provider-card">
+      <div className="section-title">
+        <Settings size={15} aria-hidden="true" />
+        <span>AIプロバイダ</span>
+      </div>
+      <p className="ai-provider-copy">
+        構造化AI（抽出・マップ・施策・壁打ち）のプライマリを選びます。失敗時はもう一方へ自動フォールバックできます。
+      </p>
+      <div className="ai-provider-options" role="radiogroup" aria-label="プライマリAIプロバイダ">
+        <label className="ai-provider-option">
+          <input
+            checked={settings.primaryProvider === "codex"}
+            name="primary-provider"
+            onChange={() => updateProvider("codex")}
+            type="radio"
+          />
+          <span>Codex App Server</span>
+        </label>
+        <label className="ai-provider-option">
+          <input
+            checked={settings.primaryProvider === "cursor"}
+            name="primary-provider"
+            onChange={() => updateProvider("cursor")}
+            type="radio"
+          />
+          <span>Composer（Cursor SDK）</span>
+        </label>
+      </div>
+      <label className="ai-provider-fallback">
+        <input
+          checked={settings.fallbackEnabled}
+          onChange={(event) =>
+            onSave({ ...settings, fallbackEnabled: event.target.checked })
+          }
+          type="checkbox"
+        />
+        <span>失敗時に他方のプロバイダへフォールバック</span>
+      </label>
+      <div className="codex-detail-list">
+        <span>Composer model: {settings.cursorModelId}</span>
+        <span>保存: {busy ? "保存中..." : "即時反映"}</span>
+      </div>
+    </section>
+  );
+}
+
+function CursorSdkConnectionCard({
+  busy,
+  modelId,
+  onOpenExternalUrl,
+  onRefresh,
+  onSmokeTest,
+  smokeResult,
+  status,
+}: {
+  busy: CursorConnectionAction | null;
+  modelId: string;
+  onOpenExternalUrl: (url: string) => void;
+  onRefresh: () => void;
+  onSmokeTest: () => void;
+  smokeResult: CursorSdkSmokeResult | null;
+  status: CursorSdkStatus | null;
+}) {
+  const apiKeyConfigured = status?.apiKeyConfigured ?? false;
+  const bridgeReady =
+    (status?.pnpmAvailable ?? false) &&
+    (status?.tsxAvailable ?? false) &&
+    (status?.scriptExists ?? false);
+  const connected = apiKeyConfigured && bridgeReady && (smokeResult?.ok ?? false);
+  const authTone = connected ? "good" : apiKeyConfigured ? "warn" : "neutral";
+
+  return (
+    <section className="codex-card">
+      <div className="section-title">
+        <Settings size={15} aria-hidden="true" />
+        <span>Composer接続</span>
+      </div>
+      <div className="connection-status-grid">
+        <ConnectionStatus
+          label="CURSOR_API_KEY"
+          state={apiKeyConfigured ? "設定済み" : "未設定"}
+          tone={apiKeyConfigured ? "good" : "warn"}
+        />
+        <ConnectionStatus
+          label="SDK bridge"
+          state={bridgeReady ? "準備OK" : "未準備"}
+          tone={bridgeReady ? "good" : "warn"}
+        />
+        <ConnectionStatus
+          label="接続テスト"
+          state={
+            smokeResult
+              ? smokeResult.ok
+                ? "成功"
+                : "失敗"
+              : connected
+                ? "成功"
+                : "未確認"
+          }
+          tone={authTone}
+        />
+      </div>
+      <div className="codex-detail-list">
+        <span>Model: {modelId}</span>
+        <span>Mode: {connected ? "Composer生成" : "ローカルドラフト可"}</span>
+        {smokeResult ? <span>Last test: {smokeResult.durationMs}ms</span> : null}
+      </div>
+      {!apiKeyConfigured ? (
+        <div className="codex-warning">
+          <Info size={14} aria-hidden="true" />
+          <span>
+            リポジトリ直下の <code>.env</code> に{" "}
+            <code>CURSOR_API_KEY=...</code> を設定してからアプリを再起動してください。
+          </span>
+        </div>
+      ) : null}
+      <div className="connection-actions">
+        <button className="ghost-button" disabled={busy === "refresh"} onClick={onRefresh} type="button">
+          {busy === "refresh" ? "更新中" : "状態更新"}
+        </button>
+        <button
+          className="primary-button"
+          disabled={busy === "smoke" || !apiKeyConfigured}
+          onClick={onSmokeTest}
+          type="button"
+        >
+          {busy === "smoke" ? "接続中" : "接続テスト"}
+        </button>
+        <button
+          className="inline-link-button"
+          onClick={() =>
+            onOpenExternalUrl("https://cursor.com/dashboard/integrations")
+          }
+          type="button"
+        >
+          APIキーを発行
+          <ExternalLink size={12} aria-hidden="true" />
+        </button>
+      </div>
+      {smokeResult && !smokeResult.ok && smokeResult.errors.length > 0 ? (
+        <div className="codex-warning">
+          <Info size={14} aria-hidden="true" />
+          <span>{smokeResult.errors.join(" ")}</span>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function SettingsView({
+  aiSettings,
+  aiSettingsBusy,
   codexBusy,
   codexRuntimeInfo,
   codexSmokeResult,
+  cursorBusy,
+  cursorSdkSmokeResult,
+  cursorSdkStatus,
   deviceCodeResult,
+  onOpenExternalUrl,
   onRefreshCodexRuntime,
+  onRefreshCursorSdkStatus,
   onRunCodexLoginCheck,
   onRunCodexSmokeTest,
-  onOpenExternalUrl,
+  onRunCursorSdkSmokeTest,
+  onSaveAiSettings,
 }: {
+  aiSettings: AiSettings;
+  aiSettingsBusy: boolean;
   codexBusy: CodexConnectionAction | null;
   codexRuntimeInfo: CodexRuntimeInfo | null;
   codexSmokeResult: CodexSmokeResult | null;
+  cursorBusy: CursorConnectionAction | null;
+  cursorSdkSmokeResult: CursorSdkSmokeResult | null;
+  cursorSdkStatus: CursorSdkStatus | null;
   deviceCodeResult: DeviceCodeLoginResult | null;
+  onOpenExternalUrl: (url: string) => void;
   onRefreshCodexRuntime: () => void;
+  onRefreshCursorSdkStatus: () => void;
   onRunCodexLoginCheck: () => void;
   onRunCodexSmokeTest: () => void;
-  onOpenExternalUrl: (url: string) => void;
+  onRunCursorSdkSmokeTest: () => void;
+  onSaveAiSettings: (settings: AiSettings) => void;
 }) {
   return (
     <section className="page-panel settings-panel">
       <div className="page-header">
         <div>
           <h1>設定</h1>
-          <p>Codex接続、ChatGPT認証、ローカルドラフトへの切り替わりを確認します。</p>
+          <p>
+            AIプロバイダ（Codex / Composer）、接続確認、フォールバックを管理します。
+          </p>
         </div>
       </div>
       <div className="settings-grid">
-        <CodexConnectionCard
-          busy={codexBusy}
-          runtimeInfo={codexRuntimeInfo}
-          smokeResult={codexSmokeResult}
-          deviceCodeResult={deviceCodeResult}
-          onLoginCheck={onRunCodexLoginCheck}
-          onOpenExternalUrl={onOpenExternalUrl}
-          onRefresh={onRefreshCodexRuntime}
-          onSmokeTest={onRunCodexSmokeTest}
+        <AiProviderSettingsCard
+          busy={aiSettingsBusy}
+          onSave={onSaveAiSettings}
+          settings={aiSettings}
         />
+        {aiSettings.primaryProvider === "cursor" ? (
+          <CursorSdkConnectionCard
+            busy={cursorBusy}
+            modelId={aiSettings.cursorModelId}
+            onOpenExternalUrl={onOpenExternalUrl}
+            onRefresh={onRefreshCursorSdkStatus}
+            onSmokeTest={onRunCursorSdkSmokeTest}
+            smokeResult={cursorSdkSmokeResult}
+            status={cursorSdkStatus}
+          />
+        ) : (
+          <CodexConnectionCard
+            busy={codexBusy}
+            runtimeInfo={codexRuntimeInfo}
+            smokeResult={codexSmokeResult}
+            deviceCodeResult={deviceCodeResult}
+            onLoginCheck={onRunCodexLoginCheck}
+            onOpenExternalUrl={onOpenExternalUrl}
+            onRefresh={onRefreshCodexRuntime}
+            onSmokeTest={onRunCodexSmokeTest}
+          />
+        )}
         <div className="settings-detail-card">
           <div className="section-title">
             <Info size={15} aria-hidden="true" />

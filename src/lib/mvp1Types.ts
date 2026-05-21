@@ -205,6 +205,29 @@ export type ProjectWorkspace = {
   viewLayouts: ViewLayoutRow[];
 };
 
+export type AiProviderKind = "codex" | "cursor";
+
+export type AiSettings = {
+  primaryProvider: AiProviderKind;
+  fallbackEnabled: boolean;
+  cursorModelId: string;
+};
+
+export type CursorSdkStatus = {
+  apiKeyConfigured: boolean;
+  pnpmAvailable: boolean;
+  tsxAvailable: boolean;
+  repoRoot: string | null;
+  scriptExists: boolean;
+};
+
+export type CursorSdkSmokeResult = {
+  ok: boolean;
+  durationMs: number;
+  model: string | null;
+  errors: string[];
+};
+
 export type CodexRuntimeInfo = {
   commandStrategy: string;
   resolvedPath: string | null;

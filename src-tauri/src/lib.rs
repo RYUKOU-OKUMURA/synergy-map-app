@@ -14,10 +14,17 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+mod ai_provider;
 mod ai_schema;
+mod app_settings;
 mod codex_app_server;
+mod cursor_sdk_bridge;
+mod env_config;
 mod mvp1;
 mod source_reader;
+
+use app_settings::{load_ai_settings, save_ai_settings, AiSettings};
+use cursor_sdk_bridge::{cursor_api_key_configured, repo_root, run_structured_turn};
 
 use ai_schema::{ai_analysis_json_schema, validate_ai_analysis_json, SCHEMA_VERSION};
 use codex_app_server::{CodexRuntimeInfo, CodexSmokeResult, DeviceCodeLoginResult};
@@ -662,6 +669,84 @@ fn is_allowed_external_url(url: &str) -> bool {
     url == "https://auth.openai.com/codex/device"
         || url.starts_with("https://chatgpt.com/")
         || url.starts_with("https://chat.openai.com/")
+        || url.starts_with("https://cursor.com/")
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CursorSdkStatus {
+    api_key_configured: bool,
+    pnpm_available: bool,
+    tsx_available: bool,
+    repo_root: Option<String>,
+    script_exists: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CursorSdkSmokeResult {
+    ok: bool,
+    duration_ms: u64,
+    model: Option<String>,
+    errors: Vec<String>,
+}
+
+#[tauri::command]
+fn get_ai_settings(state: State<'_, DbState>) -> AiSettings {
+    load_ai_settings(&state.db_path)
+}
+
+#[tauri::command]
+fn save_ai_settings_command(
+    state: State<'_, DbState>,
+    settings: AiSettings,
+) -> Result<AiSettings, String> {
+    save_ai_settings(&state.db_path, &settings)?;
+    Ok(settings)
+}
+
+#[tauri::command]
+fn get_cursor_sdk_status() -> CursorSdkStatus {
+    let root = repo_root().ok();
+    let script_exists = root
+        .as_ref()
+        .map(|path| path.join("scripts/cursor-structured-turn.mts").is_file())
+        .unwrap_or(false);
+
+    CursorSdkStatus {
+        api_key_configured: cursor_api_key_configured(),
+        pnpm_available: cursor_sdk_bridge::command_available("pnpm", &["--version"]),
+        tsx_available: cursor_sdk_bridge::command_available("pnpm", &["exec", "tsx", "--version"]),
+        repo_root: root.map(|path| path.display().to_string()),
+        script_exists,
+    }
+}
+
+#[tauri::command]
+fn run_cursor_sdk_smoke_test(state: State<'_, DbState>) -> CursorSdkSmokeResult {
+    let settings = load_ai_settings(&state.db_path);
+    let cwd = workspace_dir();
+    let prompt = format!(
+        "Synergy Map接続確認です。schemaVersionは必ず{}にしてください。summaryは1文で返してください。",
+        SCHEMA_VERSION
+    );
+    let result = run_structured_turn(
+        &prompt,
+        &ai_analysis_json_schema(),
+        &settings.cursor_model_id,
+        &cwd.display().to_string(),
+    );
+
+    CursorSdkSmokeResult {
+        ok: result.ok,
+        duration_ms: result.duration_ms,
+        model: if result.ok {
+            Some(result.model_label)
+        } else {
+            None
+        },
+        errors: result.errors,
+    }
 }
 
 #[tauri::command]
@@ -678,23 +763,26 @@ fn run_ai_schema_poc(
         SCHEMA_VERSION
     );
     let cwd = workspace_dir();
-    let structured = codex_app_server::run_structured_output_turn(
+    let settings = load_ai_settings(&state.db_path);
+    let structured = ai_provider::run_structured_ai(
         app,
         &cwd.display().to_string(),
         &prompt,
         ai_analysis_json_schema(),
+        &settings,
     );
 
     if let Some(response_json) = structured.response_json.as_ref() {
         match validate_ai_analysis_json(response_json) {
             Ok(output) => {
-                let saved_run = save_ai_run(
+                let saved_run = save_ai_run_with_model(
                     &state.db_path,
                     app_data_dir,
                     &project.id,
-                    structured.thread_id.as_deref(),
+                    None,
                     &prompt,
                     response_json,
+                    &structured.model_label,
                 )?;
 
                 Ok(ai_schema_poc_success(saved_run, output.summary))
@@ -840,6 +928,26 @@ fn save_ai_run(
     prompt: &str,
     response_json: &serde_json::Value,
 ) -> Result<(String, String, String), String> {
+    save_ai_run_with_model(
+        db_path,
+        app_data_dir,
+        project_id,
+        codex_thread_id,
+        prompt,
+        response_json,
+        AI_RUN_MODEL,
+    )
+}
+
+fn save_ai_run_with_model(
+    db_path: &PathBuf,
+    app_data_dir: &Path,
+    project_id: &str,
+    codex_thread_id: Option<&str>,
+    prompt: &str,
+    response_json: &serde_json::Value,
+    model: &str,
+) -> Result<(String, String, String), String> {
     let connection = open_connection(db_path)?;
     let id = Uuid::new_v4().to_string();
     let now = now_rfc3339()?;
@@ -888,7 +996,7 @@ fn save_ai_run(
                 AI_SCHEMA_NAME,
                 SCHEMA_VERSION,
                 input_hash,
-                AI_RUN_MODEL,
+                model,
                 "completed",
                 now,
                 now,
@@ -987,6 +1095,7 @@ pub fn run() {
         })
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
+            env_config::load_local_env_files(&app_data_dir);
             let db_path = app_data_dir.join("synergy-map.db");
 
             init_database(&db_path).map_err(Box::<dyn std::error::Error>::from)?;
@@ -1006,6 +1115,10 @@ pub fn run() {
             run_codex_smoke_test,
             run_codex_device_code_check,
             get_codex_runtime_info,
+            get_ai_settings,
+            save_ai_settings_command,
+            get_cursor_sdk_status,
+            run_cursor_sdk_smoke_test,
             open_external_url,
             run_ai_schema_poc,
             mvp1::get_project_workspace,

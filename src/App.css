@@ -1836,6 +1836,35 @@ button:disabled {
   gap: 14px;
 }
 
+.ai-provider-copy {
+  margin: 0 0 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ai-provider-options {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.ai-provider-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.ai-provider-fallback {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
 .settings-detail-card dl {
   display: grid;
   grid-template-columns: 160px minmax(0, 1fr);
