@@ -218,23 +218,23 @@ DB スキーマ変更は**不要**。既存 `MapEdgeRow` の `strength` / `edgeT
 
 ### Phase A: プロトタイプ
 
-- [ ] strong 導線のみ粒子 1 個を流す
-- [ ] 閲覧モード（`editable === false`）のみ有効
-- [ ] `prefers-reduced-motion` 対応
+- [x] strong 導線のみ粒子 1 個を流す
+- [x] 閲覧モード（`editable === false`）のみ有効
+- [x] `prefers-reduced-motion` 対応
 
 ### Phase B: 本実装
 
-- [ ] strength 別の粒子数・速度・色
-- [ ] 複数粒子の stagger ループ
-- [ ] ベースライン半透明化
-- [ ] 始点・終点フェード
+- [x] strength 別の粒子数・速度・色
+- [x] 複数粒子の stagger ループ
+- [x] ベースライン半透明化
+- [x] 始点・終点フェード
 
 ### Phase C: UX 仕上げ
 
-- [ ] プレゼンモード ON/OFF トグル
-- [ ] 選択中導線の強調
-- [ ] PDF 出力時の自動 OFF 確認
-- [ ] デモ workspace で見本表示
+- [x] プレゼンモード ON/OFF トグル
+- [x] 選択中導線の強調
+- [x] PDF 出力時の自動 OFF 確認
+- [x] デモ workspace で見本表示
 
 ## 受け入れ条件
 

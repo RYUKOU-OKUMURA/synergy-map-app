@@ -2726,9 +2726,30 @@ button:disabled {
   box-shadow: 0 8px 18px rgba(22, 138, 131, 0.16);
 }
 
+.map-edge-flow-animated {
+  stroke-opacity: 0.5;
+}
+
+.map-edge-particle {
+  pointer-events: none;
+}
+
 .map-edge-label-warning {
   border-color: #fed7aa;
   color: #9a3412;
+}
+
+.map-edge-label-leader {
+  stroke: var(--border);
+  stroke-width: 1;
+  stroke-opacity: 0.55;
+  stroke-dasharray: 3 3;
+}
+
+.map-edge-selected.map-edge-label-leader,
+.map-edge-label-leader.map-edge-selected {
+  stroke: var(--primary);
+  stroke-opacity: 0.7;
 }
 
 .map-controls,
@@ -2765,5 +2786,15 @@ button:disabled {
   *::after {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+@media print {
+  .map-edge-particle {
+    display: none;
+  }
+
+  .map-edge-flow-animated {
+    stroke-opacity: 1;
   }
 }

@@ -26,8 +26,27 @@ import {
   Store,
   Workflow,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  createContext,
+  useContext,
+} from "react";
 
+import type { EdgeLabelPlacement } from "@/features/map/edgeLabelLayout";
+import { useEdgeLabelLayout } from "@/features/map/useEdgeLabelLayout";
+import {
+  fadeParticleOpacity,
+  FLOW_SELECTED_OPACITY_BOOST,
+  FLOW_SELECTED_PARTICLE_SCALE,
+  isGlobalFlowAnimationEnabled,
+  resolveFlowAnimationConfig,
+  type FlowAnimationParams,
+} from "@/features/map/flowAnimationConfig";
+import { usePrefersReducedMotion } from "@/features/map/usePrefersReducedMotion";
 import { categoryLabels, confidenceLabels } from "@/lib/mvp1Labels";
 import type { MapEdgeRow, MapNodeRow, SelectedMapElement } from "@/lib/mvp1Types";
 
@@ -80,6 +99,8 @@ type SynergyEdgeData = {
   edgeType: string;
   strength: string;
   confidenceStatus: string | null;
+  flowAnimation: FlowAnimationParams | null;
+  labelPlacement?: EdgeLabelPlacement | null;
   onSelectEdge: (edgeId: string) => void;
   viewMode: MapViewMode;
 };
@@ -87,9 +108,13 @@ type SynergyEdgeData = {
 type FlowNode = Node<SynergyNodeData, "synergy">;
 type FlowEdge = Edge<SynergyEdgeData, "synergy">;
 
+const SelectedEdgeContext = createContext<string | null>(null);
+
 type SynergyMapCanvasProps = {
   edges: MapEdgeRow[];
   editable: boolean;
+  flowAnimationSuppressed?: boolean;
+  flowAnimationUserEnabled?: boolean;
   impactStats?: NodeImpactStats;
   nodes: MapNodeRow[];
   onConnectNodes: (sourceNodeId: string, targetNodeId: string) => void;
@@ -215,24 +240,32 @@ function toFlowEdges(
   edges: MapEdgeRow[],
   viewMode: MapViewMode,
   onSelectEdge: (edgeId: string) => void,
+  globalFlowAnimationEnabled: boolean,
 ): FlowEdge[] {
   return edges
     .filter((edge) => edge.adoptionStatus !== "rejected")
-    .map((edge) => ({
-      id: edge.id,
-      source: edge.sourceNodeId,
-      target: edge.targetNodeId,
-      type: "synergy",
-      markerEnd: { type: MarkerType.ArrowClosed },
-      data: {
-        label: edge.label ?? "導線",
-        edgeType: edge.edgeType,
-        strength: edge.strength ?? "normal",
-        confidenceStatus: edge.confidenceStatus,
-        onSelectEdge,
-        viewMode,
-      },
-    }));
+    .map((edge) => {
+      const strength = edge.strength ?? "normal";
+      const edgeType = edge.edgeType;
+      return {
+        id: edge.id,
+        source: edge.sourceNodeId,
+        target: edge.targetNodeId,
+        type: "synergy",
+        markerEnd: { type: MarkerType.ArrowClosed },
+        data: {
+          label: edge.label ?? "導線",
+          edgeType,
+          strength,
+          confidenceStatus: edge.confidenceStatus,
+          flowAnimation: globalFlowAnimationEnabled
+            ? resolveFlowAnimationConfig(strength, edgeType)
+            : null,
+          onSelectEdge,
+          viewMode,
+        },
+      };
+    });
 }
 
 function SynergyNode({ data, id, selected }: NodeProps<FlowNode>) {
@@ -322,13 +355,75 @@ function SynergyNode({ data, id, selected }: NodeProps<FlowNode>) {
 }
 
 function SynergyEdge(props: EdgeProps<FlowEdge>) {
-  const [edgePath, labelX, labelY] = getBezierPath(props);
+  const [edgePath, defaultLabelX, defaultLabelY] = getBezierPath(props);
+  const placement = props.data?.labelPlacement;
+  const labelX = placement?.x ?? defaultLabelX;
+  const labelY = placement?.y ?? defaultLabelY;
+  const leaderAnchorX = placement?.anchorX;
+  const leaderAnchorY = placement?.anchorY;
+  const hasLeader =
+    leaderAnchorX !== undefined &&
+    leaderAnchorY !== undefined &&
+    (Math.hypot(labelX - leaderAnchorX, labelY - leaderAnchorY) > 0.5);
   const edgeType = props.data?.edgeType ?? "normal";
   const strength = props.data?.strength ?? "normal";
   const viewMode = props.data?.viewMode ?? "customer_journey";
+  const flowAnimation = props.data?.flowAnimation ?? null;
   const showWarning = edgeType === "bottleneck";
   const halo = strength === "strong";
   const selectedClass = props.selected ? "map-edge-selected" : "";
+  const animatedTrackClass = flowAnimation ? "map-edge-flow-animated" : "";
+  const pathRef = useRef<SVGPathElement>(null);
+  const circleRefs = useRef<(SVGCircleElement | null)[]>([]);
+  const selectedEdgeId = useContext(SelectedEdgeContext);
+  const isSelected = selectedEdgeId === props.id;
+  const isSelectedRef = useRef(isSelected);
+  isSelectedRef.current = isSelected;
+  const hideLabel = placement?.hidden === true && !props.selected && !isSelected;
+
+  useEffect(() => {
+    if (!flowAnimation) return;
+
+    const { particleCount, durationMs, staggerMs, fadeEnds, particleRadius } =
+      flowAnimation;
+    let frameId = 0;
+    const start = performance.now();
+
+    function tick(now: number) {
+      const path = pathRef.current;
+      if (!path) return;
+
+      const length = path.getTotalLength();
+      if (length > 0) {
+        const selected = isSelectedRef.current;
+        const radius =
+          particleRadius * (selected ? FLOW_SELECTED_PARTICLE_SCALE : 1);
+
+        for (let index = 0; index < particleCount; index += 1) {
+          const circle = circleRefs.current[index];
+          if (!circle) continue;
+
+          const progress =
+            (((now - start) + index * staggerMs) % durationMs) / durationMs;
+          const point = path.getPointAtLength(progress * length);
+          const baseOpacity = fadeEnds ? fadeParticleOpacity(progress) : 1;
+          const opacity = Math.min(
+            1,
+            baseOpacity * (selected ? FLOW_SELECTED_OPACITY_BOOST : 1),
+          );
+          circle.setAttribute("cx", String(point.x));
+          circle.setAttribute("cy", String(point.y));
+          circle.setAttribute("r", String(radius));
+          circle.setAttribute("opacity", String(opacity));
+        }
+      }
+
+      frameId = requestAnimationFrame(tick);
+    }
+
+    frameId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frameId);
+  }, [edgePath, flowAnimation]);
 
   return (
     <>
@@ -337,38 +432,76 @@ function SynergyEdge(props: EdgeProps<FlowEdge>) {
         id={props.id}
         markerEnd={props.markerEnd}
         path={edgePath}
-        className={`map-edge map-edge-${edgeType} map-edge-strength-${strength} map-edge-view-${viewMode} ${selectedClass}`}
+        className={`map-edge map-edge-${edgeType} map-edge-strength-${strength} map-edge-view-${viewMode} ${animatedTrackClass} ${selectedClass}`}
       />
-      <EdgeLabelRenderer>
-        <div
-          className={`map-edge-label nodrag nopan ${showWarning ? "map-edge-label-warning" : ""} ${
-            props.selected ? "map-edge-label-selected" : ""
-          }`}
-          onClick={(event) => {
-            event.stopPropagation();
-            props.data?.onSelectEdge(props.id);
-          }}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter" && event.key !== " ") return;
-            event.preventDefault();
-            event.stopPropagation();
-            props.data?.onSelectEdge(props.id);
-          }}
-          role="button"
-          style={{
-            transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
-          }}
-          tabIndex={0}
-          title="導線を選択"
-        >
-          {showWarning ? (
-            <AlertTriangle size={11} aria-hidden="true" />
-          ) : (
-            <ArrowRight size={11} aria-hidden="true" />
-          )}
-          {props.data?.label ?? "導線"}
-        </div>
-      </EdgeLabelRenderer>
+      {flowAnimation ? (
+        <>
+          <path
+            ref={pathRef}
+            d={edgePath}
+            fill="none"
+            stroke="none"
+            pointerEvents="none"
+            aria-hidden="true"
+          />
+          {Array.from({ length: flowAnimation.particleCount }, (_, index) => (
+            <circle
+              key={index}
+              ref={(element) => {
+                circleRefs.current[index] = element;
+              }}
+              className="map-edge-particle"
+              r={flowAnimation.particleRadius}
+              fill={flowAnimation.particleColor}
+              pointerEvents="none"
+              aria-hidden="true"
+            />
+          ))}
+        </>
+      ) : null}
+      {hasLeader ? (
+        <line
+          className={`map-edge-label-leader ${selectedClass}`}
+          pointerEvents="none"
+          x1={leaderAnchorX}
+          x2={labelX}
+          y1={leaderAnchorY}
+          y2={labelY}
+          aria-hidden="true"
+        />
+      ) : null}
+      {hideLabel ? null : (
+        <EdgeLabelRenderer>
+          <div
+            className={`map-edge-label nodrag nopan ${showWarning ? "map-edge-label-warning" : ""} ${
+              props.selected ? "map-edge-label-selected" : ""
+            }`}
+            onClick={(event) => {
+              event.stopPropagation();
+              props.data?.onSelectEdge(props.id);
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault();
+              event.stopPropagation();
+              props.data?.onSelectEdge(props.id);
+            }}
+            role="button"
+            style={{
+              transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+            }}
+            tabIndex={0}
+            title="導線を選択"
+          >
+            {showWarning ? (
+              <AlertTriangle size={11} aria-hidden="true" />
+            ) : (
+              <ArrowRight size={11} aria-hidden="true" />
+            )}
+            {props.data?.label ?? "導線"}
+          </div>
+        </EdgeLabelRenderer>
+      )}
     </>
   );
 }
@@ -387,6 +520,8 @@ const EMPTY_POSITION_OVERRIDES: NodePositionOverrides = {};
 export function SynergyMapCanvas({
   edges,
   editable,
+  flowAnimationSuppressed = false,
+  flowAnimationUserEnabled = true,
   impactStats,
   nodes,
   onConnectNodes,
@@ -398,6 +533,13 @@ export function SynergyMapCanvas({
 }: SynergyMapCanvasProps) {
   const resolvedImpactStats = impactStats ?? EMPTY_IMPACT_STATS;
   const resolvedPositionOverrides = positionOverrides ?? EMPTY_POSITION_OVERRIDES;
+  const prefersReducedMotion = usePrefersReducedMotion();
+  const globalFlowAnimationEnabled = isGlobalFlowAnimationEnabled({
+    editable,
+    prefersReducedMotion,
+    userEnabled: flowAnimationUserEnabled,
+    captureSuppressed: flowAnimationSuppressed,
+  });
   const handleNodeLayoutChange = useCallback(
     (layout: MapNodeLayout) => onPositionsChange([layout]),
     [onPositionsChange],
@@ -433,11 +575,29 @@ export function SynergyMapCanvas({
     ],
   );
   const initialEdges = useMemo(
-    () => toFlowEdges(edges, viewMode, handleSelectEdge),
-    [edges, handleSelectEdge, viewMode],
+    () => toFlowEdges(edges, viewMode, handleSelectEdge, globalFlowAnimationEnabled),
+    [edges, globalFlowAnimationEnabled, handleSelectEdge, viewMode],
   );
   const [flowNodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [flowEdges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+  const [viewportZoom, setViewportZoom] = useState(1);
+  const selectedEdgeId = selected?.kind === "edge" ? selected.id : null;
+  const labelPlacements = useEdgeLabelLayout(flowNodes, flowEdges, {
+    zoom: viewportZoom,
+    selectedEdgeId,
+  });
+  const displayEdges = useMemo((): FlowEdge[] => {
+    return flowEdges.map((edge) => {
+      const data = edge.data as SynergyEdgeData;
+      return {
+        ...edge,
+        data: {
+          ...data,
+          labelPlacement: labelPlacements[edge.id] ?? null,
+        },
+      };
+    });
+  }, [flowEdges, labelPlacements]);
 
   useEffect(() => {
     setNodes(initialNodes);
@@ -446,6 +606,28 @@ export function SynergyMapCanvas({
   useEffect(() => {
     setEdges(initialEdges);
   }, [initialEdges, setEdges]);
+
+  const zoomDebounceRef = useRef<number | null>(null);
+  const handleViewportMove = useCallback(
+    (_: unknown, viewport: { zoom: number }) => {
+      if (zoomDebounceRef.current !== null) {
+        window.clearTimeout(zoomDebounceRef.current);
+      }
+      zoomDebounceRef.current = window.setTimeout(() => {
+        setViewportZoom(viewport.zoom);
+        zoomDebounceRef.current = null;
+      }, 120);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    return () => {
+      if (zoomDebounceRef.current !== null) {
+        window.clearTimeout(zoomDebounceRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!selected) {
@@ -469,9 +651,12 @@ export function SynergyMapCanvas({
   }, [selected, setEdges, setNodes]);
 
   return (
-    <ReactFlow
+    <SelectedEdgeContext.Provider
+      value={selected?.kind === "edge" ? selected.id : null}
+    >
+      <ReactFlow
       className={`map-canvas ${editable ? "map-canvas-editable" : "map-canvas-readonly"}`}
-      edges={flowEdges}
+      edges={displayEdges}
       edgeTypes={edgeTypes}
       fitView={!editable}
       fitViewOptions={{ padding: 0.2 }}
@@ -482,6 +667,9 @@ export function SynergyMapCanvas({
       nodesConnectable={editable}
       nodesDraggable={editable}
       nodeDragThreshold={0}
+      onInit={(instance) => setViewportZoom(instance.getZoom())}
+      onMove={handleViewportMove}
+      onMoveEnd={(_, viewport) => setViewportZoom(viewport.zoom)}
       onConnect={handleConnect}
       onEdgeClick={(_, edge) => onSelect({ kind: "edge", id: edge.id })}
       onEdgesChange={onEdgesChange}
@@ -521,5 +709,6 @@ export function SynergyMapCanvas({
         zoomable
       />
     </ReactFlow>
+    </SelectedEdgeContext.Provider>
   );
 }

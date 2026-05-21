@@ -32,6 +32,7 @@ import {
   TriangleAlert,
   TrendingUp,
   Upload,
+  Waves,
   X,
 } from "lucide-react";
 import type * as React from "react";
@@ -702,6 +703,7 @@ function App() {
   const [isTrayOpen, setIsTrayOpen] = useState(false);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isMapEditMode, setIsMapEditMode] = useState(false);
+  const [flowAnimationUserEnabled, setFlowAnimationUserEnabled] = useState(true);
   const [layoutSaveStatus, setLayoutSaveStatus] = useState<
     "idle" | "saving" | "saved" | "error"
   >("idle");
@@ -886,6 +888,7 @@ function App() {
     resetProjectScopedSelection();
     if (!isTauriRuntime && projectId === demoProject.id) {
       setWorkspace(demoWorkspace);
+      setFlowAnimationUserEnabled(true);
     }
     setView(nextView);
   }
@@ -1634,6 +1637,7 @@ function App() {
               deviceCodeResult={deviceCodeResult}
               drawerOpen={isDrawerOpen}
               editMode={isMapEditMode}
+              flowAnimationUserEnabled={flowAnimationUserEnabled}
               generationBusy={isBusy}
               layoutSaveStatus={visibleLayoutSaveStatus}
               latestAiRun={latestAiRun}
@@ -1645,6 +1649,7 @@ function App() {
               onCreateOnboardingMap={handleCreateOnboardingMap}
               onDrawerOpenChange={setIsDrawerOpen}
               onEditModeChange={setIsMapEditMode}
+              onFlowAnimationUserEnabledChange={setFlowAnimationUserEnabled}
               onGenerateMap={handleRegenerateMap}
               onGenerateSuggestions={handleGenerateSuggestions}
               onOpenExtractReview={() => {
@@ -2130,6 +2135,7 @@ function MapWorkspace({
   deviceCodeResult,
   drawerOpen,
   editMode,
+  flowAnimationUserEnabled,
   generationBusy,
   layoutSaveStatus,
   latestAiRun,
@@ -2141,6 +2147,7 @@ function MapWorkspace({
   onCreateOnboardingMap,
   onDrawerOpenChange,
   onEditModeChange,
+  onFlowAnimationUserEnabledChange,
   onGenerateSuggestions,
   onGenerateMap,
   onOpenExtractReview,
@@ -2169,6 +2176,7 @@ function MapWorkspace({
   deviceCodeResult: DeviceCodeLoginResult | null;
   drawerOpen: boolean;
   editMode: boolean;
+  flowAnimationUserEnabled: boolean;
   generationBusy: boolean;
   layoutSaveStatus: "idle" | "saving" | "saved" | "error";
   latestAiRun: AiRunRow | null;
@@ -2180,6 +2188,7 @@ function MapWorkspace({
   onCreateOnboardingMap: (draft: OnboardingDraft) => void;
   onDrawerOpenChange: (open: boolean) => void;
   onEditModeChange: (enabled: boolean) => void;
+  onFlowAnimationUserEnabledChange: (enabled: boolean) => void;
   onGenerateSuggestions: () => void;
   onGenerateMap: () => void;
   onOpenExtractReview: () => void;
@@ -2264,6 +2273,20 @@ function MapWorkspace({
                 <PencilRuler size={14} aria-hidden="true" />
                 編集
               </button>
+              {!editMode ? (
+                <button
+                  aria-pressed={flowAnimationUserEnabled}
+                  className={flowAnimationUserEnabled ? "active" : ""}
+                  onClick={() =>
+                    onFlowAnimationUserEnabledChange(!flowAnimationUserEnabled)
+                  }
+                  title="導線の流れアニメーション"
+                  type="button"
+                >
+                  <Waves size={14} aria-hidden="true" />
+                  流れを表示
+                </button>
+              ) : null}
               <button onClick={onArrangeMap} title="見やすく整列" type="button">
                 <MapIcon size={14} aria-hidden="true" />
                 整える
@@ -2418,6 +2441,7 @@ function MapWorkspace({
           <SynergyMapCanvas
             editable={editMode}
             edges={workspace.edges}
+            flowAnimationUserEnabled={flowAnimationUserEnabled}
             impactStats={impactStats}
             nodes={workspace.nodes}
             onConnectNodes={onCreateMapEdge}
