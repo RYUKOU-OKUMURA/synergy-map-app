@@ -105,7 +105,8 @@ export function getNodeDimensions(node: LayoutFlowNode) {
   return { width, height };
 }
 
-export function estimateLabelBox(label: string, _hasWarningIcon: boolean) {
+export function estimateLabelBox(label: string, hasWarningIcon: boolean) {
+  void hasWarningIcon;
   const textWidth = Math.max(label.length, 2) * CHAR_WIDTH_EST;
   const width = Math.max(
     52,

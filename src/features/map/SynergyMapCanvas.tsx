@@ -29,6 +29,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -36,15 +37,19 @@ import {
   useContext,
 } from "react";
 
-import type { EdgeLabelPlacement } from "@/features/map/edgeLabelLayout";
+import type {
+  EdgeLabelPlacement,
+  LayoutFlowNode,
+} from "@/features/map/edgeLabelLayout";
 import { useEdgeLabelLayout } from "@/features/map/useEdgeLabelLayout";
+import {
+  FlowParticleRegistryProvider,
+  useFlowParticleRegistry,
+} from "@/features/map/flowParticleRegistry";
 import { MapLayoutCoordinator } from "@/features/map/MapLayoutCoordinator";
 import { mergeFlowEdges } from "@/features/map/mergeFlowEdges";
 import { mergeFlowNodes } from "@/features/map/mergeFlowNodes";
 import {
-  fadeParticleOpacity,
-  FLOW_SELECTED_OPACITY_BOOST,
-  FLOW_SELECTED_PARTICLE_SCALE,
   isGlobalFlowAnimationEnabled,
   resolveFlowAnimationConfig,
   type FlowAnimationParams,
@@ -190,6 +195,17 @@ function layoutFromFlowNode(node: FlowNode): MapNodeLayout {
     height:
       node.height ?? node.measured?.height ?? numericStyleValue(node.style?.height),
   };
+}
+
+function snapshotLayoutNodes(nodes: FlowNode[]): LayoutFlowNode[] {
+  return nodes.map((node) => ({
+    id: node.id,
+    position: { x: node.position.x, y: node.position.y },
+    width: node.width,
+    height: node.height,
+    measured: node.measured,
+    style: node.style,
+  }));
 }
 
 const levelLabels: Record<string, string> = {
@@ -381,52 +397,32 @@ function SynergyEdge(props: EdgeProps<FlowEdge>) {
   const selectedEdgeId = useContext(SelectedEdgeContext);
   const isSelected = selectedEdgeId === props.id;
   const isSelectedRef = useRef(isSelected);
-  isSelectedRef.current = isSelected;
-  const hideLabel = placement?.hidden === true && !props.selected && !isSelected;
-
   useEffect(() => {
-    if (!flowAnimation) return;
+    isSelectedRef.current = isSelected;
+  }, [isSelected]);
+  const hideLabel = placement?.hidden === true && !props.selected && !isSelected;
+  const particleRegistry = useFlowParticleRegistry();
 
-    const { particleCount, durationMs, staggerMs, fadeEnds, particleRadius } =
-      flowAnimation;
-    let frameId = 0;
-    const start = performance.now();
+  useLayoutEffect(() => {
+    if (!flowAnimation || !particleRegistry) return;
 
-    function tick(now: number) {
-      const path = pathRef.current;
-      if (!path) return;
+    const path = pathRef.current;
+    if (!path) return;
 
-      const length = path.getTotalLength();
-      if (length > 0) {
-        const selected = isSelectedRef.current;
-        const radius =
-          particleRadius * (selected ? FLOW_SELECTED_PARTICLE_SCALE : 1);
+    const circles = circleRefs.current.filter(
+      (circle): circle is SVGCircleElement => circle !== null,
+    );
+    if (circles.length === 0) return;
 
-        for (let index = 0; index < particleCount; index += 1) {
-          const circle = circleRefs.current[index];
-          if (!circle) continue;
+    particleRegistry.register(props.id, {
+      path,
+      circles,
+      animation: flowAnimation,
+      getSelected: () => isSelectedRef.current,
+    });
 
-          const progress =
-            (((now - start) + index * staggerMs) % durationMs) / durationMs;
-          const point = path.getPointAtLength(progress * length);
-          const baseOpacity = fadeEnds ? fadeParticleOpacity(progress) : 1;
-          const opacity = Math.min(
-            1,
-            baseOpacity * (selected ? FLOW_SELECTED_OPACITY_BOOST : 1),
-          );
-          circle.setAttribute("cx", String(point.x));
-          circle.setAttribute("cy", String(point.y));
-          circle.setAttribute("r", String(radius));
-          circle.setAttribute("opacity", String(opacity));
-        }
-      }
-
-      frameId = requestAnimationFrame(tick);
-    }
-
-    frameId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frameId);
-  }, [edgePath, flowAnimation]);
+    return () => particleRegistry.unregister(props.id);
+  }, [edgePath, flowAnimation, particleRegistry, props.id]);
 
   return (
     <>
@@ -586,6 +582,14 @@ export function SynergyMapCanvas({
   const [flowNodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [flowEdges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
   const [viewportZoom, setViewportZoom] = useState(1);
+  const [isNodeDragging, setIsNodeDragging] = useState(false);
+  const [frozenLayoutNodes, setFrozenLayoutNodes] = useState<LayoutFlowNode[] | null>(
+    null,
+  );
+  const flowNodesRef = useRef(flowNodes);
+  useEffect(() => {
+    flowNodesRef.current = flowNodes;
+  }, [flowNodes]);
   const lastDragAtRef = useRef(0);
   const lastDraggedNodeIdsRef = useRef<Set<string>>(new Set());
   const positionSaveTimerRef = useRef<number | null>(null);
@@ -612,10 +616,14 @@ export function SynergyMapCanvas({
     [initialNodes],
   );
   const selectedEdgeId = selected?.kind === "edge" ? selected.id : null;
-  const labelPlacements = useEdgeLabelLayout(flowNodes, flowEdges, {
+  const layoutNodes =
+    isNodeDragging && frozenLayoutNodes ? frozenLayoutNodes : flowNodes;
+  const labelPlacements = useEdgeLabelLayout(layoutNodes, flowEdges, {
     zoom: viewportZoom,
     selectedEdgeId,
   });
+  const particleAnimationEnabled =
+    globalFlowAnimationEnabled && !isNodeDragging;
   const displayEdges = useMemo((): FlowEdge[] => {
     return flowEdges.map((edge) => {
       const data = edge.data as SynergyEdgeData;
@@ -731,11 +739,28 @@ export function SynergyMapCanvas({
     );
   }, [selected, setEdges, setNodes]);
 
+  const handleNodeDragStart = useCallback(() => {
+    setFrozenLayoutNodes(snapshotLayoutNodes(flowNodesRef.current));
+    setIsNodeDragging(true);
+  }, []);
+
+  const handleNodeDragStop = useCallback(
+    (_: unknown, node: FlowNode) => {
+      lastDragAtRef.current = Date.now();
+      lastDraggedNodeIdsRef.current = new Set([node.id]);
+      schedulePositionSave(layoutFromFlowNode(node));
+      setIsNodeDragging(false);
+      setFrozenLayoutNodes(null);
+    },
+    [schedulePositionSave],
+  );
+
   return (
-    <SelectedEdgeContext.Provider
-      value={selected?.kind === "edge" ? selected.id : null}
-    >
-      <ReactFlow
+    <FlowParticleRegistryProvider animationEnabled={particleAnimationEnabled}>
+      <SelectedEdgeContext.Provider
+        value={selected?.kind === "edge" ? selected.id : null}
+      >
+        <ReactFlow
       className={`map-canvas ${editable ? "map-canvas-editable" : "map-canvas-readonly"}`}
       edges={displayEdges}
       edgeTypes={edgeTypes}
@@ -753,11 +778,8 @@ export function SynergyMapCanvas({
       onEdgeClick={(_, edge) => onSelect({ kind: "edge", id: edge.id })}
       onEdgesChange={onEdgesChange}
       onNodeClick={(_, node) => onSelect({ kind: "node", id: node.id })}
-      onNodeDragStop={(_, node) => {
-        lastDragAtRef.current = Date.now();
-        lastDraggedNodeIdsRef.current = new Set([node.id]);
-        schedulePositionSave(layoutFromFlowNode(node));
-      }}
+      onNodeDragStart={handleNodeDragStart}
+      onNodeDragStop={handleNodeDragStop}
       onNodesChange={onNodesChange}
       onPaneClick={() => onSelect(null)}
       onSelectionChange={({ edges: selectedEdges, nodes: selectedNodes }) => {
@@ -792,7 +814,8 @@ export function SynergyMapCanvas({
         position="bottom-right"
         zoomable
       />
-    </ReactFlow>
-    </SelectedEdgeContext.Provider>
+        </ReactFlow>
+      </SelectedEdgeContext.Provider>
+    </FlowParticleRegistryProvider>
   );
 }

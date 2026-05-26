@@ -151,23 +151,26 @@ UI 方針は [ui-design-mvp-1.md](./ui-design-mvp-1.md) の `prefers-reduced-mot
 
 ## 技術実装方針
 
-### 採用アプローチ（第一候補）
+### 採用アプローチ（現行）
 
-**React Flow カスタムエッジ内で SVG 粒子 + `requestAnimationFrame`（React state 外）**
+**`SynergyEdge` 内の SVG 粒子 + 共有 1 本の `requestAnimationFrame`（React state 外）**
+
+- 各エッジは計測用 `<path>` と `<circle>` を描画し、`flowParticleRegistry` に登録する。
+- `FlowParticleRegistryProvider`（`src/features/map/flowParticleRegistry.tsx`）が **単一 RAF** で全登録エッジの粒子を更新する（`runFlowParticleFrame` in `flowParticleLoop.ts`）。
+- **ノードドラッグ中**は粒子ループを停止し、エッジラベル衝突レイアウト（`computeEdgeLabelLayout`）もドラッグ開始時点のノード座標で凍結する（`SynergyMapCanvas` の `onNodeDragStart` / `layoutNodes` 切替）。ドラッグ終了時に 1 回だけ再計算する。
 
 理由:
 
-- 既存 `SynergyEdge` の延長で実装できる。
-- 導線数は通常 15〜40 本程度。粒子総数 50〜120 個で十分軽量。
-- Canvas / Three.js / deck.gl は不要。
+- エッジ別 RAF は導線数に比例してメインスレッド負荷が増えるため、共有ループに集約した。
+- ドラッグ中の `flowNodes` 更新にラベルレイアウトが追従すると操作が重くなるため、凍結で回避する。
 
 ### 実装の流れ
 
-1. `SynergyEdge` 内で `<path ref>` を取得し、`getTotalLength()` / `getPointAtLength(t)` で座標を計算。
-2. 粒子ごとに `(elapsed + delay) % duration` で進捗率 0〜1 を求め、`<circle>` の `cx` / `cy` を更新。
-3. アニメーションループは `useRef` + `requestAnimationFrame`。**毎フレーム `setState` しない。**
-4. 粒子 DOM は `<svg>` 内（React Flow の edge レイヤー）に配置。
-5. コンポーネント unmount 時に `cancelAnimationFrame` する。
+1. `SynergyEdge` 内で `<path ref>` と `<circle>` を配置し、`useLayoutEffect` でレジストリに登録。
+2. 共有ループで `getTotalLength()` / `getPointAtLength(t)` により各粒子の `cx` / `cy` / `r` / `opacity` を更新。
+3. 粒子ごとに `(elapsed + delay) % duration` で進捗率 0〜1 を求める（`flowAnimationConfig` のフェード・選択強調を再利用）。
+4. **毎フレーム `setState` しない。**
+5. `animationEnabled === false`（構造編集・reduced-motion・ドラッグ中・キャプチャ抑制）のとき RAF を止める。
 
 ### 代替アプローチ
 
@@ -179,14 +182,15 @@ UI 方針は [ui-design-mvp-1.md](./ui-design-mvp-1.md) の `prefers-reduced-mot
 
 第一候補で問題が出た場合のみ Canvas オーバーレイを検討する。
 
-### 触るファイル（想定）
+### 触るファイル（現行）
 
 | ファイル | 変更内容 |
 | --- | --- |
-| `src/features/map/SynergyMapCanvas.tsx` | `SynergyEdge` に粒子レイヤー追加、`flowAnimationEnabled` prop |
+| `src/features/map/SynergyMapCanvas.tsx` | `SynergyEdge`、ドラッグ中ラベル凍結、`FlowParticleRegistryProvider` |
+| `src/features/map/flowParticleLoop.ts` | レジストリとフレーム更新ロジック |
+| `src/features/map/flowParticleRegistry.tsx` | Context + 共有 RAF |
 | `src/App.css` | 粒子・軌跡用スタイル、reduced-motion |
-| `src/App.tsx` | プレゼンモード切替 UI（任意） |
-| `src/lib/mvp1Types.ts` | 必要なら表示設定型を追加 |
+| `src/App.tsx` | 「流れを表示」トグル |
 
 DB スキーマ変更は**不要**。既存 `MapEdgeRow` の `strength` / `edgeType` / `flowType` で足りる。
 
@@ -202,6 +206,8 @@ DB スキーマ変更は**不要**。既存 `MapEdgeRow` の `strength` / `edgeT
 ### 重くなる NG パターン
 
 - 毎フレーム React state 更新による全体 re-render
+- **エッジごとに独立した RAF ループ**（共有 1 本に集約すること）
+- ノードドラッグ中に `computeEdgeLabelLayout` を毎フレーム実行すること
 - 全導線に粒子 10 個以上
 - weak / 仮説導線までアニメーション
 - 編集モード中も常時アニメーション
