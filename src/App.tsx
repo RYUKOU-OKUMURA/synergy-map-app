@@ -2393,20 +2393,20 @@ function MapWorkspace({
               <button
                 className={!editMode ? "active" : ""}
                 onClick={() => onEditModeChange(false)}
-                title="閲覧"
+                title="整理"
                 type="button"
               >
                 <MousePointer2 size={14} aria-hidden="true" />
-                閲覧
+                整理
               </button>
               <button
                 className={editMode ? "active" : ""}
                 onClick={() => onEditModeChange(true)}
-                title="編集"
+                title="構造編集"
                 type="button"
               >
                 <PencilRuler size={14} aria-hidden="true" />
-                編集
+                構造編集
               </button>
               {!editMode ? (
                 <button
@@ -2465,9 +2465,13 @@ function MapWorkspace({
               </span>
               {editMode ? (
                 <span className="map-edit-hint">
-                  ノードをドラッグ。選択後、角で大きさを調整。
+                  ノードをドラッグ。選択後、角で大きさを調整。ハンドルから導線を追加。
                 </span>
-              ) : null}
+              ) : (
+                <span className="map-edit-hint">
+                  ノードをドラッグして配置を整えられます。
+                </span>
+              )}
             </div>
 
             {reflectionSummary.sourceCount > 0 ? (

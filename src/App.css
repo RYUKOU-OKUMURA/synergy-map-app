@@ -2665,6 +2665,14 @@ button:disabled {
   background: var(--primary);
 }
 
+.map-node-readonly.map-node-arrangeable {
+  cursor: grab;
+}
+
+.map-node-readonly.map-node-arrangeable:active {
+  cursor: grabbing;
+}
+
 .map-node-readonly .map-handle {
   opacity: 0.35;
 }

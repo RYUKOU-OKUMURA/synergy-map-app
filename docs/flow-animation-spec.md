@@ -140,8 +140,8 @@ type FlowAnimationConfig = {
 
 | 条件 | アニメーション |
 | --- | --- |
-| プレゼン / 閲覧モード（`editable === false`） | ON（設定で切替可） |
-| 編集モード（`editable === true`） | OFF |
+| 整理モード（`editable === false`） | ON（設定で切替可） |
+| 構造編集モード（`editable === true`） | OFF |
 | PDF / 画像エクスポート時 | OFF（静止キャプチャ） |
 | `prefers-reduced-motion: reduce` | OFF |
 | weak / data_reference 導線 | OFF（粒子なし） |
@@ -219,7 +219,7 @@ DB スキーマ変更は**不要**。既存 `MapEdgeRow` の `strength` / `edgeT
 ### Phase A: プロトタイプ
 
 - [x] strong 導線のみ粒子 1 個を流す
-- [x] 閲覧モード（`editable === false`）のみ有効
+- [x] 整理モード（`editable === false`）のみ有効
 - [x] `prefers-reduced-motion` 対応
 
 ### Phase B: 本実装
@@ -238,7 +238,7 @@ DB スキーマ変更は**不要**。既存 `MapEdgeRow` の `strength` / `edgeT
 
 ## 受け入れ条件
 
-- [ ] 閲覧モードで strong 導線に粒子が source → target 方向へ流れる
+- [ ] 整理モードで strong 導線に粒子が source → target 方向へ流れる
 - [ ] weak / data_reference 導線は従来どおり静止表示
 - [ ] 編集モードではアニメーションが止まり、ドラッグ・接続操作が快適
 - [ ] ノード移動・ズーム・パン後も粒子が path に追従する

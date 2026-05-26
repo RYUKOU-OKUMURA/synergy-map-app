@@ -38,6 +38,9 @@ import {
 
 import type { EdgeLabelPlacement } from "@/features/map/edgeLabelLayout";
 import { useEdgeLabelLayout } from "@/features/map/useEdgeLabelLayout";
+import { MapLayoutCoordinator } from "@/features/map/MapLayoutCoordinator";
+import { mergeFlowEdges } from "@/features/map/mergeFlowEdges";
+import { mergeFlowNodes } from "@/features/map/mergeFlowNodes";
 import {
   fadeParticleOpacity,
   FLOW_SELECTED_OPACITY_BOOST,
@@ -279,7 +282,7 @@ function SynergyNode({ data, id, selected }: NodeProps<FlowNode>) {
         selected ? "map-node-selected" : ""
       } map-node-impact-${data.impactScore} map-node-view-${data.viewMode} ${
         data.businessImpact ? "map-node-has-business-impact" : ""
-      } ${data.editable ? "map-node-editable" : "map-node-readonly"} ${
+      } ${data.editable ? "map-node-editable" : "map-node-readonly map-node-arrangeable"} ${
         selected && data.editable ? "map-node-resizable" : ""
       } ${data.editable ? "map-node-drag-handle" : ""}`}
     >
@@ -516,6 +519,8 @@ const edgeTypes = {
 
 const EMPTY_IMPACT_STATS: NodeImpactStats = {};
 const EMPTY_POSITION_OVERRIDES: NodePositionOverrides = {};
+const POSITION_SAVE_DEBOUNCE_MS = 400;
+const DRAG_POSITION_GUARD_MS = 1000;
 
 export function SynergyMapCanvas({
   edges,
@@ -581,6 +586,31 @@ export function SynergyMapCanvas({
   const [flowNodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [flowEdges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
   const [viewportZoom, setViewportZoom] = useState(1);
+  const lastDragAtRef = useRef(0);
+  const lastDraggedNodeIdsRef = useRef<Set<string>>(new Set());
+  const positionSaveTimerRef = useRef<number | null>(null);
+  const pendingLayoutsRef = useRef<Map<string, MapNodeLayout>>(new Map());
+  const layoutRevision = useMemo(
+    () =>
+      [
+        editable ? "edit" : "arrange",
+        viewMode,
+        initialNodes.length,
+        initialEdges.length,
+        globalFlowAnimationEnabled ? "flow" : "static",
+      ].join(":"),
+    [
+      editable,
+      globalFlowAnimationEnabled,
+      initialEdges.length,
+      initialNodes.length,
+      viewMode,
+    ],
+  );
+  const coordinatorNodeIds = useMemo(
+    () => initialNodes.map((node) => node.id),
+    [initialNodes],
+  );
   const selectedEdgeId = selected?.kind === "edge" ? selected.id : null;
   const labelPlacements = useEdgeLabelLayout(flowNodes, flowEdges, {
     zoom: viewportZoom,
@@ -599,12 +629,63 @@ export function SynergyMapCanvas({
     });
   }, [flowEdges, labelPlacements]);
 
+  const flushPositionSave = useCallback(() => {
+    const layouts = [...pendingLayoutsRef.current.values()];
+    pendingLayoutsRef.current.clear();
+    if (layouts.length > 0) {
+      onPositionsChange(layouts);
+    }
+  }, [onPositionsChange]);
+
+  const schedulePositionSave = useCallback(
+    (layout: MapNodeLayout) => {
+      pendingLayoutsRef.current.set(layout.nodeId, layout);
+      if (positionSaveTimerRef.current !== null) {
+        window.clearTimeout(positionSaveTimerRef.current);
+      }
+      positionSaveTimerRef.current = window.setTimeout(() => {
+        positionSaveTimerRef.current = null;
+        flushPositionSave();
+      }, POSITION_SAVE_DEBOUNCE_MS);
+    },
+    [flushPositionSave],
+  );
+
   useEffect(() => {
-    setNodes(initialNodes);
+    return () => {
+      if (positionSaveTimerRef.current !== null) {
+        window.clearTimeout(positionSaveTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const withinDragGuard = Date.now() - lastDragAtRef.current < DRAG_POSITION_GUARD_MS;
+    const preservePositionNodeIds = withinDragGuard
+      ? lastDraggedNodeIdsRef.current
+      : undefined;
+    setNodes((current) =>
+      mergeFlowNodes(current, initialNodes, {
+        preservePositionNodeIds,
+      }) as FlowNode[],
+    );
   }, [initialNodes, setNodes]);
 
   useEffect(() => {
-    setEdges(initialEdges);
+    setEdges((current) => {
+      if (current.length === 0) return initialEdges;
+
+      const incomingIds = new Set(initialEdges.map((edge) => edge.id));
+      const currentIds = new Set(current.map((edge) => edge.id));
+      const sameEdgeSet =
+        incomingIds.size === currentIds.size &&
+        [...incomingIds].every((id) => currentIds.has(id));
+
+      if (sameEdgeSet) {
+        return mergeFlowEdges(current, initialEdges) as FlowEdge[];
+      }
+      return initialEdges;
+    });
   }, [initialEdges, setEdges]);
 
   const zoomDebounceRef = useRef<number | null>(null);
@@ -658,15 +739,13 @@ export function SynergyMapCanvas({
       className={`map-canvas ${editable ? "map-canvas-editable" : "map-canvas-readonly"}`}
       edges={displayEdges}
       edgeTypes={edgeTypes}
-      fitView={!editable}
-      fitViewOptions={{ padding: 0.2 }}
       maxZoom={1.45}
       minZoom={0.35}
       nodeTypes={nodeTypes}
       nodes={flowNodes}
       nodesConnectable={editable}
-      nodesDraggable={editable}
-      nodeDragThreshold={0}
+      nodesDraggable
+      nodeDragThreshold={4}
       onInit={(instance) => setViewportZoom(instance.getZoom())}
       onMove={handleViewportMove}
       onMoveEnd={(_, viewport) => setViewportZoom(viewport.zoom)}
@@ -675,9 +754,9 @@ export function SynergyMapCanvas({
       onEdgesChange={onEdgesChange}
       onNodeClick={(_, node) => onSelect({ kind: "node", id: node.id })}
       onNodeDragStop={(_, node) => {
-        if (editable) {
-          onPositionsChange([layoutFromFlowNode(node)]);
-        }
+        lastDragAtRef.current = Date.now();
+        lastDraggedNodeIdsRef.current = new Set([node.id]);
+        schedulePositionSave(layoutFromFlowNode(node));
       }}
       onNodesChange={onNodesChange}
       onPaneClick={() => onSelect(null)}
@@ -694,6 +773,11 @@ export function SynergyMapCanvas({
       proOptions={{ hideAttribution: true }}
       selectNodesOnDrag={false}
     >
+      <MapLayoutCoordinator
+        arrangeMode={!editable}
+        layoutRevision={layoutRevision}
+        nodeIds={coordinatorNodeIds}
+      />
       <Controls className="map-controls" position="bottom-left" />
       <MiniMap
         className="map-minimap"

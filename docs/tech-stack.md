@@ -96,7 +96,7 @@ MVP-1で使うReact Flow機能:
 - ノード位置保存
 
 MVP-1では顧客導線ビューのみを対象にし、高度な自由作図ツールにはしない。ノード名、分類、線の状態、優先度などの軽い編集をUIで行い、構造変更はAI提案とユーザー確認で進める。
-Betaのマップ編集モードではReact Flowのドラッグ、NodeResizer、onConnectを使い、明示的に編集モードへ入ったときだけノード移動、ノードサイズ変更、導線追加を許可する。導線削除は物理削除ではなく`adoption_status = rejected`による非表示を基本とし、履歴・AI根拠との整合を保つ。
+Betaのマップは **整理モード** と **構造編集モード** に分ける。`editable` は構造編集（NodeResizer、onConnect、導線追加）のみを制御し、ノード移動は整理モードでも常時許可する。React Flow では `nodesDraggable` を常時 true とし、fitView は `fitView` prop ではなく `MapLayoutCoordinator` 内で `useNodesInitialized` → `useUpdateNodeInternals` → imperative `fitView`（整理モード初回のみ）の順で実行する。workspace 同期は `mergeFlowNodes` / `mergeFlowEdges` で RF 内部の `measured` を落とさない。導線削除は物理削除ではなく`adoption_status = rejected`による非表示を基本とし、履歴・AI根拠との整合を保つ。
 
 ## 4. デスクトップ / Rust Backend
 

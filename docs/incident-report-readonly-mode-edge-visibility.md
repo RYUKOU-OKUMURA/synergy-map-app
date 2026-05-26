@@ -1,7 +1,7 @@
 # インシデントレポート: 整理モード（観覧モード）導線非表示
 
 作成日: 2026-05-21  
-ステータス: **未解決（修正試行はすべて効果なし）**  
+ステータス: **解決済み（2026-05-26）** — `MapLayoutCoordinator` + `mergeFlowNodes` / `mergeFlowEdges` による再実装  
 関連セッション: [整理モード導線デバッグ](b4987a36-242f-40ca-8f78-3af36f773368)
 
 ---
@@ -199,39 +199,24 @@
 
 ---
 
-## 7. 現在のコード状態
+## 7. 解決後のコード状態（2026-05-26）
 
-**2026-05-21 時点、作業ツリーは機能実装前の状態に戻っている**（git clean）。
-
-- ツールバー: 「閲覧 / 編集」
-- `nodesDraggable={editable}`
-- `onNodeDragStop` は editable 時のみ保存
-- `mergeFlowNodes` / `CanvasLayoutSync` なし
-- `fitView={!editable}` 維持
-
-整理モード常時ドラッグ機能は **未マージ・ロールバック済み** とみなす。
+- ツールバー: 「整理 / 構造編集」
+- `nodesDraggable` 常時 true（構造編集は `nodesConnectable` / `NodeResizer` / Handle のみ `editable` 依存）
+- `onNodeDragStop` → debounce 保存（400ms）+ ドラッグ直後 1s の position ガード
+- [`MapLayoutCoordinator.tsx`](../src/features/map/MapLayoutCoordinator.tsx): `useNodesInitialized` → `useUpdateNodeInternals` → 整理モード初回のみ imperative `fitView`
+- [`mergeFlowNodes.ts`](../src/features/map/mergeFlowNodes.ts) / [`mergeFlowEdges.ts`](../src/features/map/mergeFlowEdges.ts): workspace 同期時に RF 内部 state を保持
+- `fitView` prop は使用しない
 
 ---
 
-## 8. 次に試すべき方向（未着手）
+## 8. 採用した解決手順（再実装時のチェックリスト）
 
-優先度順:
-
-1. **整理モード常時ドラッグと fitView / edge 再計算を分離して設計し直す**
-   - ドラッグ保存を debounce または React Flow 内部 state のみで保持し、workspace 同期の頻度を下げる
-   - または保存後に `updateNodeInternals(nodeId)` で全ノードの handle 再計算を明示トリガ
-
-2. **`useNodesInitialized` + `useUpdateNodeInternals` の公式パターンで edge refresh**
-   - `@xyflow/react` v12.10.2 の hooks を ReactFlow 子コンポーネント内で使用
-   - fitView は `nodesInitialized === true` の後に 1 回だけ（prop 不使用）
-
-3. **初回表示専用の最小再現テスト**
-   - 整理モード + nodesDraggable=true + fitView=false の組み合わせを Storybook / 単体で切り出し
-   - sourceX/Y, targetX/Y, pathLength をモード別に比較
-
-4. **editable 切替時の `initialEdges` 再生成の影響調査**
-   - `globalFlowAnimationEnabled` 変化で edge オブジェクトが全置換される
-   - 線の表示自体（粒子なし）でも整理モードだけ消えるかを切り分け
+1. **インフラ先行:** `MapLayoutCoordinator` で path 計算パイプラインを固めてから常時ドラッグを有効化
+2. **fitView:** prop 廃止。`nodesInitialized` 後に 1 回だけ。モード切替では fitView しない
+3. **保存ループ:** `mergeFlowNodes` + debounce + ドラッグガードで `measured` 消失を防ぐ
+4. **モード切替:** `mergeFlowEdges` で `flowAnimation` のみ patch（edge 全 remount を避ける）
+5. **禁止:** handle の `display: none`、`setEdges(map)` のみでの path 再計算、fitView パッチの積み上げ
 
 ---
 
@@ -240,6 +225,9 @@
 | ファイル | 役割 |
 |----------|------|
 | `src/features/map/SynergyMapCanvas.tsx` | Canvas 本体、React Flow 設定 |
+| `src/features/map/MapLayoutCoordinator.tsx` | 計測後の internals 更新と fitView |
+| `src/features/map/mergeFlowNodes.ts` | ノード同期マージ |
+| `src/features/map/mergeFlowEdges.ts` | エッジ同期マージ（粒子 patch） |
 | `src/features/map/flowAnimationConfig.ts` | 整理モード限定の粒子 ON/OFF |
 | `src/App.tsx` | 編集モード切替、位置保存 |
 | `src/App.css` | 整理モード用スタイル |
@@ -258,7 +246,8 @@
 | 5 | fitView 初回のみ + edge refresh | 効果なし |
 | 6 | mergeFlowNodes で保存ループ修正 | 初回表示は未解決 |
 | 7 | CanvasLayoutSync（useNodesInitialized） | measured 済みでも path 0 |
-| 8 | ユーザー報告「やっぱり表示されてない」 | **未解決のままロールバック** |
+| 8 | ユーザー報告「やっぱり表示されてない」 | ロールバック |
+| 9 | MapLayoutCoordinator + mergeFlowNodes/Edges | **解決（2026-05-26）** |
 
 ---
 
