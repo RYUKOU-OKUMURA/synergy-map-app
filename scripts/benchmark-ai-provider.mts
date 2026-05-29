@@ -12,7 +12,7 @@ import path from "node:path";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-const fixturePrompt = `MVP-1の顧客導線ビューとして、次の抽出カードから1枚のシナジーマップを生成してください。
+const fixturePrompt = `MVP-1の顧客導線ビューとして、次の抽出カードから1枚の売上マップを生成してください。
 nodesは2D座標で配置し、schemaVersionはmvp1.v1です。
 
 Extracted items:

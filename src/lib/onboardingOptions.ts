@@ -25,7 +25,7 @@ export const mapPurposeOptions: MapPurposeOption[] = [
   },
   {
     id: "multi_business_synergy",
-    label: "複数事業のシナジーを見たい",
+    label: "複数事業のつながりを見たい",
     description: "事業、商品、顧客層、チャネルの重なりを探します。",
   },
   {

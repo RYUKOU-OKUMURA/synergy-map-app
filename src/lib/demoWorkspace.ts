@@ -7,7 +7,7 @@ export const demoProject: Project = {
   name: "山田製作所 DX支援",
   clientName: "山田製作所",
   industry: "製造業",
-  description: "MVP-1デザイン確認用。導線フローアニメーションの見本を含むデモ案件",
+  description: "MVP-1デザイン確認用。導線フローアニメーションの見本を含むデモマップ",
   memo: null,
   createdAt: now,
   updatedAt: now,

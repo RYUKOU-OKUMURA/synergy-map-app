@@ -181,7 +181,7 @@ function emptyDeviceCodeResult(): DeviceCodeLoginResult {
 const globalNavItems: Array<{ id: ViewId; label: string; icon: typeof FolderKanban }> =
   [
     { id: "home", label: "ホーム", icon: Home },
-    { id: "projects", label: "案件一覧", icon: FolderKanban },
+    { id: "projects", label: "マップ一覧", icon: FolderKanban },
   ];
 
 const projectNavItems: Array<{ id: ViewId; label: string; icon: typeof FolderKanban }> =
@@ -943,7 +943,7 @@ function App() {
         setSelectedProjectId(projectId);
         setSelectedSuggestionId(null);
         setApprovedChunkSignature(null);
-        setNotice("案件情報を保存しました。");
+        setNotice("マップ情報を保存しました。");
       },
     );
   }
@@ -951,7 +951,7 @@ function App() {
   async function handleDeleteProject(projectId: string) {
     if (
       !window.confirm(
-        "この案件、DBレコード、元資料、source chunks、AI実行ファイル、exportsを削除します。続行しますか？",
+        "このマップ、DBレコード、元情報ソース、source chunks、AI実行ファイル、exportsを削除します。続行しますか？",
       )
     ) {
       return;
@@ -966,7 +966,7 @@ function App() {
         setProjects(nextProjects);
         handleClearProjectSelection("projects");
         setView("projects");
-        setNotice("案件と関連データを削除しました。");
+        setNotice("マップと関連データを削除しました。");
       },
     );
   }
@@ -1255,7 +1255,7 @@ function App() {
   async function handleCreateOnboardingMap(draft: OnboardingDraft) {
     const purposeLabel = mapPurposeLabel(draft.purposeId);
     if (!draft.companyName.trim() || !purposeLabel) {
-      setNotice("企業名 / 案件名と目的を入力してください。");
+      setNotice("事業名 / マップ名と目的を入力してください。");
       return;
     }
 
@@ -1461,7 +1461,7 @@ function App() {
         if (!result) return;
         setWorkspace(result.nextWorkspace);
         setApprovedChunkSignature(null);
-        setNotice(`${result.count}件の資料を投入しました。`);
+        setNotice(`${result.count}件の情報ソースを追加しました。`);
       },
     );
   }
@@ -1492,7 +1492,7 @@ function App() {
       return;
     }
     if (!draft.companyName.trim()) {
-      setNotice("ファイル追加前に企業名 / 案件名を入力してください。");
+      setNotice("ファイル追加前に事業名 / マップ名を入力してください。");
       return;
     }
 
@@ -1545,7 +1545,7 @@ function App() {
               aiRunId: null,
               commentType: "map_insight",
               title: "壁打ち: マップ全体",
-              body: "マップ全体について、資料要約とノード/導線の関係から確認するための下書きです。強い導線、詰まり、次に聞くことを確認してください。",
+              body: "マップ全体について、情報ソース要約とノード/導線の関係から確認するための下書きです。強い導線、詰まり、次に聞くことを確認してください。",
               confidenceStatus: "estimated",
               createdAt: now,
             },
@@ -1672,7 +1672,7 @@ function App() {
               if (importError) {
                 setError(importError);
               } else {
-                setNotice(`${droppedPaths.length}件の資料を投入しました。`);
+                setNotice(`${droppedPaths.length}件の情報ソースを追加しました。`);
               }
             },
           );
@@ -1959,15 +1959,15 @@ function AppSidebar({
       </button>
 
       <section className="project-switcher">
-        <span className="sidebar-section-label">現在の案件</span>
+        <span className="sidebar-section-label">現在のマップ</span>
         <div className="project-switcher-card">
-          <strong>{activeProject?.name ?? "案件が選択されていません"}</strong>
+          <strong>{activeProject?.name ?? "マップが選択されていません"}</strong>
           <small>
-            {activeProject?.clientName ?? "案件を選ぶか、新しく作成してください"}
+            {activeProject?.clientName ?? "マップを選ぶか、新しく作成してください"}
           </small>
           <button className="ghost-button" onClick={onOpenProjects} type="button">
             <FolderOpen size={14} aria-hidden="true" />
-            案件を切り替え
+            マップを切り替え
           </button>
         </div>
       </section>
@@ -1993,8 +1993,8 @@ function AppSidebar({
       </nav>
 
       {activeProject ? (
-        <nav className="sidebar-nav project-nav" aria-label="案件内メニュー">
-          <span className="sidebar-section-label">案件内メニュー</span>
+        <nav className="sidebar-nav project-nav" aria-label="マップ内メニュー">
+          <span className="sidebar-section-label">マップ内メニュー</span>
           {projectNavItems.map((item) => {
             const Icon = item.icon;
             return (
@@ -2014,7 +2014,7 @@ function AppSidebar({
         </nav>
       ) : (
         <div className="project-nav-disabled">
-          <span className="sidebar-section-label">案件を選択後に利用</span>
+          <span className="sidebar-section-label">マップを選択後に利用</span>
           <span>マップ、情報ソース、抽出カード、施策、出力、履歴</span>
         </div>
       )}
@@ -2057,19 +2057,19 @@ function WorkspaceTopBar({
   workspace: ProjectWorkspace;
 }) {
   const title = activeProject
-    ? `案件 / ${activeProject.name}`
+    ? `マップ / ${activeProject.name}`
     : view === "map"
       ? "新しいマップ"
       : view === "projects"
-        ? "案件一覧"
+        ? "マップ一覧"
         : view === "settings"
           ? "設定"
           : "ホーム";
   const meta = activeProject
-    ? (activeProject.clientName ?? "クライアント未設定")
+    ? (activeProject.clientName ?? "事業名未設定")
     : view === "map"
-      ? "企業名と目的を入力してマップ作成を開始"
-      : "案件を選ぶか、新しいマップを作成してください";
+      ? "事業名と目的を入力してマップ作成を開始"
+      : "マップを選ぶか、新しいマップを作成してください";
 
   return (
     <header className="top-bar">
@@ -2169,9 +2169,9 @@ function HomeView({
       <div className="home-start-panel">
         <div>
           <span className="eyebrow">ホーム</span>
-          <h1>案件を選ぶか、新しいマップを作成してください</h1>
+          <h1>マップを選ぶか、新しいマップを作成してください</h1>
           <p>
-            企業名、目的、情報ソースを入れると、AIが商品・集客・売上の流れを1枚のマップに整理します。
+            事業名、目的、情報ソースを入れると、AIが商品・集客・売上の流れを1枚のマップに整理します。
           </p>
           <div className="home-actions">
             <button className="primary-button" onClick={onStartNewMap} type="button">
@@ -2180,11 +2180,11 @@ function HomeView({
             </button>
             <button className="ghost-button" onClick={onOpenProjects} type="button">
               <FolderOpen size={16} aria-hidden="true" />
-              既存案件を開く
+              既存マップを開く
             </button>
           </div>
           <div className="home-checklist" aria-label="新規マップ作成に必要な情報">
-            <span>企業名</span>
+            <span>事業名</span>
             <span>目的</span>
             <span>情報ソース</span>
           </div>
@@ -2194,11 +2194,11 @@ function HomeView({
       <section className="recent-projects-panel">
         <div className="panel-heading-inline">
           <div>
-            <h2>最近の案件</h2>
-            <p>続きから開く案件を選んでください。</p>
+            <h2>最近のマップ</h2>
+            <p>続きから開くマップを選んでください。</p>
           </div>
           <button className="ghost-button" onClick={onOpenProjects} type="button">
-            案件一覧
+            マップ一覧
           </button>
         </div>
         <div className="recent-project-list">
@@ -2226,7 +2226,7 @@ function HomeView({
             </button>
           ))}
           {recentProjects.length === 0 ? (
-            <div className="empty-panel">まだ案件がありません。</div>
+            <div className="empty-panel">まだマップがありません。</div>
           ) : null}
         </div>
       </section>
@@ -2384,7 +2384,7 @@ function MapWorkspace({
               type="button"
             >
               <BarChart3 size={14} aria-hidden="true" />
-              事業インパクト
+              次の一手
             </button>
           </div>
 
@@ -2546,7 +2546,9 @@ function MapWorkspace({
               </button>
             ))}
             {workspace.extractedItems.length === 0 ? (
-              <div className="empty-panel">資料投入後にAI抽出を実行してください。</div>
+              <div className="empty-panel">
+                マップの材料を追加した後にAI抽出を実行してください。
+              </div>
             ) : null}
           </div>
         </aside>
@@ -2559,11 +2561,11 @@ function MapWorkspace({
               trayOpen ? "impact-panel-tab-open" : ""
             }`}
             aria-expanded={trayOpen}
-            aria-label={trayOpen ? "事業インパクトを閉じる" : "事業インパクトを開く"}
+            aria-label={trayOpen ? "次の一手を閉じる" : "次の一手を開く"}
             onClick={() => onTrayOpenChange(!trayOpen)}
             type="button"
           >
-            事業インパクト {workspace.suggestions.length}
+            次の一手 {workspace.suggestions.length}
           </button>
           <BusinessImpactPanel
             open={trayOpen}
@@ -2778,7 +2780,7 @@ function MapRebuildPanel({
           <MapIcon size={16} aria-hidden="true" />
           <span>マップ未生成</span>
         </div>
-        <h1>{activeProject?.name ?? "この案件"} のマップを生成できます</h1>
+        <h1>{activeProject?.name ?? "このマップ"} の売上マップを生成できます</h1>
         <p>
           抽出カードは保存済みですが、表示するマップがまだありません。カード内容から顧客導線マップを生成してください。
         </p>
@@ -2876,7 +2878,7 @@ function MapCreationFlow({
   const canGenerate = draft.companyName.trim().length > 0 && Boolean(purposeLabel);
   const targetSourceCount = sourceCount + 1;
   const sendScopeItems = [
-    `初回入力: ${draft.companyName.trim() || "企業名未入力"} / ${
+    `初回入力: ${draft.companyName.trim() || "事業名未入力"} / ${
       purposeLabel || "目的未選択"
     }`,
     draft.industry.trim() ? `業種: ${draft.industry.trim()}` : "",
@@ -2910,7 +2912,7 @@ function MapCreationFlow({
         <div className="creation-header">
           <div>
             <span className="eyebrow">新しいマップを作る</span>
-            <h1>必要情報を入れると、AIがシナジーマップを生成します</h1>
+            <h1>必要情報を入れると、AIが売上マップを作ります</h1>
             <p>
               目的、企業情報、マップの材料を入れてください。情報が少ない場合も仮説マップとして開始できます。
             </p>
@@ -2953,7 +2955,7 @@ function MapCreationFlow({
               <span>基本情報</span>
             </div>
             <FormGrid>
-              <Field label="企業名 / 案件名">
+              <Field label="事業名 / マップ名">
                 <input
                   onChange={(event) => updateDraft("companyName", event.target.value)}
                   placeholder="例: 山田製作所 DX支援"
@@ -3084,7 +3086,7 @@ function MapCreationFlow({
             <div className="hypothesis-warning">
               <TriangleAlert size={15} aria-hidden="true" />
               <span>
-                入力情報が少ないため推測を含みます。資料、URL、メモを追加すると精度が上がります。
+                入力情報が少ないため推測を含みます。ファイル、URL、メモを追加すると精度が上がります。
               </span>
             </div>
           ) : null}
@@ -3099,10 +3101,10 @@ function MapCreationFlow({
               ? "生成中"
               : hypothesisMode
                 ? "仮説マップを生成する"
-                : "シナジーマップを生成する"}
+                : "売上マップを生成する"}
           </button>
           {!canGenerate ? (
-            <small>企業名 / 案件名と目的を入力すると生成できます。</small>
+            <small>事業名 / マップ名と目的を入力すると生成できます。</small>
           ) : !sendApproved ? (
             <small>送信範囲を確認すると生成できます。</small>
           ) : (
@@ -3365,7 +3367,7 @@ function BusinessImpactPanel({
       aria-hidden={!open}
     >
       <div className="panel-heading">
-        <span>事業インパクト</span>
+        <span>次の一手</span>
         <small>{suggestions.length}施策</small>
       </div>
       <div className="impact-summary">
@@ -3468,7 +3470,7 @@ function BusinessImpactPanel({
         ))}
         {suggestions.length === 0 ? (
           <div className="empty-panel">
-            マップ生成後に事業インパクト評価を生成します。
+            マップ生成後に次に試す一手を生成します。
           </div>
         ) : null}
       </div>
@@ -3643,8 +3645,8 @@ function ProjectsView({
     <section className="page-panel">
       <div className="page-header">
         <div>
-          <h1>案件一覧</h1>
-          <p>新規案件を作成し、既存案件を再開します。</p>
+          <h1>マップ一覧</h1>
+          <p>新しいマップを作成し、既存マップを再開します。</p>
         </div>
         <button className="primary-button" onClick={onCreateProject} type="button">
           <Plus size={15} aria-hidden="true" />
@@ -3658,10 +3660,10 @@ function ProjectsView({
           onSubmit={submitProject}
         >
           <FormGrid>
-            <Field label="案件名">
+            <Field label="マップ名">
               <input defaultValue={activeProject.name} name="name" />
             </Field>
-            <Field label="クライアント名">
+            <Field label="事業名 / 屋号 / 会社名">
               <input defaultValue={activeProject.clientName ?? ""} name="clientName" />
             </Field>
           </FormGrid>
@@ -3682,7 +3684,7 @@ function ProjectsView({
           <div className="button-row">
             <button className="primary-button" type="submit">
               <Save size={15} aria-hidden="true" />
-              案件を保存
+              マップを保存
             </button>
             <button
               className="danger-button"
@@ -3690,7 +3692,7 @@ function ProjectsView({
               type="button"
             >
               <Trash2 size={15} aria-hidden="true" />
-              案件を削除
+              マップを削除
             </button>
           </div>
         </form>
@@ -4338,12 +4340,12 @@ function ExtractView({
             </label>
           ))}
           {workspace.sourceChunks.length === 0 ? (
-            <div className="empty-panel">先に資料を投入してください。</div>
+            <div className="empty-panel">先にマップの材料を追加してください。</div>
           ) : null}
         </div>
         {excludedChunks.length > 0 ? (
           <div className="excluded-chunks">
-            送信しない資料:{" "}
+            送信しない情報ソース:{" "}
             {excludedChunks
               .slice(0, 4)
               .map((chunk) => `${chunk.fileName} #${chunk.chunkIndex + 1}`)
@@ -4402,7 +4404,7 @@ function SuggestionsView({
     <section className="page-panel">
       <div className="page-header">
         <div>
-          <h1>事業インパクト施策</h1>
+          <h1>次の一手</h1>
           <p>売上・利益・費用・工数への効き方を根拠付きで確認します。</p>
         </div>
         <button className="primary-button" onClick={onGenerate} type="button">
@@ -4464,7 +4466,7 @@ function ExportView({
       <div className="page-header">
         <div>
           <h1>出力</h1>
-          <p>MarkdownとCSVを案件フォルダのexportsへ保存します。</p>
+          <p>MarkdownとCSVをマップ用フォルダのexportsへ保存します。</p>
         </div>
         <div className="button-row">
           <button
@@ -4579,7 +4581,7 @@ function InspectorPanel({
               aiRunId: null,
               commentType: "map_insight",
               title: "壁打ち: ローカルドラフト",
-              body: `${targetLabel}について、資料要約とマップ構造から確認するための下書きです。実際の商談では、重要度、担当、成果指標を確認してください。`,
+              body: `${targetLabel}について、情報ソース要約とマップ構造から確認するための下書きです。実際の状況では、重要度、担当、成果指標を確認してください。`,
               confidenceStatus: "estimated",
               createdAt: now,
             },
@@ -4722,7 +4724,7 @@ function InspectorPanel({
     <aside className="inspector">
       <div className="panel-heading">
         <span>
-          {item ? "抽出カード" : node ? "ノード" : edge ? "導線" : "事業インパクト"}
+          {item ? "抽出カード" : node ? "ノード" : edge ? "導線" : "施策候補"}
         </span>
         <small>編集</small>
       </div>

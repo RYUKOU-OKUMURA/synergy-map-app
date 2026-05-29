@@ -478,7 +478,7 @@ pub fn run_extract_items(
 
     if chunks.is_empty() {
         return Err(
-            "読み取り済みsource chunksがありません。先に資料を投入してください。".to_string(),
+            "読み取り済みsource chunksがありません。先にマップの材料を追加してください。".to_string(),
         );
     }
 
@@ -633,7 +633,7 @@ pub fn create_onboarding_brief_source(
     let normalized_sns_urls = normalize_url_inputs(sns_url, sns_urls);
 
     if trimmed_company_name.is_empty() {
-        return Err("企業名 / 案件名を入力してください。".to_string());
+        return Err("事業名 / マップ名を入力してください。".to_string());
     }
     if trimmed_purpose_label.is_empty() {
         return Err("マップ生成の目的を選択してください。".to_string());
@@ -883,7 +883,7 @@ fn onboarding_brief_markdown(
 ) -> String {
     let mut sections = vec![
         "# 初回マップ作成メモ".to_string(),
-        format!("- 企業名 / 案件名: {}", company_name.trim()),
+        format!("- 事業名 / マップ名: {}", company_name.trim()),
         format!("- マップ生成の目的: {}", purpose_label.trim()),
         format!("- 目的ID: {}", purpose_id.trim()),
     ];
@@ -1142,7 +1142,7 @@ pub fn generate_map_from_items(
             "completed",
             None,
             false,
-            "シナジーマップを生成しました。".to_string(),
+            "売上マップを生成しました。".to_string(),
         ),
         None => (
             build_map_output(&items),
@@ -1150,7 +1150,7 @@ pub fn generate_map_from_items(
             "fallback_completed",
             Some(ai_result.errors.join("; ")),
             true,
-            "AI実行に失敗したため、ローカルドラフトでシナジーマップを生成しました。".to_string(),
+            "AI実行に失敗したため、ローカルドラフトで売上マップを生成しました。".to_string(),
         ),
     };
     let output = validate_map_draft_json(&output_json)?;
@@ -1560,7 +1560,7 @@ pub fn generate_suggestions_from_map(
     let (active_nodes, active_edges) = active_map_scope(&workspace);
 
     if active_nodes.is_empty() {
-        return Err("シナジーマップがありません。先にマップを生成してください。".to_string());
+        return Err("売上マップがありません。先にマップを生成してください。".to_string());
     }
 
     let purpose_context = prompt_purpose_context_from_workspace(&workspace);
@@ -1691,7 +1691,7 @@ pub fn generate_suggestions_from_map(
     let message = if analysis_fallback_used || suggestions_fallback_used {
         "AI実行に失敗した一部出力をローカルドラフトで補完しました。".to_string()
     } else {
-        "AIコメントと事業インパクト施策を生成しました。".to_string()
+        "AIコメントと次に試す一手を生成しました。".to_string()
     };
 
     Ok(MvpRunResult {
@@ -1729,7 +1729,7 @@ pub fn ask_map_insight(
     let workspace = load_workspace(&connection, &project_id)?;
     let (active_nodes, _) = active_map_scope(&workspace);
     if active_nodes.is_empty() {
-        return Err("シナジーマップがありません。先にマップを生成してください。".to_string());
+        return Err("売上マップがありません。先にマップを生成してください。".to_string());
     }
 
     let purpose_context = prompt_purpose_context_from_workspace(&workspace);
@@ -2764,7 +2764,7 @@ fn build_extracted_items_output(chunks: &[ExtractionChunk]) -> Value {
                 json!({
                     "name": "既存事業",
                     "itemType": "business",
-                    "description": "投入資料から確認した既存事業の中心要素です。",
+                    "description": "情報ソースから確認した既存事業の中心要素です。",
                     "confidenceStatus": "needs_review",
                     "impactScore": 2,
                     "subjectiveImportance": 2,
@@ -2802,7 +2802,7 @@ fn extraction_prompt(chunks: &[ExtractionChunk], purpose_context: &PromptPurpose
         .join("\n");
 
     format!(
-        "MVP-1のシナジーマップ用に、以下のsource chunks要約から抽出カードを生成してください。\
+        "MVP-1の売上マップ用に、以下のsource chunks要約から抽出カードを生成してください。\
          事業、商品・サービス、集客チャネル、顧客接点、財務参考情報、データ資料に分類し、\
          PurposeContextの目的に関係する要素を優先して抽出してください。\
          confidenceStatusはconfirmed/estimated/needs_review、itemTypeはbusiness/service/channel/touchpoint/finance/data_sourceを使ってください。\
@@ -3285,7 +3285,7 @@ fn map_prompt(items: &[MapItem], purpose_context: &PromptPurposeContext) -> Stri
         .join("\n");
 
     format!(
-        "MVP-1の顧客導線ビューとして、抽出カードから1枚のシナジーマップを生成してください。\
+        "MVP-1の顧客導線ビューとして、抽出カードから1枚の売上マップを生成してください。\
          配置は中心事業を中央に置き、集客チャネルとデータ資料を左、顧客接点を右、商品・サービスをさらに右へ置くhub-and-flow型を優先してください。\
          同じ分類のノードは縦に重ならないように並べ、中心事業との関係が読める余白を残してください。\
          PurposeContextの目的に合う配置と導線を優先し、目的に関係しない要素は補助ノードとして扱ってください。\
@@ -3659,7 +3659,7 @@ fn build_analysis_output(workspace: &ProjectWorkspace) -> Value {
             "rationale": "マップ上で接点とデータ資料が分かれているため、統合すると再提案の精度が上がる可能性があります。",
             "expectedImpact": "継続率と商談化率の改善"
         }],
-        "risks": ["資料だけでは推定のため、クライアント確認が必要です。"]
+        "risks": ["情報ソースだけでは推定のため、追加確認が必要です。"]
     })
 }
 
@@ -3685,8 +3685,8 @@ fn analysis_prompt(workspace: &ProjectWorkspace, purpose_context: &PromptPurpose
         .join("\n");
 
     format!(
-        "MVP-1のシナジーマップから、現状の全体像、強い導線、詰まり、未接続シナジー候補、確認質問、簡易施策を日本語で短く生成してください。\
-         PurposeContextの目的に合わせて、何を深掘りすべきかが分かる分析にしてください。schemaVersionは{}です。\n\n{}\n\nNodes:\n{}\n\nEdges:\n{}",
+        "MVP-1の売上マップから、考える材料、売上の流れ、強い導線、詰まり、未接続シナジー候補、確認質問、次に試す一手を日本語で短く生成してください。\
+         答えを完成させるのではなく、PurposeContextの目的に合わせて、ユーザーが次に何を考え、何を確認し、何を試すか判断できる準備状態を作ってください。schemaVersionは{}です。\n\n{}\n\nNodes:\n{}\n\nEdges:\n{}",
         SCHEMA_VERSION,
         purpose_context.prompt_block(),
         nodes,
@@ -3736,18 +3736,18 @@ fn business_impact_prompt(
                 edge.label.as_deref().unwrap_or("導線"),
                 edge.flow_type.as_deref().unwrap_or("unknown"),
                 edge.strength.as_deref().unwrap_or("normal"),
-                edge.evidence.as_deref().unwrap_or("資料要約からの推定")
+                edge.evidence.as_deref().unwrap_or("情報ソース要約からの推定")
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
 
     format!(
-        "顧客導線マップで見えた課題・施策について、事業インパクトビュー用の施策カードを日本語で生成してください。\
-         目的は「どこに手を入れると売上・利益・工数に効きそうか」を根拠付きで見える化し、提案や会議で優先順位を説明できる状態にすることです。\
+        "顧客導線の売上マップで見えた課題・施策について、次に試す一手の候補を日本語で生成してください。\
+         目的は「どこに手を入れると売上・利益・工数に効きそうか」を根拠付きで見える化し、ユーザーが自分で次に考えることや動くことを判断できる状態にすることです。\
          PurposeContextの目的に合う施策を優先し、目的と関係が薄い施策は優先度を下げてください。\
          施策ごとに、売上影響、利益影響、費用、工数、効果発生までの時間、確度、0-100のimpactScore、根拠、関連ノードラベルを必ず返してください。\
-         evidenceには、関連ノードのsourceTraceに含まれるsourceChunkIdやsourceFile名を使って、どの資料根拠からの判断か分かる短い説明を含めてください。\
+         evidenceには、関連ノードのsourceTraceに含まれるsourceChunkIdやsourceFile名を使って、どの情報ソースからの判断か分かる短い説明を含めてください。\
          不確実な情報はunknownまたはneeds_reviewにしてください。schemaVersionは{}です。\n\n{}\n\nNodes:\n{}\n\nEdges:\n{}",
         SCHEMA_VERSION,
         purpose_context.prompt_block(),
@@ -3794,16 +3794,16 @@ fn map_insight_prompt(
                 edge.flow_type.as_deref().unwrap_or("unknown"),
                 edge.strength.as_deref().unwrap_or("normal"),
                 edge.confidence_status.as_deref().unwrap_or("estimated"),
-                edge.evidence.as_deref().unwrap_or("資料要約からの推定")
+                edge.evidence.as_deref().unwrap_or("情報ソース要約からの推定")
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
 
     Ok(format!(
-        "以下のシナジーマップ文脈をもとに、非IT寄りの相談者にも分かる短い壁打ち回答を日本語で返してください。\
+        "以下の売上マップ文脈をもとに、非IT寄りの相談者にも分かる短い壁打ち回答を日本語で返してください。\
          PurposeContextの目的に沿って、次に何を考えるべきかが分かる回答にしてください。\
-         対象を断定しすぎず、資料根拠が薄い場合はneeds_reviewにしてください。\
+         対象を断定しすぎず、情報ソースの根拠が薄い場合はneeds_reviewにしてください。\
          answerは2-4文、keyPointsは1-5件、followUpQuestionsは次に確認すべき質問を最大5件にしてください。\
          schemaVersionは{}です。\n\n{}\n\nQuestionType: {}\nQuestion: {}\nTarget:\n{}\n\nMap nodes:\n{}\n\nMap edges:\n{}",
         SCHEMA_VERSION,
@@ -3855,7 +3855,7 @@ fn map_insight_target_context(
                 edge.flow_type.as_deref().unwrap_or("unknown"),
                 edge.strength.as_deref().unwrap_or("normal"),
                 edge.confidence_status.as_deref().unwrap_or("estimated"),
-                edge.evidence.as_deref().unwrap_or("資料要約からの推定")
+                edge.evidence.as_deref().unwrap_or("情報ソース要約からの推定")
             ))
         }
         _ => Err(format!("Unsupported target_kind: {target_kind}")),
@@ -3866,7 +3866,7 @@ fn map_insight_question_label(question_type: &str) -> &'static str {
     match question_type {
         "importance" => "なぜ重要そうに見えるかを説明してください。",
         "bottleneck" => "詰まりや弱い導線になりそうな点を説明してください。",
-        "next_questions" => "次にクライアントへ確認すべき質問を整理してください。",
+        "next_questions" => "次に確認すべきことを整理してください。",
         "revenue_action" => "売上や利益に効きそうな次の一手を説明してください。",
         _ => "この対象の意味を分かりやすく説明してください。",
     }
@@ -3883,7 +3883,7 @@ fn build_map_insight_output(
     let (nodes, edges) = active_map_scope(workspace);
     let answer = match question_type {
         "importance" => format!(
-            "{target}は、顧客導線上の接続や施策優先度を考えるうえで確認価値があります。資料要約ベースの推定を含むため、会議では重要度と実態を確認してください。"
+            "{target}は、顧客導線上の接続や施策優先度を考えるうえで確認価値があります。情報ソース要約ベースの推定を含むため、実際の状況では重要度と実態を確認してください。"
         ),
         "bottleneck" => format!(
             "{target}は、前後の導線や根拠が薄い場合に詰まりの候補になります。接続先、担当、次のアクションが明確かを確認すると理解が深まります。"
@@ -3895,7 +3895,7 @@ fn build_map_insight_output(
             "{target}を売上・利益へつなげるには、強い導線を伸ばすか、弱い接点を補強する小さな施策から確認するのが現実的です。"
         ),
         _ => format!(
-            "{target}は、現在のマップにある{}件のノードと{}件の導線の中で理解を深める対象です。資料要約からの初期整理なので、確定情報と推定を分けて確認してください。",
+            "{target}は、現在のマップにある{}件のノードと{}件の導線の中で理解を深める対象です。情報ソース要約からの初期整理なので、確定情報と推定を分けて確認してください。",
             nodes.len(),
             edges.len()
         ),
@@ -3906,7 +3906,7 @@ fn build_map_insight_output(
         "answer": answer,
         "keyPoints": [
             format!("対象: {target}"),
-            "資料要約とマップ構造からの確認メモです。",
+            "情報ソース要約とマップ構造からの確認メモです。",
             "確定情報ではなく、会議中に確認するための下書きとして扱います。"
         ],
         "followUpQuestions": [
@@ -4575,7 +4575,7 @@ fn render_markdown(project_name: &str, workspace: &ProjectWorkspace) -> String {
     let extracted_items = exportable_extracted_items(&workspace.extracted_items);
     let suggestions = exportable_suggestions(&workspace.suggestions);
 
-    body.push_str(&format!("# {project_name} シナジーマップ\n\n"));
+    body.push_str(&format!("# {project_name} 売上マップ\n\n"));
     body.push_str("## 概要\n\n");
     if let Some(summary) = workspace
         .ai_comments
@@ -4584,10 +4584,12 @@ fn render_markdown(project_name: &str, workspace: &ProjectWorkspace) -> String {
     {
         body.push_str(&format!("{}\n\n", summary.body));
     } else {
-        body.push_str("資料投入、抽出カード、顧客導線マップのMVP-1出力です。\n\n");
+        body.push_str(
+            "マップの材料、抽出カード、顧客導線の売上マップ、次に試す一手の記録です。\n\n",
+        );
     }
 
-    body.push_str("## 使用資料\n\n");
+    body.push_str("## 使用した情報ソース\n\n");
     for source in &workspace.source_files {
         body.push_str(&format!(
             "- {} ({}, {}, {} chunks)\n",
@@ -4634,9 +4636,9 @@ fn render_markdown(project_name: &str, workspace: &ProjectWorkspace) -> String {
         body.push_str(&format!("- **{}**: {}\n", comment.title, comment.body));
     }
 
-    body.push_str("\n## 事業インパクトビュー\n\n");
+    body.push_str("\n## 次に試す一手\n\n");
     if suggestions.is_empty() {
-        body.push_str("事業インパクト施策は未生成です。\n\n");
+        body.push_str("次に試す一手は未生成です。\n\n");
     } else {
         body.push_str("| 施策 | 優先度 | 売上影響 | 利益影響 | 費用 | 工数 | 確度 | スコア |\n");
         body.push_str("|---|---|---|---|---|---|---|---:|\n");
