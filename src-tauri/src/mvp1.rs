@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use csv::Terminator;
-use rusqlite::{params, types::ValueRef, Connection, OptionalExtension};
+use rusqlite::{params, types::ValueRef, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -2084,6 +2084,99 @@ pub fn create_action_item(
         .map_err(|error| error.to_string())?;
 
     record_snapshot_in_transaction(&transaction, &project_id, "human_edit_records")?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    load_workspace(&connection, &project_id)
+}
+
+#[tauri::command]
+pub fn create_action_item_from_suggestion(
+    state: State<'_, DbState>,
+    project_id: String,
+    suggestion_id: String,
+) -> Result<ProjectWorkspace, String> {
+    create_action_item_from_suggestion_inner(&state.db_path, project_id, suggestion_id)
+}
+
+fn create_action_item_from_suggestion_inner(
+    db_path: &PathBuf,
+    project_id: String,
+    suggestion_id: String,
+) -> Result<ProjectWorkspace, String> {
+    let mut connection = open_connection(db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    let suggestion = transaction
+        .query_row(
+            "SELECT id, title, description, priority, rationale, evidence
+             FROM suggestions
+             WHERE project_id = ?1 AND id = ?2",
+            params![project_id.as_str(), suggestion_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some((source_id, title, description, priority, rationale, evidence)) = suggestion else {
+        return Err("Suggestion was not found.".to_string());
+    };
+    let title = title.trim();
+    let description = description.trim();
+
+    let existing_id: Option<String> = transaction
+        .query_row(
+            "SELECT id
+             FROM action_items
+             WHERE project_id = ?1
+               AND source_type = 'suggestion'
+               AND status = 'open'
+               AND (
+                    source_id = ?2
+                    OR (TRIM(title) = ?3 AND TRIM(body) = ?4)
+               )
+             LIMIT 1",
+            params![project_id.as_str(), source_id.as_str(), title, description],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+
+    if existing_id.is_some() {
+        transaction.commit().map_err(|error| error.to_string())?;
+        return load_workspace(&connection, &project_id);
+    }
+
+    let now = now_rfc3339()?;
+    let memo = rationale.or(evidence);
+    transaction
+        .execute(
+            "INSERT INTO action_items (
+                id, project_id, source_type, source_id, title, body, status, priority, memo, created_at, updated_at
+             ) VALUES (?1, ?2, 'suggestion', ?3, ?4, ?5, 'open', ?6, ?7, ?8, ?9)",
+            params![
+                Uuid::new_v4().to_string(),
+                project_id.as_str(),
+                source_id.as_str(),
+                title,
+                description,
+                priority.as_str(),
+                memo.as_deref(),
+                now.as_str(),
+                now.as_str()
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    record_snapshot_in_transaction(&transaction, &project_id, "human_promote_suggestion")?;
     transaction.commit().map_err(|error| error.to_string())?;
 
     load_workspace(&connection, &project_id)
@@ -5707,6 +5800,20 @@ mod tests {
             .expect("project should insert");
     }
 
+    fn insert_test_suggestion(connection: &Connection, project_id: &str, suggestion_id: &str) {
+        let now = now_rfc3339().expect("time should format");
+        connection
+            .execute(
+                "INSERT INTO suggestions (
+                    id, project_id, title, description, priority, adoption_status,
+                    rationale, related_node_ids_json, evidence, created_at, updated_at
+                 ) VALUES (?1, ?2, '問い合わせ後フォロー導線の整理', '担当、期限、記録先を確認する。', 'high', 'pending',
+                    '顧客接点の詰まりを解消しやすい。', '[]', '問い合わせから商談までの接続が根拠です。', ?3, ?4)",
+                params![suggestion_id, project_id, now.as_str(), now.as_str()],
+            )
+            .expect("suggestion should insert");
+    }
+
     #[test]
     fn local_extraction_fallback_does_not_persist_source_text() {
         let chunks = vec![ExtractionChunk {
@@ -5979,6 +6086,120 @@ mod tests {
         assert!(ensure_allowed_action_status("done").is_ok());
         assert!(ensure_allowed_action_status("dismissed").is_ok());
         assert!(ensure_allowed_action_status("blocked").is_err());
+    }
+
+    #[test]
+    fn suggestion_can_be_promoted_to_action_item() {
+        let app_data_dir = temp_app_data_dir("suggestion-action");
+        fs::create_dir_all(&app_data_dir).expect("app data dir should exist");
+        let db_path = app_data_dir.join("synergy-map.db");
+        crate::init_database(&db_path).expect("db should initialize");
+        let connection = open_connection(&db_path).expect("connection should open");
+        let project_id = "project-1";
+        let suggestion_id = "suggestion-1";
+        insert_test_project(&connection, project_id);
+        insert_test_suggestion(&connection, project_id, suggestion_id);
+        drop(connection);
+
+        let workspace = create_action_item_from_suggestion_inner(
+            &db_path,
+            project_id.to_string(),
+            suggestion_id.to_string(),
+        )
+        .expect("suggestion should promote");
+
+        assert_eq!(workspace.action_items.len(), 1);
+        assert_eq!(workspace.action_items[0].source_type, "suggestion");
+        assert_eq!(
+            workspace.action_items[0].source_id.as_deref(),
+            Some(suggestion_id)
+        );
+        assert_eq!(workspace.action_items[0].priority, "high");
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn suggestion_promotion_does_not_duplicate_open_action_item() {
+        let app_data_dir = temp_app_data_dir("suggestion-action-dedupe");
+        fs::create_dir_all(&app_data_dir).expect("app data dir should exist");
+        let db_path = app_data_dir.join("synergy-map.db");
+        crate::init_database(&db_path).expect("db should initialize");
+        let connection = open_connection(&db_path).expect("connection should open");
+        let project_id = "project-1";
+        let suggestion_id = "suggestion-1";
+        insert_test_project(&connection, project_id);
+        insert_test_suggestion(&connection, project_id, suggestion_id);
+        drop(connection);
+
+        create_action_item_from_suggestion_inner(
+            &db_path,
+            project_id.to_string(),
+            suggestion_id.to_string(),
+        )
+        .expect("first promotion should work");
+        let workspace = create_action_item_from_suggestion_inner(
+            &db_path,
+            project_id.to_string(),
+            suggestion_id.to_string(),
+        )
+        .expect("second promotion should be idempotent");
+
+        assert_eq!(workspace.action_items.len(), 1);
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn suggestion_promotion_does_not_duplicate_equivalent_open_action_item() {
+        let app_data_dir = temp_app_data_dir("suggestion-action-equivalent-dedupe");
+        fs::create_dir_all(&app_data_dir).expect("app data dir should exist");
+        let db_path = app_data_dir.join("synergy-map.db");
+        crate::init_database(&db_path).expect("db should initialize");
+        let connection = open_connection(&db_path).expect("connection should open");
+        let project_id = "project-1";
+        insert_test_project(&connection, project_id);
+        insert_test_suggestion(&connection, project_id, "suggestion-1");
+        insert_test_suggestion(&connection, project_id, "suggestion-2");
+        drop(connection);
+
+        create_action_item_from_suggestion_inner(
+            &db_path,
+            project_id.to_string(),
+            "suggestion-1".to_string(),
+        )
+        .expect("first promotion should work");
+        let workspace = create_action_item_from_suggestion_inner(
+            &db_path,
+            project_id.to_string(),
+            "suggestion-2".to_string(),
+        )
+        .expect("equivalent promotion should be idempotent");
+
+        assert_eq!(workspace.action_items.len(), 1);
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn missing_suggestion_promotion_returns_error() {
+        let app_data_dir = temp_app_data_dir("suggestion-action-missing");
+        fs::create_dir_all(&app_data_dir).expect("app data dir should exist");
+        let db_path = app_data_dir.join("synergy-map.db");
+        crate::init_database(&db_path).expect("db should initialize");
+        let connection = open_connection(&db_path).expect("connection should open");
+        insert_test_project(&connection, "project-1");
+        drop(connection);
+
+        let result = create_action_item_from_suggestion_inner(
+            &db_path,
+            "project-1".to_string(),
+            "missing-suggestion".to_string(),
+        );
+
+        assert!(result.is_err());
+
+        let _ = fs::remove_dir_all(app_data_dir);
     }
 
     #[test]

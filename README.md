@@ -18,6 +18,7 @@
 - 抽出カードで、事業・商品・チャネル・顧客接点・財務参考情報を確認
 - MVP-1のマップは顧客導線ビューのみ
 - 施策カード、確認質問、AIコメントを簡易生成
+- 既存プロジェクトの入口として「今日」ビューを表示し、次に見るべきこと、未完了確認事項、次の一手、最近の記録を集約
 - 確認質問/タスクと思考メモを記録ビューで管理
 - 任意タイミングで名前付き保存
 - Markdown、CSVで出力し、既定出力フォルダを設定可能
@@ -46,6 +47,7 @@ Obsidian Vault の構想メモは背景資料として扱う。
 - [Phase 0実装計画](docs/archive/implementation-plan-phase-0.md)
 - [MVP-1実装計画](docs/plans/implementation-plan-mvp-1.md)
 - [Phase 1試験運用チェックリスト](docs/plans/trial-operation-phase-1.md)
+- [Phase 2実事業試験運用チェックリスト](docs/plans/trial-operation-phase-2.md)
 - [Beta実装計画](docs/plans/implementation-plan-beta.md)
 - [構想メモ](docs/archive/シナジーマップ可視化ツール構想.md)
 - [エージェント運用ルール](agent.md)
@@ -62,7 +64,7 @@ synergy-map-app/
 
 ## Development Environment
 
-MVP-1 / Phase 1では、開発者本人がmacOS上の`pnpm tauri dev`で実事業メモを投入し、AI抽出、売上マップ、次の一手、記録、出力まで日常的に試験運用できる状態を基準にする。
+MVP-1 / Phase 1では、開発者本人がmacOS上の`pnpm tauri dev`で実事業メモを投入し、AI抽出、売上マップ、次の一手、記録、出力まで日常的に試験運用できる状態を基準にする。Phase 2では既存プロジェクトの入口を「今日」ビューにし、週次/月次で未完了確認事項、次の一手、最近のメモ、保存、出力を確認できる状態を基準にする。
 
 確認日: 2026-05-16
 
@@ -106,7 +108,7 @@ pnpm format:check
 (cd src-tauri && cargo test)
 ```
 
-Phase 1の受け入れは`pnpm tauri dev`で行う。`pnpm dev`のブラウザ表示はUIデモ確認用。
+Phase 1 / Phase 2の受け入れは`pnpm tauri dev`で行う。`pnpm dev`のブラウザ表示はUIデモ確認用。
 
 ## Local Data
 

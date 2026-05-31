@@ -2345,6 +2345,113 @@ button:disabled {
   text-align: right;
 }
 
+.today-panel {
+  overflow: auto;
+}
+
+.today-hero,
+.today-alert,
+.today-section,
+.today-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.today-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+  padding: 16px;
+}
+
+.today-hero h2 {
+  margin: 4px 0 6px;
+  color: var(--text);
+  font-size: 20px;
+  letter-spacing: 0;
+}
+
+.today-hero p,
+.today-alert span,
+.today-item span,
+.today-item small {
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.today-hero p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.today-alert {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  border-color: #fed7aa;
+  background: #fffbeb;
+  padding: 12px;
+  color: #9a3412;
+}
+
+.today-alert div {
+  display: grid;
+  gap: 3px;
+}
+
+.today-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.today-section,
+.today-list,
+.today-item-main {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+}
+
+.today-section,
+.today-item {
+  padding: 12px;
+}
+
+.today-list {
+  gap: 8px;
+}
+
+.today-item {
+  display: grid;
+  gap: 10px;
+}
+
+.today-item:not(.today-item-compact) {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.today-item strong {
+  min-width: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.today-item span {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.today-item small {
+  font-size: 11px;
+}
+
 .records-panel {
   overflow: auto;
 }
@@ -2897,13 +3004,22 @@ button:disabled {
 
   .source-overview,
   .source-row,
-  .records-grid {
+  .records-grid,
+  .today-grid,
+  .today-item:not(.today-item-compact),
+  .today-alert {
     grid-template-columns: 1fr;
   }
 
   .source-overview-stats,
-  .source-overview-actions {
+  .source-overview-actions,
+  .today-hero {
     justify-content: flex-start;
+  }
+
+  .today-hero {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .source-row-counts {

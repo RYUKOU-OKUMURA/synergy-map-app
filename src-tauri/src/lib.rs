@@ -1230,6 +1230,7 @@ pub fn run() {
             mvp1::ask_map_insight,
             mvp1::update_suggestion,
             mvp1::create_action_item,
+            mvp1::create_action_item_from_suggestion,
             mvp1::update_action_item,
             mvp1::create_map_note,
             mvp1::update_map_note,

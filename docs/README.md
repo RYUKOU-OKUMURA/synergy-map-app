@@ -13,6 +13,7 @@
 
 - [plans/](plans/): 現行フェーズの実装計画と進捗チェックリスト
   - [plans/trial-operation-phase-1.md](plans/trial-operation-phase-1.md): Phase 1本人試験運用チェックリスト
+  - [plans/trial-operation-phase-2.md](plans/trial-operation-phase-2.md): Phase 2実事業試験運用チェックリスト
 - [design/](design/): UI、マップ表現、演出などの設計仕様
 - [product/](product/): プロダクト思想、競合、ポジショニング
 - [future/](future/): MVP-1後の将来構想

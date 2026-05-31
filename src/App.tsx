@@ -91,6 +91,7 @@ import {
 type ViewId =
   | "home"
   | "projects"
+  | "today"
   | "sources"
   | "extract"
   | "map"
@@ -208,6 +209,7 @@ const globalNavItems: Array<{ id: ViewId; label: string; icon: typeof FolderKanb
 
 const projectNavItems: Array<{ id: ViewId; label: string; icon: typeof FolderKanban }> =
   [
+    { id: "today", label: "今日", icon: Target },
     { id: "map", label: "マップ", icon: MapIcon },
     { id: "sources", label: "情報ソース", icon: Upload },
     { id: "extract", label: "抽出カード", icon: ListChecks },
@@ -569,7 +571,95 @@ function getPrimaryActionLabel(workspace: ProjectWorkspace) {
   if (workspace.suggestions.length === 0 && workspace.aiComments.length === 0) {
     return "施策と確認質問";
   }
+  if (workspace.actionItems.some((actionItem) => actionItem.status === "open")) {
+    return "今日の確認";
+  }
   return "マップに相談";
+}
+
+function activeSuggestions(workspace: ProjectWorkspace) {
+  return workspace.suggestions.filter(
+    (suggestion) => suggestion.adoptionStatus !== "rejected",
+  );
+}
+
+function comparableText(value: string) {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function hasOpenActionForSuggestion(
+  workspace: ProjectWorkspace,
+  suggestion: SuggestionRow,
+) {
+  const suggestionTitle = comparableText(suggestion.title);
+  const suggestionBody = comparableText(suggestion.description);
+  return workspace.actionItems.some(
+    (actionItem) =>
+      actionItem.status === "open" &&
+      actionItem.sourceType === "suggestion" &&
+      (actionItem.sourceId === suggestion.id ||
+        (comparableText(actionItem.title) === suggestionTitle &&
+          comparableText(actionItem.body) === suggestionBody)),
+  );
+}
+
+function buildTodayNextStep(
+  workspace: ProjectWorkspace,
+  reflectionSummary: WorkspaceReflectionSummary,
+) {
+  const openActionCount = workspace.actionItems.filter(
+    (actionItem) => actionItem.status === "open",
+  ).length;
+
+  if (workspace.sourceChunks.length === 0 && workspace.extractedItems.length === 0) {
+    return {
+      title: "まず事業メモや資料を追加",
+      body: "短い自由メモだけでも始められます。実事業の売上導線、商品、集客、困っていることを入れてください。",
+      view: "map" as ViewId,
+      actionLabel: "情報を追加",
+    };
+  }
+  if (
+    workspace.extractedItems.length === 0 ||
+    reflectionSummary.pendingExtractionCount > 0
+  ) {
+    return {
+      title: "AIで材料を抽出カードに整理",
+      body: "AI送信前確認で送信範囲を見てから、事業・商品・集客・顧客接点へ分解します。",
+      view: "extract" as ViewId,
+      actionLabel: "抽出へ進む",
+    };
+  }
+  if (workspace.nodes.length === 0 || shouldRegenerateMap(workspace)) {
+    return {
+      title: "売上マップを生成/再生成",
+      body: "抽出カードの変更や追加情報を、顧客導線の売上マップへ反映します。",
+      view: "map" as ViewId,
+      actionLabel: "マップを見る",
+    };
+  }
+  if (workspace.suggestions.length === 0 && workspace.aiComments.length === 0) {
+    return {
+      title: "次の一手と確認質問を生成",
+      body: "マップから詰まり、未接続の可能性、次に確認すべきことを出します。",
+      view: "suggestions" as ViewId,
+      actionLabel: "施策へ進む",
+    };
+  }
+  if (openActionCount > 0) {
+    return {
+      title: "未完了の確認事項を片づける",
+      body: `${openActionCount}件の確認事項があります。完了・見送りを整理して、次に動くことを軽くします。`,
+      view: "records" as ViewId,
+      actionLabel: "記録で整理",
+    };
+  }
+  return {
+    title: "今の状態を保存して出力",
+    body: "今日の整理が落ち着いたら、名前付き保存とMarkdown/CSV出力で振り返りに残します。",
+    view: "history" as ViewId,
+    actionLabel: "保存へ進む",
+  };
 }
 
 function layoutToJson(layout: MapNodeLayout) {
@@ -944,7 +1034,7 @@ function App() {
     setView("map");
   }
 
-  function handleSelectProject(projectId: string, nextView: ViewId = "map") {
+  function handleSelectProject(projectId: string, nextView: ViewId = "today") {
     setSelectedProjectId(projectId);
     setWorkspace(emptyWorkspace);
     resetProjectScopedSelection();
@@ -1057,22 +1147,26 @@ function App() {
       );
       return;
     }
-    if (workspace.suggestions.length > 0 || workspace.aiComments.length > 0) {
-      setView("map");
-      await handleAskWholeMap("explain");
+    if (workspace.suggestions.length === 0 && workspace.aiComments.length === 0) {
+      await runAction(
+        () =>
+          invoke<MvpRunResult>("generate_suggestions_from_map", {
+            projectId: activeProjectId,
+          }),
+        (result) => {
+          setWorkspace(result.workspace);
+          setNotice(result.message);
+          setIsDrawerOpen(true);
+        },
+      );
       return;
     }
-    await runAction(
-      () =>
-        invoke<MvpRunResult>("generate_suggestions_from_map", {
-          projectId: activeProjectId,
-        }),
-      (result) => {
-        setWorkspace(result.workspace);
-        setNotice(result.message);
-        setIsDrawerOpen(true);
-      },
-    );
+    if (workspace.actionItems.some((actionItem) => actionItem.status === "open")) {
+      setView("today");
+      return;
+    }
+    setView("map");
+    await handleAskWholeMap("explain");
   }
 
   async function handleExtract() {
@@ -1641,6 +1735,21 @@ function App() {
     );
   }
 
+  async function handleCreateActionItemFromSuggestion(suggestion: SuggestionRow) {
+    if (!activeProjectId || !isTauriRuntime) return;
+    await runAction(
+      () =>
+        invoke<ProjectWorkspace>("create_action_item_from_suggestion", {
+          projectId: activeProjectId,
+          suggestionId: suggestion.id,
+        }),
+      (nextWorkspace) => {
+        setWorkspace(nextWorkspace);
+        setNotice("次の一手を確認事項に追加しました。");
+      },
+    );
+  }
+
   async function handleCreateMapNote(draft: MapNoteDraft) {
     if (!activeProjectId || !isTauriRuntime) return;
     await runAction(
@@ -1953,7 +2062,7 @@ function App() {
             <HomeView
               activeProject={activeProject}
               onOpenProjects={() => setView("projects")}
-              onSelectProject={(projectId) => handleSelectProject(projectId, "map")}
+              onSelectProject={(projectId) => handleSelectProject(projectId, "today")}
               onStartNewMap={handleStartNewMap}
               projects={projects}
               workspace={workspace}
@@ -2032,6 +2141,18 @@ function App() {
               workspace={workspace}
             />
           ) : null}
+          {view === "today" && activeProject ? (
+            <TodayView
+              busy={isBusy}
+              canEdit={Boolean(activeProjectId && isTauriRuntime)}
+              onCreateActionItemFromSuggestion={handleCreateActionItemFromSuggestion}
+              onGenerateSuggestions={handleGenerateSuggestions}
+              onNavigate={setView}
+              onUpdateActionItem={handleUpdateActionItem}
+              reflectionSummary={reflectionSummary}
+              workspace={workspace}
+            />
+          ) : null}
           {view === "projects" ? (
             <ProjectsView
               activeProject={activeProject}
@@ -2039,7 +2160,7 @@ function App() {
               onCreateProject={handleStartNewMap}
               onDeleteProject={handleDeleteProject}
               onSelectProject={(projectId) => {
-                handleSelectProject(projectId, "map");
+                handleSelectProject(projectId, "today");
               }}
               onUpdateProject={handleUpdateProject}
               projects={projects}
@@ -2247,7 +2368,7 @@ function AppSidebar({
               <button
                 className={`sidebar-nav-item ${
                   view === item.id ? "sidebar-nav-item-active" : ""
-                } ${item.id === "map" ? "sidebar-nav-item-primary" : ""}`}
+                } ${item.id === "today" ? "sidebar-nav-item-primary" : ""}`}
                 key={item.id}
                 onClick={() => onSelectView(item.id)}
                 type="button"
@@ -2261,7 +2382,7 @@ function AppSidebar({
       ) : (
         <div className="project-nav-disabled">
           <span className="sidebar-section-label">マップを選択後に利用</span>
-          <span>マップ、情報ソース、抽出カード、施策、出力、履歴</span>
+          <span>今日、マップ、情報ソース、抽出カード、施策、出力、履歴</span>
         </div>
       )}
 
@@ -4552,6 +4673,279 @@ function SourceReflectionCard({
         <Trash2 size={15} aria-hidden="true" />
       </button>
     </article>
+  );
+}
+
+function TodayView({
+  busy,
+  canEdit,
+  onCreateActionItemFromSuggestion,
+  onGenerateSuggestions,
+  onNavigate,
+  onUpdateActionItem,
+  reflectionSummary,
+  workspace,
+}: {
+  busy: boolean;
+  canEdit: boolean;
+  onCreateActionItemFromSuggestion: (suggestion: SuggestionRow) => void;
+  onGenerateSuggestions: () => void;
+  onNavigate: (view: ViewId) => void;
+  onUpdateActionItem: (actionItem: ActionItemRow, draft: ActionItemUpdateDraft) => void;
+  reflectionSummary: WorkspaceReflectionSummary;
+  workspace: ProjectWorkspace;
+}) {
+  const nextStep = buildTodayNextStep(workspace, reflectionSummary);
+  const openActionItems = workspace.actionItems.filter(
+    (actionItem) => actionItem.status === "open",
+  );
+  const suggestions = activeSuggestions(workspace)
+    .sort(
+      (left, right) =>
+        priorityRank(left.priority) - priorityRank(right.priority) ||
+        right.impactScore - left.impactScore,
+    )
+    .slice(0, 4);
+  const recentNotes = workspace.mapNotes.slice(0, 3);
+  const recentVersions = workspace.versions.slice(0, 3);
+  const recentExports = workspace.exportJobs.slice(0, 3);
+  const needsAttention = needsReflectionAttention(reflectionSummary);
+
+  function updateActionStatus(
+    actionItem: ActionItemRow,
+    status: ActionItemRow["status"],
+  ) {
+    onUpdateActionItem(actionItem, {
+      title: actionItem.title,
+      body: actionItem.body,
+      priority: actionItem.priority,
+      memo: actionItem.memo ?? "",
+      status,
+    });
+  }
+
+  return (
+    <section className="page-panel today-panel">
+      <div className="page-header">
+        <div>
+          <h1>今日</h1>
+          <p>実事業の整理を、今見るべき確認事項と次の一手に絞ります。</p>
+        </div>
+        <div className="button-row">
+          <StatusChip>{openActionItems.length}件 未完了</StatusChip>
+          <StatusChip>{suggestions.length}件 施策候補</StatusChip>
+        </div>
+      </div>
+
+      <section className="today-hero">
+        <div>
+          <span className="section-kicker">次にやること</span>
+          <h2>{nextStep.title}</h2>
+          <p>{nextStep.body}</p>
+        </div>
+        <button
+          className="primary-button"
+          onClick={() => onNavigate(nextStep.view)}
+          type="button"
+        >
+          <Target size={15} aria-hidden="true" />
+          {nextStep.actionLabel}
+        </button>
+      </section>
+
+      {needsAttention ? (
+        <section className="today-alert">
+          <TriangleAlert size={16} aria-hidden="true" />
+          <div>
+            <strong>再抽出 / 再生成の確認</strong>
+            <span>{reflectionSummaryText(reflectionSummary)}</span>
+          </div>
+          <button
+            className="ghost-button"
+            onClick={() =>
+              onNavigate(
+                reflectionSummary.pendingExtractionCount > 0 ? "extract" : "map",
+              )
+            }
+            type="button"
+          >
+            確認する
+          </button>
+        </section>
+      ) : null}
+
+      <div className="today-grid">
+        <section className="today-section">
+          <div className="section-title">
+            <ListChecks size={15} aria-hidden="true" />
+            <span>未完了の確認事項</span>
+          </div>
+          <div className="today-list">
+            {openActionItems.slice(0, 6).map((actionItem) => (
+              <article className="today-item" key={actionItem.id}>
+                <div className="today-item-main">
+                  <strong>{actionItem.title}</strong>
+                  <span>{actionItem.body}</span>
+                  <small>
+                    優先度 {actionPriorityLabel(actionItem.priority)}
+                    {actionItem.sourceType === "ai_question" ? " / AI確認質問" : ""}
+                  </small>
+                </div>
+                <div className="button-row">
+                  <button
+                    className="ghost-button"
+                    disabled={!canEdit || busy}
+                    onClick={() => updateActionStatus(actionItem, "done")}
+                    type="button"
+                  >
+                    完了
+                  </button>
+                  <button
+                    className="ghost-button"
+                    disabled={!canEdit || busy}
+                    onClick={() => updateActionStatus(actionItem, "dismissed")}
+                    type="button"
+                  >
+                    見送り
+                  </button>
+                </div>
+              </article>
+            ))}
+            {openActionItems.length === 0 ? (
+              <div className="empty-panel">
+                未完了の確認事項はありません。次の一手から必要なものを追加できます。
+              </div>
+            ) : null}
+          </div>
+          <button
+            className="ghost-button"
+            onClick={() => onNavigate("records")}
+            type="button"
+          >
+            記録で詳しく見る
+          </button>
+        </section>
+
+        <section className="today-section">
+          <div className="section-title">
+            <TrendingUp size={15} aria-hidden="true" />
+            <span>次の一手</span>
+          </div>
+          <div className="today-list">
+            {suggestions.map((suggestion) => {
+              const alreadyAdded = hasOpenActionForSuggestion(workspace, suggestion);
+              return (
+                <article className="today-item" key={suggestion.id}>
+                  <div className="today-item-main">
+                    <strong>{suggestion.title}</strong>
+                    <span>{suggestion.description}</span>
+                    <small>
+                      売上{" "}
+                      {labelFor(impactLevelOptions, suggestion.expectedRevenueImpact)}
+                      {" / "}
+                      工数 {labelFor(costLevelOptions, suggestion.effortLevel)}
+                    </small>
+                  </div>
+                  <button
+                    className="ghost-button"
+                    disabled={!canEdit || busy || alreadyAdded}
+                    onClick={() => onCreateActionItemFromSuggestion(suggestion)}
+                    type="button"
+                  >
+                    <Plus size={14} aria-hidden="true" />
+                    {alreadyAdded ? "追加済み" : "確認事項へ"}
+                  </button>
+                </article>
+              );
+            })}
+            {suggestions.length === 0 ? (
+              <div className="empty-panel">次の一手はまだ生成されていません。</div>
+            ) : null}
+          </div>
+          <div className="button-row">
+            <button
+              className="primary-button"
+              disabled={busy || workspace.nodes.length === 0}
+              onClick={onGenerateSuggestions}
+              type="button"
+            >
+              <Sparkles size={15} aria-hidden="true" />
+              施策と確認質問を生成
+            </button>
+            <button
+              className="ghost-button"
+              onClick={() => onNavigate("suggestions")}
+              type="button"
+            >
+              施策を見る
+            </button>
+          </div>
+        </section>
+
+        <section className="today-section">
+          <div className="section-title">
+            <PencilRuler size={15} aria-hidden="true" />
+            <span>最近のメモ</span>
+          </div>
+          <div className="today-list">
+            {recentNotes.map((note) => (
+              <article className="today-item today-item-compact" key={note.id}>
+                <strong>{note.title}</strong>
+                <span>{shortText(note.body, 96)}</span>
+                <small>
+                  {noteTypeLabel(note.noteType)} / {formatTime(note.updatedAt)}
+                </small>
+              </article>
+            ))}
+            {recentNotes.length === 0 ? (
+              <div className="empty-panel">最近のメモはありません。</div>
+            ) : null}
+          </div>
+        </section>
+
+        <section className="today-section">
+          <div className="section-title">
+            <Archive size={15} aria-hidden="true" />
+            <span>保存と出力</span>
+          </div>
+          <div className="today-list">
+            {recentVersions.map((version) => (
+              <article className="today-item today-item-compact" key={version.id}>
+                <strong>{version.name ?? version.versionType}</strong>
+                <span>{version.memo ?? "メモなし"}</span>
+                <small>{formatTime(version.createdAt)}</small>
+              </article>
+            ))}
+            {recentExports.map((job) => (
+              <article className="today-item today-item-compact" key={job.id}>
+                <strong>{job.exportType}</strong>
+                <span>{job.outputPath ?? "出力先未記録"}</span>
+                <small>{formatTime(job.completedAt)}</small>
+              </article>
+            ))}
+            {recentVersions.length === 0 && recentExports.length === 0 ? (
+              <div className="empty-panel">保存と出力の履歴はまだありません。</div>
+            ) : null}
+          </div>
+          <div className="button-row">
+            <button
+              className="ghost-button"
+              onClick={() => onNavigate("history")}
+              type="button"
+            >
+              保存へ
+            </button>
+            <button
+              className="ghost-button"
+              onClick={() => onNavigate("export")}
+              type="button"
+            >
+              出力へ
+            </button>
+          </div>
+        </section>
+      </div>
+    </section>
   );
 }
 
