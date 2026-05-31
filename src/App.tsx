@@ -1052,6 +1052,18 @@ function App() {
     setView(nextView);
   }
 
+  function handleSelectView(nextView: ViewId) {
+    if (nextView === "home") {
+      handleClearProjectSelection("home");
+      return;
+    }
+    setSelectedItemId(null);
+    setSelectedMapElement(null);
+    setSelectedSuggestionId(null);
+    setIsDrawerOpen(false);
+    setView(nextView);
+  }
+
   async function handleUpdateProject(projectId: string, values: ProjectFormValues) {
     await runAction(
       async () => {
@@ -2028,14 +2040,8 @@ function App() {
     <main className="app-root">
       <AppSidebar
         activeProject={activeProject}
-        onOpenProjects={() => setView("projects")}
-        onSelectView={(nextView) => {
-          if (nextView === "home") {
-            handleClearProjectSelection("home");
-          } else {
-            setView(nextView);
-          }
-        }}
+        onOpenProjects={() => handleSelectView("projects")}
+        onSelectView={handleSelectView}
         onStartNewMap={handleStartNewMap}
         view={view}
       />
@@ -2046,7 +2052,7 @@ function App() {
           isBusy={isBusy}
           latestAiRun={latestAiRun}
           onAiUpdate={handleAiUpdate}
-          onOpenHistory={() => setView("history")}
+          onOpenHistory={() => handleSelectView("history")}
           onRefreshCodexRuntime={handleRefreshCodexRuntime}
           primaryActionLabel={primaryActionLabel}
           saveStatus={saveStatus}
@@ -2061,7 +2067,7 @@ function App() {
           {view === "home" ? (
             <HomeView
               activeProject={activeProject}
-              onOpenProjects={() => setView("projects")}
+              onOpenProjects={() => handleSelectView("projects")}
               onSelectProject={(projectId) => handleSelectProject(projectId, "today")}
               onStartNewMap={handleStartNewMap}
               projects={projects}
@@ -2147,7 +2153,7 @@ function App() {
               canEdit={Boolean(activeProjectId && isTauriRuntime)}
               onCreateActionItemFromSuggestion={handleCreateActionItemFromSuggestion}
               onGenerateSuggestions={handleGenerateSuggestions}
-              onNavigate={setView}
+              onNavigate={handleSelectView}
               onUpdateActionItem={handleUpdateActionItem}
               reflectionSummary={reflectionSummary}
               workspace={workspace}
