@@ -58,6 +58,7 @@ import {
   timeToImpactOptions,
 } from "@/lib/mvp1Labels";
 import type {
+  ActionItemRow,
   AiProviderKind,
   AiRunRow,
   AiSettings,
@@ -67,9 +68,11 @@ import type {
   CursorSdkSmokeResult,
   CursorSdkStatus,
   DeviceCodeLoginResult,
+  DeleteSourceResult,
   ExportResult,
   ExtractedItemRow,
   MapEdgeRow,
+  MapNoteRow,
   MapNodeRow,
   MvpRunResult,
   Project,
@@ -92,6 +95,7 @@ type ViewId =
   | "extract"
   | "map"
   | "suggestions"
+  | "records"
   | "export"
   | "history"
   | "settings";
@@ -114,6 +118,23 @@ type OnboardingDraft = {
   productInfo: string;
 };
 
+type ActionItemDraft = {
+  title: string;
+  body: string;
+  priority: ActionItemRow["priority"];
+  memo: string;
+};
+
+type ActionItemUpdateDraft = ActionItemDraft & {
+  status: ActionItemRow["status"];
+};
+
+type MapNoteDraft = {
+  title: string;
+  body: string;
+  noteType: MapNoteRow["noteType"];
+};
+
 type CodexConnectionAction = "refresh" | "smoke" | "login";
 type CursorConnectionAction = "refresh" | "smoke";
 
@@ -121,6 +142,7 @@ const defaultAiSettings = (): AiSettings => ({
   primaryProvider: "codex",
   fallbackEnabled: true,
   cursorModelId: "composer-2.5",
+  defaultExportDir: null,
 });
 
 type InformationSourceKind = "manual_note" | "website_url" | "sns_url" | "product_info";
@@ -190,6 +212,7 @@ const projectNavItems: Array<{ id: ViewId; label: string; icon: typeof FolderKan
     { id: "sources", label: "情報ソース", icon: Upload },
     { id: "extract", label: "抽出カード", icon: ListChecks },
     { id: "suggestions", label: "施策", icon: MessageSquareText },
+    { id: "records", label: "記録", icon: PencilRuler },
     { id: "export", label: "出力", icon: Download },
     { id: "history", label: "履歴", icon: History },
   ];
@@ -275,6 +298,24 @@ function aiRunStatusLabel(run: AiRunRow | null | undefined) {
   if (run.status === "response_validated") return "検証済み";
   if (run.status === "fallback_response_validated") return "補完検証済み";
   return run.status;
+}
+
+function actionStatusLabel(status: ActionItemRow["status"]) {
+  if (status === "open") return "未完了";
+  if (status === "done") return "完了";
+  return "見送り";
+}
+
+function actionPriorityLabel(priority: ActionItemRow["priority"]) {
+  if (priority === "high") return "高";
+  if (priority === "low") return "低";
+  return "中";
+}
+
+function noteTypeLabel(noteType: MapNoteRow["noteType"]) {
+  if (noteType === "meeting") return "会議メモ";
+  if (noteType === "daily") return "日次メモ";
+  return "思考メモ";
 }
 
 function parseMetadataJson(metadataJson: string): Record<string, unknown> {
@@ -735,9 +776,7 @@ function App() {
     useState<DeviceCodeLoginResult | null>(null);
   const [codexBusy, setCodexBusy] = useState<CodexConnectionAction | null>(null);
   const [aiSettings, setAiSettings] = useState<AiSettings>(defaultAiSettings);
-  const [cursorSdkStatus, setCursorSdkStatus] = useState<CursorSdkStatus | null>(
-    null,
-  );
+  const [cursorSdkStatus, setCursorSdkStatus] = useState<CursorSdkStatus | null>(null);
   const [cursorSdkSmokeResult, setCursorSdkSmokeResult] =
     useState<CursorSdkSmokeResult | null>(null);
   const [cursorBusy, setCursorBusy] = useState<CursorConnectionAction | null>(null);
@@ -1112,7 +1151,11 @@ function App() {
       () => invoke<ExportResult>(command, { projectId: activeProjectId }),
       (result) => {
         setWorkspace(result.workspace);
-        setNotice(`出力しました: ${result.exportJob.outputPath ?? "-"}`);
+        setNotice(
+          result.warning
+            ? `出力しました: ${result.exportJob.outputPath ?? "-"} / ${result.warning}`
+            : `出力しました: ${result.exportJob.outputPath ?? "-"}`,
+        );
       },
     );
   }
@@ -1197,6 +1240,25 @@ function App() {
     }
   }
 
+  async function handleSelectDefaultExportDir() {
+    if (!isTauriRuntime) return;
+    setAiSettingsBusy(true);
+    setError(null);
+    try {
+      const saved = await invoke<AiSettings>("select_default_export_dir");
+      setAiSettings(saved);
+      setNotice(
+        saved.defaultExportDir
+          ? "既定の出力フォルダを保存しました。"
+          : "出力フォルダの選択をキャンセルしました。",
+      );
+    } catch (caughtError) {
+      setError(String(caughtError));
+    } finally {
+      setAiSettingsBusy(false);
+    }
+  }
+
   async function handleRefreshCursorSdkStatus() {
     if (!isTauriRuntime) {
       setCursorSdkStatus({
@@ -1247,6 +1309,19 @@ function App() {
     }
     try {
       await invoke("open_external_url", { url });
+    } catch (caughtError) {
+      setError(String(caughtError));
+    }
+  }
+
+  async function handleOpenExportPath(path: string | null) {
+    if (!path) return;
+    if (!isTauriRuntime) {
+      setNotice("出力先を開く操作はTauri実行時に利用できます。");
+      return;
+    }
+    try {
+      await invoke("open_export_path", { path });
     } catch (caughtError) {
       setError(String(caughtError));
     }
@@ -1481,6 +1556,154 @@ function App() {
         setWorkspace(nextWorkspace);
         setApprovedChunkSignature(null);
         setNotice(`${sourceTypeLabel(draft.sourceKind)}を情報ソースに追加しました。`);
+      },
+    );
+  }
+
+  async function handleDeleteSourceFile(source: SourceFileRow) {
+    if (!activeProjectId || !isTauriRuntime) return;
+    const relatedItems = workspace.extractedItems.filter((item) =>
+      item.sources.some((itemSource) => itemSource.sourceFileId === source.id),
+    ).length;
+    const relatedNodes = workspace.nodes.filter((node) =>
+      workspace.extractedItems.some(
+        (item) =>
+          item.id === node.extractedItemId &&
+          item.sources.some((itemSource) => itemSource.sourceFileId === source.id),
+      ),
+    ).length;
+
+    if (
+      !window.confirm(
+        `「${source.fileName}」を削除します。既存の抽出カードやマップは残りますが、${relatedItems}カード / ${relatedNodes}ノードは再抽出・再生成の確認が必要になります。続行しますか？`,
+      )
+    ) {
+      return;
+    }
+
+    await runAction(
+      () =>
+        invoke<DeleteSourceResult>("delete_source_file", {
+          projectId: activeProjectId,
+          sourceFileId: source.id,
+        }),
+      (result) => {
+        setWorkspace(result.workspace);
+        setApprovedChunkSignature(null);
+        setExcludedChunkIds([]);
+        setNotice(
+          result.warnings.length > 0
+            ? `情報ソースを削除しました。再抽出/再生成推奨です。${result.warnings.join(" / ")}`
+            : "情報ソースを削除しました。既存カードとマップは残るため、再抽出/再生成推奨です。",
+        );
+      },
+    );
+  }
+
+  async function handleCreateActionItem(draft: ActionItemDraft) {
+    if (!activeProjectId || !isTauriRuntime) return;
+    await runAction(
+      () =>
+        invoke<ProjectWorkspace>("create_action_item", {
+          projectId: activeProjectId,
+          title: draft.title.trim(),
+          body: draft.body.trim(),
+          priority: draft.priority,
+          memo: draft.memo.trim(),
+        }),
+      (nextWorkspace) => {
+        setWorkspace(nextWorkspace);
+        setNotice("確認事項を追加しました。");
+      },
+    );
+  }
+
+  async function handleUpdateActionItem(
+    actionItem: ActionItemRow,
+    draft: ActionItemUpdateDraft,
+  ) {
+    if (!activeProjectId || !isTauriRuntime) return;
+    await runAction(
+      () =>
+        invoke<ProjectWorkspace>("update_action_item", {
+          projectId: activeProjectId,
+          actionItemId: actionItem.id,
+          title: draft.title.trim(),
+          body: draft.body.trim(),
+          status: draft.status,
+          priority: draft.priority,
+          memo: draft.memo.trim(),
+        }),
+      (nextWorkspace) => {
+        setWorkspace(nextWorkspace);
+        setNotice("確認事項を更新しました。");
+      },
+    );
+  }
+
+  async function handleCreateMapNote(draft: MapNoteDraft) {
+    if (!activeProjectId || !isTauriRuntime) return;
+    await runAction(
+      () =>
+        invoke<ProjectWorkspace>("create_map_note", {
+          projectId: activeProjectId,
+          title: draft.title.trim(),
+          body: draft.body.trim(),
+          noteType: draft.noteType,
+        }),
+      (nextWorkspace) => {
+        setWorkspace(nextWorkspace);
+        setNotice("メモを追加しました。");
+      },
+    );
+  }
+
+  async function handleUpdateMapNote(note: MapNoteRow, draft: MapNoteDraft) {
+    if (!activeProjectId || !isTauriRuntime) return;
+    await runAction(
+      () =>
+        invoke<ProjectWorkspace>("update_map_note", {
+          projectId: activeProjectId,
+          noteId: note.id,
+          title: draft.title.trim(),
+          body: draft.body.trim(),
+          noteType: draft.noteType,
+        }),
+      (nextWorkspace) => {
+        setWorkspace(nextWorkspace);
+        setNotice("メモを更新しました。");
+      },
+    );
+  }
+
+  async function handleDeleteMapNote(note: MapNoteRow) {
+    if (!activeProjectId || !isTauriRuntime) return;
+    if (!window.confirm(`メモ「${note.title}」を削除しますか？`)) return;
+    await runAction(
+      () =>
+        invoke<ProjectWorkspace>("delete_map_note", {
+          projectId: activeProjectId,
+          noteId: note.id,
+        }),
+      (nextWorkspace) => {
+        setWorkspace(nextWorkspace);
+        setNotice("メモを削除しました。");
+      },
+    );
+  }
+
+  async function handleCreateNamedVersion(name: string, memo: string) {
+    if (!activeProjectId || !isTauriRuntime) return;
+    await runAction(
+      () =>
+        invoke<ProjectWorkspace>("create_named_version", {
+          projectId: activeProjectId,
+          name: name.trim(),
+          memo: memo.trim(),
+        }),
+      (nextWorkspace) => {
+        setWorkspace(nextWorkspace);
+        setNotice("現在の状態を名前付きで保存しました。");
       },
     );
   }
@@ -1829,6 +2052,7 @@ function App() {
               generationBusy={isBusy}
               onGenerateMap={handleRegenerateMap}
               onCreateInformationSource={handleCreateInformationSource}
+              onDeleteSource={handleDeleteSourceFile}
               onOpenExtractReview={() => {
                 setSelectedItemId(workspace.extractedItems[0]?.id ?? null);
                 setView("extract");
@@ -1879,11 +2103,32 @@ function App() {
               workspace={workspace}
             />
           ) : null}
+          {view === "records" && activeProject ? (
+            <RecordsView
+              canEdit={Boolean(activeProjectId && isTauriRuntime)}
+              onCreateActionItem={handleCreateActionItem}
+              onCreateMapNote={handleCreateMapNote}
+              onDeleteMapNote={handleDeleteMapNote}
+              onUpdateActionItem={handleUpdateActionItem}
+              onUpdateMapNote={handleUpdateMapNote}
+              workspace={workspace}
+            />
+          ) : null}
           {view === "export" && activeProject ? (
-            <ExportView onExport={handleExport} workspace={workspace} />
+            <ExportView
+              canOpenPath={isTauriRuntime}
+              defaultExportDir={aiSettings.defaultExportDir}
+              onExport={handleExport}
+              onOpenPath={handleOpenExportPath}
+              workspace={workspace}
+            />
           ) : null}
           {view === "history" && activeProject ? (
-            <HistoryView workspace={workspace} />
+            <HistoryView
+              canSave={Boolean(activeProjectId && isTauriRuntime)}
+              onCreateNamedVersion={handleCreateNamedVersion}
+              workspace={workspace}
+            />
           ) : null}
           {view === "settings" ? (
             <SettingsView
@@ -1903,6 +2148,7 @@ function App() {
               onRunCodexSmokeTest={handleRunCodexSmokeTest}
               onRunCursorSdkSmokeTest={handleRunCursorSdkSmokeTest}
               onSaveAiSettings={handleSaveAiSettings}
+              onSelectDefaultExportDir={handleSelectDefaultExportDir}
             />
           ) : null}
         </div>
@@ -3469,9 +3715,7 @@ function BusinessImpactPanel({
           </button>
         ))}
         {suggestions.length === 0 ? (
-          <div className="empty-panel">
-            マップ生成後に次に試す一手を生成します。
-          </div>
+          <div className="empty-panel">マップ生成後に次に試す一手を生成します。</div>
         ) : null}
       </div>
     </aside>
@@ -3738,7 +3982,11 @@ function AiProviderSettingsCard({
       <p className="ai-provider-copy">
         構造化AI（抽出・マップ・施策・壁打ち）のプライマリを選びます。失敗時はもう一方へ自動フォールバックできます。
       </p>
-      <div className="ai-provider-options" role="radiogroup" aria-label="プライマリAIプロバイダ">
+      <div
+        className="ai-provider-options"
+        role="radiogroup"
+        aria-label="プライマリAIプロバイダ"
+      >
         <label className="ai-provider-option">
           <input
             checked={settings.primaryProvider === "codex"}
@@ -3772,6 +4020,35 @@ function AiProviderSettingsCard({
         <span>Composer model: {settings.cursorModelId}</span>
         <span>保存: {busy ? "保存中..." : "即時反映"}</span>
       </div>
+    </section>
+  );
+}
+
+function ExportFolderSettingsCard({
+  busy,
+  defaultExportDir,
+  onSelect,
+}: {
+  busy: boolean;
+  defaultExportDir: string | null;
+  onSelect: () => void;
+}) {
+  return (
+    <section className="codex-card export-folder-card">
+      <div className="section-title">
+        <FolderOpen size={15} aria-hidden="true" />
+        <span>既定の出力先</span>
+      </div>
+      <p className="ai-provider-copy">
+        Markdown / CSVの保存先を日常運用用のフォルダに固定できます。
+      </p>
+      <div className="export-folder-path">
+        {defaultExportDir ?? "未設定（アプリ内exportsへ保存）"}
+      </div>
+      <button className="ghost-button" disabled={busy} onClick={onSelect} type="button">
+        <FolderOpen size={15} aria-hidden="true" />
+        フォルダを選択
+      </button>
     </section>
   );
 }
@@ -3841,13 +4118,18 @@ function CursorSdkConnectionCard({
         <div className="codex-warning">
           <Info size={14} aria-hidden="true" />
           <span>
-            リポジトリ直下の <code>.env</code> に{" "}
-            <code>CURSOR_API_KEY=...</code> を設定してからアプリを再起動してください。
+            リポジトリ直下の <code>.env</code> に <code>CURSOR_API_KEY=...</code>{" "}
+            を設定してからアプリを再起動してください。
           </span>
         </div>
       ) : null}
       <div className="connection-actions">
-        <button className="ghost-button" disabled={busy === "refresh"} onClick={onRefresh} type="button">
+        <button
+          className="ghost-button"
+          disabled={busy === "refresh"}
+          onClick={onRefresh}
+          type="button"
+        >
           {busy === "refresh" ? "更新中" : "状態更新"}
         </button>
         <button
@@ -3860,9 +4142,7 @@ function CursorSdkConnectionCard({
         </button>
         <button
           className="inline-link-button"
-          onClick={() =>
-            onOpenExternalUrl("https://cursor.com/dashboard/integrations")
-          }
+          onClick={() => onOpenExternalUrl("https://cursor.com/dashboard/integrations")}
           type="button"
         >
           APIキーを発行
@@ -3896,6 +4176,7 @@ function SettingsView({
   onRunCodexSmokeTest,
   onRunCursorSdkSmokeTest,
   onSaveAiSettings,
+  onSelectDefaultExportDir,
 }: {
   aiSettings: AiSettings;
   aiSettingsBusy: boolean;
@@ -3913,6 +4194,7 @@ function SettingsView({
   onRunCodexSmokeTest: () => void;
   onRunCursorSdkSmokeTest: () => void;
   onSaveAiSettings: (settings: AiSettings) => void;
+  onSelectDefaultExportDir: () => void;
 }) {
   return (
     <section className="page-panel settings-panel">
@@ -3929,6 +4211,11 @@ function SettingsView({
           busy={aiSettingsBusy}
           onSave={onSaveAiSettings}
           settings={aiSettings}
+        />
+        <ExportFolderSettingsCard
+          busy={aiSettingsBusy}
+          defaultExportDir={aiSettings.defaultExportDir}
+          onSelect={onSelectDefaultExportDir}
         />
         {aiSettings.primaryProvider === "cursor" ? (
           <CursorSdkConnectionCard
@@ -3981,6 +4268,7 @@ function SourcesView({
   generationBusy,
   onGenerateMap,
   onCreateInformationSource,
+  onDeleteSource,
   onOpenExtractReview,
   onPickFiles,
   reflectionSummary,
@@ -3990,6 +4278,7 @@ function SourcesView({
   generationBusy: boolean;
   onGenerateMap: () => void;
   onCreateInformationSource: (draft: InformationSourceDraft) => void;
+  onDeleteSource: (source: SourceFileRow) => void;
   onOpenExtractReview: () => void;
   onPickFiles: () => void;
   reflectionSummary: WorkspaceReflectionSummary;
@@ -4117,7 +4406,10 @@ function SourcesView({
         <strong>ここにファイルをドロップ / クリックして選択</strong>
         <span>PDF / CSV / Excel / Markdown / Textを追加できます。</span>
       </button>
-      <SourceReflectionList summary={reflectionSummary} />
+      <SourceReflectionList
+        onDeleteSource={onDeleteSource}
+        summary={reflectionSummary}
+      />
     </section>
   );
 }
@@ -4177,7 +4469,13 @@ function SourceReflectionOverview({
   );
 }
 
-function SourceReflectionList({ summary }: { summary: WorkspaceReflectionSummary }) {
+function SourceReflectionList({
+  onDeleteSource,
+  summary,
+}: {
+  onDeleteSource: (source: SourceFileRow) => void;
+  summary: WorkspaceReflectionSummary;
+}) {
   if (summary.rows.length === 0) {
     return (
       <div className="source-empty-state">
@@ -4196,14 +4494,24 @@ function SourceReflectionList({ summary }: { summary: WorkspaceReflectionSummary
       </div>
       <div className="source-grid">
         {summary.rows.map((row) => (
-          <SourceReflectionCard key={row.source.id} row={row} />
+          <SourceReflectionCard
+            key={row.source.id}
+            onDeleteSource={onDeleteSource}
+            row={row}
+          />
         ))}
       </div>
     </section>
   );
 }
 
-function SourceReflectionCard({ row }: { row: SourceReflectionRow }) {
+function SourceReflectionCard({
+  onDeleteSource,
+  row,
+}: {
+  onDeleteSource: (source: SourceFileRow) => void;
+  row: SourceReflectionRow;
+}) {
   const SourceIcon =
     informationSourceOptions.find((option) => option.id === row.source.fileType)
       ?.icon ?? FileText;
@@ -4233,6 +4541,463 @@ function SourceReflectionCard({ row }: { row: SourceReflectionRow }) {
       <div className="source-row-counts">
         <span>{row.extractedItemCount}カード</span>
         <span>{row.mappedItemCount}ノード</span>
+      </div>
+      <button
+        aria-label={`${row.title}を削除`}
+        className="ghost-button icon-button danger-button"
+        onClick={() => onDeleteSource(row.source)}
+        title="情報ソースを削除"
+        type="button"
+      >
+        <Trash2 size={15} aria-hidden="true" />
+      </button>
+    </article>
+  );
+}
+
+function RecordsView({
+  canEdit,
+  onCreateActionItem,
+  onCreateMapNote,
+  onDeleteMapNote,
+  onUpdateActionItem,
+  onUpdateMapNote,
+  workspace,
+}: {
+  canEdit: boolean;
+  onCreateActionItem: (draft: ActionItemDraft) => void;
+  onCreateMapNote: (draft: MapNoteDraft) => void;
+  onDeleteMapNote: (note: MapNoteRow) => void;
+  onUpdateActionItem: (actionItem: ActionItemRow, draft: ActionItemUpdateDraft) => void;
+  onUpdateMapNote: (note: MapNoteRow, draft: MapNoteDraft) => void;
+  workspace: ProjectWorkspace;
+}) {
+  const [actionDraft, setActionDraft] = useState<ActionItemDraft>({
+    title: "",
+    body: "",
+    priority: "medium",
+    memo: "",
+  });
+  const [noteDraft, setNoteDraft] = useState<MapNoteDraft>({
+    title: "",
+    body: "",
+    noteType: "thought",
+  });
+  const openCount = workspace.actionItems.filter(
+    (actionItem) => actionItem.status === "open",
+  ).length;
+
+  function submitAction(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canEdit || !actionDraft.title.trim() || !actionDraft.body.trim()) return;
+    onCreateActionItem(actionDraft);
+    setActionDraft({ title: "", body: "", priority: "medium", memo: "" });
+  }
+
+  function submitNote(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canEdit || !noteDraft.title.trim() || !noteDraft.body.trim()) return;
+    onCreateMapNote(noteDraft);
+    setNoteDraft({ title: "", body: "", noteType: "thought" });
+  }
+
+  return (
+    <section className="page-panel records-panel">
+      <div className="page-header">
+        <div>
+          <h1>記録</h1>
+          <p>AIが出した確認質問、手動タスク、思考メモを同じ場所で扱います。</p>
+        </div>
+        <div className="button-row">
+          <StatusChip>{openCount}件 未完了</StatusChip>
+          <StatusChip>{workspace.mapNotes.length}件 メモ</StatusChip>
+        </div>
+      </div>
+
+      <div className="records-grid">
+        <section className="record-section">
+          <div className="section-title">
+            <ListChecks size={15} aria-hidden="true" />
+            <span>確認事項 / タスク</span>
+          </div>
+          <form className="record-form" onSubmit={submitAction}>
+            <Field label="タイトル">
+              <input
+                onChange={(event) =>
+                  setActionDraft((current) => ({
+                    ...current,
+                    title: event.target.value,
+                  }))
+                }
+                placeholder="例: 問い合わせ後の担当者を確認"
+                value={actionDraft.title}
+              />
+            </Field>
+            <Field label="内容">
+              <textarea
+                onChange={(event) =>
+                  setActionDraft((current) => ({
+                    ...current,
+                    body: event.target.value,
+                  }))
+                }
+                placeholder="次に確認すること、やること"
+                value={actionDraft.body}
+              />
+            </Field>
+            <FormGrid>
+              <Field label="優先度">
+                <select
+                  onChange={(event) =>
+                    setActionDraft((current) => ({
+                      ...current,
+                      priority: event.target.value as ActionItemRow["priority"],
+                    }))
+                  }
+                  value={actionDraft.priority}
+                >
+                  {(["high", "medium", "low"] as const).map((priority) => (
+                    <option key={priority} value={priority}>
+                      {actionPriorityLabel(priority)}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="メモ">
+                <input
+                  onChange={(event) =>
+                    setActionDraft((current) => ({
+                      ...current,
+                      memo: event.target.value,
+                    }))
+                  }
+                  placeholder="補足"
+                  value={actionDraft.memo}
+                />
+              </Field>
+            </FormGrid>
+            <button
+              className="primary-button"
+              disabled={
+                !canEdit || !actionDraft.title.trim() || !actionDraft.body.trim()
+              }
+              type="submit"
+            >
+              <Plus size={15} aria-hidden="true" />
+              追加
+            </button>
+          </form>
+
+          <div className="record-list">
+            {workspace.actionItems.map((actionItem) => (
+              <ActionItemCard
+                actionItem={actionItem}
+                canEdit={canEdit}
+                key={`${actionItem.id}:${actionItem.updatedAt}:${actionItem.status}`}
+                onUpdate={onUpdateActionItem}
+              />
+            ))}
+            {workspace.actionItems.length === 0 ? (
+              <div className="empty-panel">確認事項はまだありません。</div>
+            ) : null}
+          </div>
+        </section>
+
+        <section className="record-section">
+          <div className="section-title">
+            <PencilRuler size={15} aria-hidden="true" />
+            <span>思考メモ</span>
+          </div>
+          <form className="record-form" onSubmit={submitNote}>
+            <FormGrid>
+              <Field label="タイトル">
+                <input
+                  onChange={(event) =>
+                    setNoteDraft((current) => ({
+                      ...current,
+                      title: event.target.value,
+                    }))
+                  }
+                  placeholder="例: 5月の見直し"
+                  value={noteDraft.title}
+                />
+              </Field>
+              <Field label="種類">
+                <select
+                  onChange={(event) =>
+                    setNoteDraft((current) => ({
+                      ...current,
+                      noteType: event.target.value as MapNoteRow["noteType"],
+                    }))
+                  }
+                  value={noteDraft.noteType}
+                >
+                  {(["thought", "meeting", "daily"] as const).map((noteType) => (
+                    <option key={noteType} value={noteType}>
+                      {noteTypeLabel(noteType)}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </FormGrid>
+            <Field label="メモ">
+              <textarea
+                onChange={(event) =>
+                  setNoteDraft((current) => ({
+                    ...current,
+                    body: event.target.value,
+                  }))
+                }
+                placeholder="考えたこと、会議メモ、日次の気づき"
+                value={noteDraft.body}
+              />
+            </Field>
+            <button
+              className="primary-button"
+              disabled={!canEdit || !noteDraft.title.trim() || !noteDraft.body.trim()}
+              type="submit"
+            >
+              <Plus size={15} aria-hidden="true" />
+              追加
+            </button>
+          </form>
+
+          <div className="record-list">
+            {workspace.mapNotes.map((note) => (
+              <MapNoteCard
+                canEdit={canEdit}
+                key={`${note.id}:${note.updatedAt}`}
+                note={note}
+                onDelete={onDeleteMapNote}
+                onUpdate={onUpdateMapNote}
+              />
+            ))}
+            {workspace.mapNotes.length === 0 ? (
+              <div className="empty-panel">思考メモはまだありません。</div>
+            ) : null}
+          </div>
+        </section>
+      </div>
+    </section>
+  );
+}
+
+function ActionItemCard({
+  actionItem,
+  canEdit,
+  onUpdate,
+}: {
+  actionItem: ActionItemRow;
+  canEdit: boolean;
+  onUpdate: (actionItem: ActionItemRow, draft: ActionItemUpdateDraft) => void;
+}) {
+  const [draft, setDraft] = useState<ActionItemUpdateDraft>({
+    title: actionItem.title,
+    body: actionItem.body,
+    priority: actionItem.priority,
+    memo: actionItem.memo ?? "",
+    status: actionItem.status,
+  });
+
+  function save(status = draft.status) {
+    if (!canEdit || !draft.title.trim() || !draft.body.trim()) return;
+    onUpdate(actionItem, { ...draft, status });
+  }
+
+  return (
+    <article className={`record-card record-card-${actionItem.status}`}>
+      <div className="record-card-head">
+        <span className="status-chip">{actionStatusLabel(actionItem.status)}</span>
+        <span className="status-chip">
+          優先度 {actionPriorityLabel(actionItem.priority)}
+        </span>
+        {actionItem.sourceType === "ai_question" ? (
+          <span className="status-chip">AI確認質問</span>
+        ) : null}
+      </div>
+      <Field label="タイトル">
+        <input
+          disabled={!canEdit}
+          onChange={(event) =>
+            setDraft((current) => ({ ...current, title: event.target.value }))
+          }
+          value={draft.title}
+        />
+      </Field>
+      <Field label="内容">
+        <textarea
+          disabled={!canEdit}
+          onChange={(event) =>
+            setDraft((current) => ({ ...current, body: event.target.value }))
+          }
+          value={draft.body}
+        />
+      </Field>
+      <FormGrid>
+        <Field label="状態">
+          <select
+            disabled={!canEdit}
+            onChange={(event) =>
+              setDraft((current) => ({
+                ...current,
+                status: event.target.value as ActionItemRow["status"],
+              }))
+            }
+            value={draft.status}
+          >
+            {(["open", "done", "dismissed"] as const).map((status) => (
+              <option key={status} value={status}>
+                {actionStatusLabel(status)}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="優先度">
+          <select
+            disabled={!canEdit}
+            onChange={(event) =>
+              setDraft((current) => ({
+                ...current,
+                priority: event.target.value as ActionItemRow["priority"],
+              }))
+            }
+            value={draft.priority}
+          >
+            {(["high", "medium", "low"] as const).map((priority) => (
+              <option key={priority} value={priority}>
+                {actionPriorityLabel(priority)}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </FormGrid>
+      <Field label="メモ">
+        <input
+          disabled={!canEdit}
+          onChange={(event) =>
+            setDraft((current) => ({ ...current, memo: event.target.value }))
+          }
+          value={draft.memo}
+        />
+      </Field>
+      <div className="button-row">
+        <button
+          className="ghost-button"
+          disabled={!canEdit}
+          onClick={() => save()}
+          type="button"
+        >
+          <Save size={14} aria-hidden="true" />
+          保存
+        </button>
+        <button
+          className="ghost-button"
+          disabled={!canEdit}
+          onClick={() => save("done")}
+          type="button"
+        >
+          <ListChecks size={14} aria-hidden="true" />
+          完了
+        </button>
+        <button
+          className="ghost-button"
+          disabled={!canEdit}
+          onClick={() => save("dismissed")}
+          type="button"
+        >
+          <X size={14} aria-hidden="true" />
+          見送り
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function MapNoteCard({
+  canEdit,
+  note,
+  onDelete,
+  onUpdate,
+}: {
+  canEdit: boolean;
+  note: MapNoteRow;
+  onDelete: (note: MapNoteRow) => void;
+  onUpdate: (note: MapNoteRow, draft: MapNoteDraft) => void;
+}) {
+  const [draft, setDraft] = useState<MapNoteDraft>({
+    title: note.title,
+    body: note.body,
+    noteType: note.noteType,
+  });
+
+  function save() {
+    if (!canEdit || !draft.title.trim() || !draft.body.trim()) return;
+    onUpdate(note, draft);
+  }
+
+  return (
+    <article className="record-card">
+      <div className="record-card-head">
+        <span className="status-chip">{noteTypeLabel(note.noteType)}</span>
+        <span className="status-chip">更新 {formatTime(note.updatedAt)}</span>
+      </div>
+      <FormGrid>
+        <Field label="タイトル">
+          <input
+            disabled={!canEdit}
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, title: event.target.value }))
+            }
+            value={draft.title}
+          />
+        </Field>
+        <Field label="種類">
+          <select
+            disabled={!canEdit}
+            onChange={(event) =>
+              setDraft((current) => ({
+                ...current,
+                noteType: event.target.value as MapNoteRow["noteType"],
+              }))
+            }
+            value={draft.noteType}
+          >
+            {(["thought", "meeting", "daily"] as const).map((noteType) => (
+              <option key={noteType} value={noteType}>
+                {noteTypeLabel(noteType)}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </FormGrid>
+      <Field label="メモ">
+        <textarea
+          disabled={!canEdit}
+          onChange={(event) =>
+            setDraft((current) => ({ ...current, body: event.target.value }))
+          }
+          value={draft.body}
+        />
+      </Field>
+      <div className="button-row">
+        <button
+          className="ghost-button"
+          disabled={!canEdit}
+          onClick={save}
+          type="button"
+        >
+          <Save size={14} aria-hidden="true" />
+          保存
+        </button>
+        <button
+          className="danger-button"
+          disabled={!canEdit}
+          onClick={() => onDelete(note)}
+          type="button"
+        >
+          <Trash2 size={14} aria-hidden="true" />
+          削除
+        </button>
       </div>
     </article>
   );
@@ -4455,10 +5220,16 @@ function priorityRank(value: string) {
 }
 
 function ExportView({
+  canOpenPath,
+  defaultExportDir,
   onExport,
+  onOpenPath,
   workspace,
 }: {
+  canOpenPath: boolean;
+  defaultExportDir: string | null;
   onExport: (command: "export_markdown" | "export_csv_bundle") => void;
+  onOpenPath: (path: string | null) => void;
   workspace: ProjectWorkspace;
 }) {
   return (
@@ -4466,7 +5237,11 @@ function ExportView({
       <div className="page-header">
         <div>
           <h1>出力</h1>
-          <p>MarkdownとCSVをマップ用フォルダのexportsへ保存します。</p>
+          <p>
+            MarkdownとCSVを
+            {defaultExportDir ? "設定済みの出力フォルダ" : "アプリ内exports"}
+            へ保存します。
+          </p>
         </div>
         <div className="button-row">
           <button
@@ -4487,13 +5262,28 @@ function ExportView({
           </button>
         </div>
       </div>
-      <div className="data-table">
+      <div className="export-destination">
+        <FolderOpen size={15} aria-hidden="true" />
+        <span>{defaultExportDir ?? "未設定: アプリ内exportsへ保存"}</span>
+      </div>
+      <div className="data-table export-table">
         {workspace.exportJobs.map((job) => (
           <div className="table-row" key={job.id}>
             <span>{job.exportType}</span>
             <span>{job.status}</span>
             <span>{job.outputPath}</span>
             <span>{formatTime(job.completedAt)}</span>
+            <span>
+              <button
+                className="ghost-button"
+                disabled={!canOpenPath || !job.outputPath}
+                onClick={() => onOpenPath(job.outputPath)}
+                type="button"
+              >
+                <ExternalLink size={14} aria-hidden="true" />
+                開く
+              </button>
+            </span>
           </div>
         ))}
       </div>
@@ -4501,15 +5291,57 @@ function ExportView({
   );
 }
 
-function HistoryView({ workspace }: { workspace: ProjectWorkspace }) {
+function HistoryView({
+  canSave,
+  onCreateNamedVersion,
+  workspace,
+}: {
+  canSave: boolean;
+  onCreateNamedVersion: (name: string, memo: string) => void;
+  workspace: ProjectWorkspace;
+}) {
+  const [draft, setDraft] = useState({ name: "", memo: "" });
+  const canSubmit = canSave && draft.name.trim().length > 0;
+
+  function submitVersion(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canSubmit) return;
+    onCreateNamedVersion(draft.name, draft.memo);
+    setDraft({ name: "", memo: "" });
+  }
+
   return (
     <section className="page-panel">
       <div className="page-header">
         <div>
           <h1>AI履歴</h1>
-          <p>どの実行がどのschemaと出力に対応するかを確認します。</p>
+          <p>AI実行と任意タイミングで保存した状態を確認します。</p>
         </div>
       </div>
+      <form className="named-version-form" onSubmit={submitVersion}>
+        <Field label="保存名">
+          <input
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, name: event.target.value }))
+            }
+            placeholder="例: 5月試験運用前"
+            value={draft.name}
+          />
+        </Field>
+        <Field label="メモ">
+          <textarea
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, memo: event.target.value }))
+            }
+            placeholder="この時点で見ておきたいこと"
+            value={draft.memo}
+          />
+        </Field>
+        <button className="primary-button" disabled={!canSubmit} type="submit">
+          <Save size={15} aria-hidden="true" />
+          現在の状態を保存
+        </button>
+      </form>
       <div className="data-table history-table">
         {workspace.aiRuns.map((run) => (
           <div
@@ -4526,9 +5358,10 @@ function HistoryView({ workspace }: { workspace: ProjectWorkspace }) {
       </div>
       <div className="snapshot-strip">
         {workspace.versions.map((version) => (
-          <span className="status-chip" key={version.id}>
+          <span className="status-chip snapshot-chip" key={version.id}>
             <Archive size={12} aria-hidden="true" />
-            {version.versionType} {formatTime(version.createdAt)}
+            {version.name ?? version.versionType} {formatTime(version.createdAt)}
+            {version.memo ? ` / ${version.memo}` : ""}
           </span>
         ))}
       </div>

@@ -9,9 +9,9 @@
 - 要件定義は`docs/requirements.md`を参照する。
 - 技術選定は`docs/tech-stack.md`を参照する。
 - 実装計画は以下を参照する。
-  - `docs/implementation-plan-phase-0.md`
-  - `docs/implementation-plan-mvp-1.md`
-  - `docs/implementation-plan-beta.md`
+  - `docs/archive/implementation-plan-phase-0.md`
+  - `docs/plans/implementation-plan-mvp-1.md`
+  - `docs/plans/implementation-plan-beta.md`
 - MVP-1の範囲を超える実装は、明示的な指示がない限り行わない。
 - MVP-1は「マップの材料入力 → AI抽出カード → 人間確認 → 顧客導線の売上マップ → 次に考える/動くためのMarkdown / CSV出力」を中心価値とする。
 - MVP-1の主役ユーザーは、個人事業主・小規模会社の経営者。代表ユーザーは奥村さん自身とし、コンサルタント/支援者は副次ユーザーとして扱う。
@@ -22,7 +22,7 @@
 - タスクが完了したら、該当する`- [ ]`を`- [x]`に更新する。
 - 部分的に完了したタスクはチェックを入れず、必要なら短い補足を追加する。
 - 新しいタスクが発生した場合は、該当フェーズの実装計画ファイルへチェックボックス付きで追加する。
-- 仕様変更が発生した場合は、実装計画だけでなく`requirements.md`または`tech-stack.md`も更新する。
+- 仕様変更が発生した場合は、実装計画だけでなく`docs/requirements.md`または`docs/tech-stack.md`も更新する。
 
 ## コミット運用
 

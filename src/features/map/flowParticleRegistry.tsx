@@ -1,30 +1,14 @@
-import {
-  createContext,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  type ReactNode,
-} from "react";
+import { useEffect, useMemo, useRef, type ReactNode } from "react";
 
 import {
   createFlowParticleRegistry,
   runFlowParticleFrame,
-  type FlowParticleEntry,
   type FlowParticleRegistry,
 } from "@/features/map/flowParticleLoop";
-
-type FlowParticleRegistryContextValue = {
-  register: (id: string, entry: FlowParticleEntry) => void;
-  unregister: (id: string) => void;
-};
-
-const FlowParticleRegistryContext =
-  createContext<FlowParticleRegistryContextValue | null>(null);
-
-export function useFlowParticleRegistry() {
-  return useContext(FlowParticleRegistryContext);
-}
+import {
+  FlowParticleRegistryContext,
+  type FlowParticleRegistryContextValue,
+} from "@/features/map/flowParticleRegistryContext";
 
 type FlowParticleRegistryProviderProps = {
   animationEnabled: boolean;

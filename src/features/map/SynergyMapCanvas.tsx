@@ -42,10 +42,8 @@ import type {
   LayoutFlowNode,
 } from "@/features/map/edgeLabelLayout";
 import { useEdgeLabelLayout } from "@/features/map/useEdgeLabelLayout";
-import {
-  FlowParticleRegistryProvider,
-  useFlowParticleRegistry,
-} from "@/features/map/flowParticleRegistry";
+import { FlowParticleRegistryProvider } from "@/features/map/flowParticleRegistry";
+import { useFlowParticleRegistry } from "@/features/map/flowParticleRegistryContext";
 import { MapLayoutCoordinator } from "@/features/map/MapLayoutCoordinator";
 import { mergeFlowEdges } from "@/features/map/mergeFlowEdges";
 import { mergeFlowNodes } from "@/features/map/mergeFlowNodes";
@@ -383,7 +381,7 @@ function SynergyEdge(props: EdgeProps<FlowEdge>) {
   const hasLeader =
     leaderAnchorX !== undefined &&
     leaderAnchorY !== undefined &&
-    (Math.hypot(labelX - leaderAnchorX, labelY - leaderAnchorY) > 0.5);
+    Math.hypot(labelX - leaderAnchorX, labelY - leaderAnchorY) > 0.5;
   const edgeType = props.data?.edgeType ?? "normal";
   const strength = props.data?.strength ?? "normal";
   const viewMode = props.data?.viewMode ?? "customer_journey";
@@ -622,8 +620,7 @@ export function SynergyMapCanvas({
     zoom: viewportZoom,
     selectedEdgeId,
   });
-  const particleAnimationEnabled =
-    globalFlowAnimationEnabled && !isNodeDragging;
+  const particleAnimationEnabled = globalFlowAnimationEnabled && !isNodeDragging;
   const displayEdges = useMemo((): FlowEdge[] => {
     return flowEdges.map((edge) => {
       const data = edge.data as SynergyEdgeData;
@@ -672,10 +669,11 @@ export function SynergyMapCanvas({
     const preservePositionNodeIds = withinDragGuard
       ? lastDraggedNodeIdsRef.current
       : undefined;
-    setNodes((current) =>
-      mergeFlowNodes(current, initialNodes, {
-        preservePositionNodeIds,
-      }) as FlowNode[],
+    setNodes(
+      (current) =>
+        mergeFlowNodes(current, initialNodes, {
+          preservePositionNodeIds,
+        }) as FlowNode[],
     );
   }, [initialNodes, setNodes]);
 
@@ -697,18 +695,15 @@ export function SynergyMapCanvas({
   }, [initialEdges, setEdges]);
 
   const zoomDebounceRef = useRef<number | null>(null);
-  const handleViewportMove = useCallback(
-    (_: unknown, viewport: { zoom: number }) => {
-      if (zoomDebounceRef.current !== null) {
-        window.clearTimeout(zoomDebounceRef.current);
-      }
-      zoomDebounceRef.current = window.setTimeout(() => {
-        setViewportZoom(viewport.zoom);
-        zoomDebounceRef.current = null;
-      }, 120);
-    },
-    [],
-  );
+  const handleViewportMove = useCallback((_: unknown, viewport: { zoom: number }) => {
+    if (zoomDebounceRef.current !== null) {
+      window.clearTimeout(zoomDebounceRef.current);
+    }
+    zoomDebounceRef.current = window.setTimeout(() => {
+      setViewportZoom(viewport.zoom);
+      zoomDebounceRef.current = null;
+    }, 120);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -761,59 +756,59 @@ export function SynergyMapCanvas({
         value={selected?.kind === "edge" ? selected.id : null}
       >
         <ReactFlow
-      className={`map-canvas ${editable ? "map-canvas-editable" : "map-canvas-readonly"}`}
-      edges={displayEdges}
-      edgeTypes={edgeTypes}
-      maxZoom={1.45}
-      minZoom={0.35}
-      nodeTypes={nodeTypes}
-      nodes={flowNodes}
-      nodesConnectable={editable}
-      nodesDraggable
-      nodeDragThreshold={4}
-      onInit={(instance) => setViewportZoom(instance.getZoom())}
-      onMove={handleViewportMove}
-      onMoveEnd={(_, viewport) => setViewportZoom(viewport.zoom)}
-      onConnect={handleConnect}
-      onEdgeClick={(_, edge) => onSelect({ kind: "edge", id: edge.id })}
-      onEdgesChange={onEdgesChange}
-      onNodeClick={(_, node) => onSelect({ kind: "node", id: node.id })}
-      onNodeDragStart={handleNodeDragStart}
-      onNodeDragStop={handleNodeDragStop}
-      onNodesChange={onNodesChange}
-      onPaneClick={() => onSelect(null)}
-      onSelectionChange={({ edges: selectedEdges, nodes: selectedNodes }) => {
-        const selectedNode = selectedNodes[0];
-        const selectedEdge = selectedEdges[0];
-        if (selectedNode) {
-          onSelect({ kind: "node", id: selectedNode.id });
-        } else if (selectedEdge) {
-          onSelect({ kind: "edge", id: selectedEdge.id });
-        }
-      }}
-      panOnScroll
-      proOptions={{ hideAttribution: true }}
-      selectNodesOnDrag={false}
-    >
-      <MapLayoutCoordinator
-        arrangeMode={!editable}
-        layoutRevision={layoutRevision}
-        nodeIds={coordinatorNodeIds}
-      />
-      <Controls className="map-controls" position="bottom-left" />
-      <MiniMap
-        className="map-minimap"
-        nodeColor={(node) => {
-          const type = (node.data as SynergyNodeData).nodeType;
-          if (type === "service") return "#168A83";
-          if (type === "channel") return "#4F5DAA";
-          if (type === "touchpoint") return "#D97706";
-          return "#64748B";
-        }}
-        pannable
-        position="bottom-right"
-        zoomable
-      />
+          className={`map-canvas ${editable ? "map-canvas-editable" : "map-canvas-readonly"}`}
+          edges={displayEdges}
+          edgeTypes={edgeTypes}
+          maxZoom={1.45}
+          minZoom={0.35}
+          nodeTypes={nodeTypes}
+          nodes={flowNodes}
+          nodesConnectable={editable}
+          nodesDraggable
+          nodeDragThreshold={4}
+          onInit={(instance) => setViewportZoom(instance.getZoom())}
+          onMove={handleViewportMove}
+          onMoveEnd={(_, viewport) => setViewportZoom(viewport.zoom)}
+          onConnect={handleConnect}
+          onEdgeClick={(_, edge) => onSelect({ kind: "edge", id: edge.id })}
+          onEdgesChange={onEdgesChange}
+          onNodeClick={(_, node) => onSelect({ kind: "node", id: node.id })}
+          onNodeDragStart={handleNodeDragStart}
+          onNodeDragStop={handleNodeDragStop}
+          onNodesChange={onNodesChange}
+          onPaneClick={() => onSelect(null)}
+          onSelectionChange={({ edges: selectedEdges, nodes: selectedNodes }) => {
+            const selectedNode = selectedNodes[0];
+            const selectedEdge = selectedEdges[0];
+            if (selectedNode) {
+              onSelect({ kind: "node", id: selectedNode.id });
+            } else if (selectedEdge) {
+              onSelect({ kind: "edge", id: selectedEdge.id });
+            }
+          }}
+          panOnScroll
+          proOptions={{ hideAttribution: true }}
+          selectNodesOnDrag={false}
+        >
+          <MapLayoutCoordinator
+            arrangeMode={!editable}
+            layoutRevision={layoutRevision}
+            nodeIds={coordinatorNodeIds}
+          />
+          <Controls className="map-controls" position="bottom-left" />
+          <MiniMap
+            className="map-minimap"
+            nodeColor={(node) => {
+              const type = (node.data as SynergyNodeData).nodeType;
+              if (type === "service") return "#168A83";
+              if (type === "channel") return "#4F5DAA";
+              if (type === "touchpoint") return "#D97706";
+              return "#64748B";
+            }}
+            pannable
+            position="bottom-right"
+            zoomable
+          />
         </ReactFlow>
       </SelectedEdgeContext.Provider>
     </FlowParticleRegistryProvider>

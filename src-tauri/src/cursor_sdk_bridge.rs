@@ -170,7 +170,10 @@ pub fn run_structured_turn(
             ok: false,
             response_json: None,
             errors: vec![if stderr.is_empty() {
-                format!("Cursor SDK bridge exited with status {:?}. stdout={stdout}", output.status.code())
+                format!(
+                    "Cursor SDK bridge exited with status {:?}. stdout={stdout}",
+                    output.status.code()
+                )
             } else {
                 format!("Cursor SDK bridge failed: {stderr}")
             }],

@@ -4,8 +4,8 @@
 
 関連資料:
 
-- `docs/product-vision-business-principles.md`
-- `docs/product-role-models-and-competitors-research.md`
+- `docs/product/product-vision-business-principles.md`
+- `docs/product/product-role-models-and-competitors-research.md`
 - `docs/mvp-spec.md`
 - `docs/requirements.md`
 

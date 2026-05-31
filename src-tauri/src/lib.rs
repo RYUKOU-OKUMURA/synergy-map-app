@@ -127,6 +127,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "business_impact_view",
         sql: include_str!("../migrations/0003_business_impact_view.sql"),
     },
+    Migration {
+        version: 4,
+        name: "phase1_daily_use",
+        sql: include_str!("../migrations/0004_phase1_daily_use.sql"),
+    },
 ];
 
 const LEGACY_INITIAL_MIGRATION_CHECKSUM: &str = "0001_initial_v1";
@@ -706,6 +711,89 @@ fn save_ai_settings_command(
 }
 
 #[tauri::command]
+fn select_default_export_dir(
+    app: tauri::AppHandle,
+    state: State<'_, DbState>,
+) -> Result<AiSettings, String> {
+    let selected_folder = app.dialog().file().blocking_pick_folder();
+    let Some(selected_folder) = selected_folder else {
+        return Ok(load_ai_settings(&state.db_path));
+    };
+    let selected_path = selected_folder
+        .into_path()
+        .map_err(|error| error.to_string())?;
+    let mut settings = load_ai_settings(&state.db_path);
+    settings.default_export_dir = Some(selected_path.display().to_string());
+    save_ai_settings(&state.db_path, &settings)?;
+    Ok(settings)
+}
+
+#[tauri::command]
+fn open_export_path(state: State<'_, DbState>, path: String) -> Result<(), String> {
+    let target = PathBuf::from(path);
+    let target = target
+        .canonicalize()
+        .map_err(|error| format!("出力先を確認できませんでした: {error}"))?;
+    let open_target = if target.is_file() {
+        target
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "出力ファイルの親フォルダを確認できませんでした。".to_string())?
+    } else {
+        target.clone()
+    };
+
+    if !is_allowed_export_path(&state.db_path, &target)? {
+        return Err("許可された出力フォルダ外のパスは開けません。".to_string());
+    }
+
+    open_path_with_os(&open_target)
+}
+
+fn is_allowed_export_path(db_path: &Path, target: &Path) -> Result<bool, String> {
+    let mut bases = vec![app_data_dir_from_db(db_path)?
+        .canonicalize()
+        .map_err(|error| error.to_string())?];
+
+    if let Some(default_export_dir) = load_ai_settings(db_path).default_export_dir {
+        let path = PathBuf::from(default_export_dir);
+        if let Ok(canonical) = path.canonicalize() {
+            bases.push(canonical);
+        }
+    }
+
+    Ok(bases.iter().any(|base| target.starts_with(base)))
+}
+
+fn open_path_with_os(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(path);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", &path.display().to_string()]);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("出力先を開けませんでした: {error}"))
+}
+
+#[tauri::command]
 fn get_cursor_sdk_status() -> CursorSdkStatus {
     let root = repo_root().ok();
     let script_exists = root
@@ -1117,6 +1205,8 @@ pub fn run() {
             get_codex_runtime_info,
             get_ai_settings,
             save_ai_settings_command,
+            select_default_export_dir,
+            open_export_path,
             get_cursor_sdk_status,
             run_cursor_sdk_smoke_test,
             open_external_url,
@@ -1127,6 +1217,7 @@ pub fn run() {
             mvp1::run_extract_items,
             mvp1::create_onboarding_brief_source,
             mvp1::create_text_information_source,
+            mvp1::delete_source_file,
             mvp1::create_extracted_item,
             mvp1::update_extracted_item,
             mvp1::generate_map_from_items,
@@ -1138,6 +1229,12 @@ pub fn run() {
             mvp1::generate_suggestions_from_map,
             mvp1::ask_map_insight,
             mvp1::update_suggestion,
+            mvp1::create_action_item,
+            mvp1::update_action_item,
+            mvp1::create_map_note,
+            mvp1::update_map_note,
+            mvp1::delete_map_note,
+            mvp1::create_named_version,
             mvp1::export_markdown,
             mvp1::export_csv_bundle
         ])
@@ -1161,6 +1258,66 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
             .expect("migration count should be readable");
 
+        assert_eq!(migration_count, MIGRATIONS.len() as i64);
+
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn phase1_daily_use_migration_applies_to_existing_database() {
+        let db_path = std::env::temp_dir().join(format!("synergy-map-test-{}.db", Uuid::new_v4()));
+        let mut connection = open_connection(&db_path).expect("connection should open");
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS _migrations (
+                    version INTEGER PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL,
+                    checksum TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );",
+            )
+            .expect("migrations table should create");
+
+        for migration in MIGRATIONS.iter().take(3) {
+            connection
+                .execute_batch(migration.sql)
+                .expect("legacy migration should apply");
+            connection
+                .execute(
+                    "INSERT INTO _migrations (version, name, checksum, applied_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        migration.version,
+                        migration.name,
+                        migration_checksum(migration),
+                        now_rfc3339().expect("time should format")
+                    ],
+                )
+                .expect("legacy migration record should insert");
+        }
+
+        run_migrations(&mut connection).expect("phase1 migration should apply");
+
+        let action_item_table: String = connection
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'action_items'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("action_items table should exist");
+        let version_name_column: String = connection
+            .query_row(
+                "SELECT name FROM pragma_table_info('versions') WHERE name = 'name'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("versions.name column should exist");
+        let migration_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM _migrations", [], |row| row.get(0))
+            .expect("migration count should load");
+
+        assert_eq!(action_item_table, "action_items");
+        assert_eq!(version_name_column, "name");
         assert_eq!(migration_count, MIGRATIONS.len() as i64);
 
         let _ = fs::remove_file(db_path);

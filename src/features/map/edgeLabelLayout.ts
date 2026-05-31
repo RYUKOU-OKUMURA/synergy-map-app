@@ -79,10 +79,7 @@ let pathMeasureElement: SVGPathElement | null = null;
 function getPathMeasureElement() {
   if (typeof document === "undefined") return null;
   if (!pathMeasureElement) {
-    pathMeasureElement = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "path",
-    );
+    pathMeasureElement = document.createElementNS("http://www.w3.org/2000/svg", "path");
   }
   return pathMeasureElement;
 }
@@ -93,10 +90,7 @@ function numericStyleValue(value: unknown) {
 
 export function getNodeDimensions(node: LayoutFlowNode) {
   const width =
-    node.width ??
-    node.measured?.width ??
-    numericStyleValue(node.style?.width) ??
-    202;
+    node.width ?? node.measured?.width ?? numericStyleValue(node.style?.width) ?? 202;
   const height =
     node.height ??
     node.measured?.height ??
@@ -108,10 +102,7 @@ export function getNodeDimensions(node: LayoutFlowNode) {
 export function estimateLabelBox(label: string, hasWarningIcon: boolean) {
   void hasWarningIcon;
   const textWidth = Math.max(label.length, 2) * CHAR_WIDTH_EST;
-  const width = Math.max(
-    52,
-    LABEL_PADDING_X + LABEL_ICON_WIDTH + textWidth,
-  );
+  const width = Math.max(52, LABEL_PADDING_X + LABEL_ICON_WIDTH + textWidth);
   return { width, height: LABEL_HEIGHT };
 }
 
@@ -185,10 +176,8 @@ function screenLabelOverlapArea(
     const screenDx =
       Math.abs(candidate.x - other.cx) * zoom * EDGE_LABEL_HORIZONTAL_SCALE;
     const screenDy = Math.abs(candidate.y - other.cy) * zoom;
-    const minDx =
-      (labelBox.width + other.width) / 2 + LABEL_COLLISION_PADDING;
-    const minDy =
-      (labelBox.height + other.height) / 2 + LABEL_COLLISION_PADDING;
+    const minDx = (labelBox.width + other.width) / 2 + LABEL_COLLISION_PADDING;
+    const minDy = (labelBox.height + other.height) / 2 + LABEL_COLLISION_PADDING;
 
     if (screenDx < minDx && screenDy < minDy) {
       overlap += (minDx - screenDx) * (minDy - screenDy);
@@ -207,11 +196,7 @@ function labelCenterInsideRect(centerX: number, centerY: number, rect: Rect) {
   );
 }
 
-function nodeCollisionPenalty(
-  centerX: number,
-  centerY: number,
-  nodeObstacles: Rect[],
-) {
+function nodeCollisionPenalty(centerX: number, centerY: number, nodeObstacles: Rect[]) {
   const hitsNode = nodeObstacles.some((rect) =>
     labelCenterInsideRect(centerX, centerY, rect),
   );
@@ -262,8 +247,7 @@ function candidateCost(
   selectedEdgeId: string | null | undefined,
 ) {
   let cost =
-    screenLabelOverlapArea(candidate, labelBox, placed, zoom) *
-    COLLISION_PENALTY;
+    screenLabelOverlapArea(candidate, labelBox, placed, zoom) * COLLISION_PENALTY;
   cost += nodeCollisionPenalty(candidate.x, candidate.y, nodeObstacles);
 
   cost += Math.abs(candidate.t - 0.5) * 40;
@@ -283,10 +267,7 @@ function candidateCost(
   return cost;
 }
 
-function toPlacement(
-  candidate: LabelCandidate,
-  hidden = false,
-): EdgeLabelPlacement {
+function toPlacement(candidate: LabelCandidate, hidden = false): EdgeLabelPlacement {
   const distance = Math.hypot(
     candidate.x - candidate.anchorX,
     candidate.y - candidate.anchorY,
@@ -328,9 +309,7 @@ function pickCandidate(
     );
     const overlap =
       screenLabelOverlapArea(candidate, labelBox, placed, zoom) +
-      (nodeCollisionPenalty(candidate.x, candidate.y, nodeObstacles) > 0
-        ? 1
-        : 0);
+      (nodeCollisionPenalty(candidate.x, candidate.y, nodeObstacles) > 0 ? 1 : 0);
 
     if (!best || cost < best.cost) {
       best = { candidate, cost };
@@ -362,7 +341,10 @@ function pickCandidate(
   }
 
   if (bestColliding && (isSelected || bestColliding.overlap > 0)) {
-    return toPlacement(bestColliding.candidate, !isSelected && bestColliding.overlap > 0);
+    return toPlacement(
+      bestColliding.candidate,
+      !isSelected && bestColliding.overlap > 0,
+    );
   }
 
   return toPlacement(best.candidate, !isSelected);

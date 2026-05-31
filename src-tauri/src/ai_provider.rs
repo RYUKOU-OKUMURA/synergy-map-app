@@ -47,14 +47,7 @@ pub fn run_structured_ai(
         AiProviderKind::Cursor => AiProviderKind::Codex,
     };
 
-    let primary_result = run_with_provider(
-        app.clone(),
-        cwd,
-        prompt,
-        &schema,
-        settings,
-        primary,
-    );
+    let primary_result = run_with_provider(app.clone(), cwd, prompt, &schema, settings, primary);
 
     if primary_result.response_json.is_some() {
         return primary_result;

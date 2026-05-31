@@ -4,7 +4,7 @@
 
 ## 目的
 
-`docs/ux-improvement-plan-initial-map-flow.md` の方針を、実装フェーズ、タスク、優先順位、完了条件に落とし込む。
+`docs/archive/ux-improvement-plan-initial-map-flow.md` の方針を、実装フェーズ、タスク、優先順位、完了条件に落とし込む。
 
 この計画の最優先ゴールは、初回ユーザーが迷わず、5分以内に最初の売上マップへ到達できること。
 
@@ -14,11 +14,11 @@
 
 ## 関連ドキュメント
 
-- `docs/ux-improvement-plan-initial-map-flow.md`
-- `docs/product-vision-business-principles.md`
-- `docs/ui-design-mvp-1.md`
+- `docs/archive/ux-improvement-plan-initial-map-flow.md`
+- `docs/product/product-vision-business-principles.md`
+- `docs/design/ui-design-mvp-1.md`
 - `docs/mvp-spec.md`
-- `docs/implementation-plan-mvp-1.md`
+- `docs/plans/implementation-plan-mvp-1.md`
 
 ## 実装方針
 

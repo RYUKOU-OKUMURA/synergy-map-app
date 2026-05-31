@@ -178,6 +178,8 @@ export type VersionRow = {
   id: string;
   projectId: string;
   versionType: string;
+  name: string | null;
+  memo: string | null;
   snapshotJson: string;
   createdAt: string;
 };
@@ -187,6 +189,32 @@ export type ViewLayoutRow = {
   projectId: string;
   viewId: string;
   layoutJson: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ActionItemRow = {
+  id: string;
+  projectId: string;
+  aiRunId: string | null;
+  sourceType: string;
+  sourceId: string | null;
+  title: string;
+  body: string;
+  status: "open" | "done" | "dismissed";
+  priority: "low" | "medium" | "high";
+  memo: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+};
+
+export type MapNoteRow = {
+  id: string;
+  projectId: string;
+  title: string;
+  body: string;
+  noteType: "thought" | "meeting" | "daily";
   createdAt: string;
   updatedAt: string;
 };
@@ -203,6 +231,8 @@ export type ProjectWorkspace = {
   exportJobs: ExportJobRow[];
   versions: VersionRow[];
   viewLayouts: ViewLayoutRow[];
+  actionItems: ActionItemRow[];
+  mapNotes: MapNoteRow[];
 };
 
 export type AiProviderKind = "codex" | "cursor";
@@ -211,6 +241,7 @@ export type AiSettings = {
   primaryProvider: AiProviderKind;
   fallbackEnabled: boolean;
   cursorModelId: string;
+  defaultExportDir: string | null;
 };
 
 export type CursorSdkStatus = {
@@ -288,7 +319,13 @@ export type MvpRunResult = {
 export type ExportResult = {
   ok: boolean;
   exportJob: ExportJobRow;
+  warning: string | null;
   workspace: ProjectWorkspace;
+};
+
+export type DeleteSourceResult = {
+  workspace: ProjectWorkspace;
+  warnings: string[];
 };
 
 export type SelectedMapElement =

@@ -18,7 +18,10 @@
 - 抽出カードで、事業・商品・チャネル・顧客接点・財務参考情報を確認
 - MVP-1のマップは顧客導線ビューのみ
 - 施策カード、確認質問、AIコメントを簡易生成
-- Markdown、CSVで出力
+- 確認質問/タスクと思考メモを記録ビューで管理
+- 任意タイミングで名前付き保存
+- Markdown、CSVで出力し、既定出力フォルダを設定可能
+- 情報ソース単体を削除し、再抽出/再生成の判断へつなげる
 - PDF出力はMVP-1から外し、Beta以降でレポート型テンプレートを再検討する
 - AI実行履歴、出典管理、簡易スナップショットを保存
 
@@ -39,17 +42,19 @@ Obsidian Vault の構想メモは背景資料として扱う。
 - [要件定義書](docs/requirements.md)
 - [技術スタック](docs/tech-stack.md)
 - [MVP仕様](docs/mvp-spec.md)
-- [Phase 0実装計画](docs/implementation-plan-phase-0.md)
-- [MVP-1実装計画](docs/implementation-plan-mvp-1.md)
-- [Beta実装計画](docs/implementation-plan-beta.md)
-- [構想メモ](docs/シナジーマップ可視化ツール構想.md)
+- [ドキュメント目次](docs/README.md)
+- [Phase 0実装計画](docs/archive/implementation-plan-phase-0.md)
+- [MVP-1実装計画](docs/plans/implementation-plan-mvp-1.md)
+- [Phase 1試験運用チェックリスト](docs/plans/trial-operation-phase-1.md)
+- [Beta実装計画](docs/plans/implementation-plan-beta.md)
+- [構想メモ](docs/archive/シナジーマップ可視化ツール構想.md)
 - [エージェント運用ルール](agent.md)
 
 ## Project Structure
 
 ```text
 synergy-map-app/
-├── docs/       # 要件、画面設計、技術メモ
+├── docs/       # 正本、計画、設計、参考資料。入口は docs/README.md
 ├── samples/    # サンプル入力資料、生成例
 ├── src/        # React frontend
 └── src-tauri/  # Tauri / Rust backend
@@ -57,7 +62,7 @@ synergy-map-app/
 
 ## Development Environment
 
-Phase 0では、MVP-1へ進む前の技術検証としてTauriデスクトップPoCを起動する。
+MVP-1 / Phase 1では、開発者本人がmacOS上の`pnpm tauri dev`で実事業メモを投入し、AI抽出、売上マップ、次の一手、記録、出力まで日常的に試験運用できる状態を基準にする。
 
 確認日: 2026-05-16
 
@@ -80,7 +85,7 @@ Reference: [Tauri v2 Prerequisites](https://v2.tauri.app/start/prerequisites/)
 
 ### Windows Prerequisites
 
-WindowsでPhase 0を検証する前に、以下を確認する。
+Windowsで検証する前に、以下を確認する。Phase 1の受け入れ対象はmacOS試験運用であり、Windows通し確認、配布、署名、notarizationは対象外。
 
 - Microsoft C++ Build Toolsを入れ、`Desktop development with C++`を有効にする。
 - Microsoft Edge WebView2 Runtimeを確認する。Windows 10 version 1803以降では通常インストール済み。
@@ -97,14 +102,15 @@ pnpm tauri dev
 pnpm build
 pnpm lint
 pnpm format:check
+(cd src-tauri && cargo fmt -- --check)
 (cd src-tauri && cargo test)
 ```
 
-Phase 0の現時点では、`pnpm tauri dev`でSynergy Mapのデスクトップウィンドウが起動し、React画面にマップ一覧プレースホルダーが表示される。
+Phase 1の受け入れは`pnpm tauri dev`で行う。`pnpm dev`のブラウザ表示はUIデモ確認用。
 
 ## Local Data
 
-Phase 0のSQLite DBはTauriのapp data directoryに保存する。
+MVP-1のSQLite DBとアプリ内exportsはTauriのapp data directoryに保存する。既定出力フォルダを設定した場合、Markdown / CSVはそのフォルダへ保存し、利用できない場合はアプリ内exportsへフォールバックする。
 
 - macOS確認済み: `/Users/ryukouokumura/Library/Application Support/com.synergymap.app/synergy-map.db`
 - Windows想定: `%APPDATA%\\com.synergymap.app\\synergy-map.db`

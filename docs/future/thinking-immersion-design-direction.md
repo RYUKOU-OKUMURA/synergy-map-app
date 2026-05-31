@@ -6,12 +6,12 @@
 
 本ドキュメントは、synergy-map-app を「経営者・コンサル・参謀役の思考没入ツール」として位置づける場合の、設計思想と中心命題を整理したもの。
 
-既存の [product-vision-business-principles.md](./product-vision-business-principles.md) や [project-context.md](./project-context.md) で示されている「AIが事業構造を分析してマップ生成する業務ツール」の路線と、本ドキュメントが示す「ユーザーの脳が主役の思考装置」の方向性には**重点のずれ**がある。両者をどう統合するか、あるいはどちらに重心を置くかは、本ドキュメントでは結論を出さず、設計判断の選択肢として残す。
+既存の [product-vision-business-principles.md](../product/product-vision-business-principles.md) や [project-context.md](../project-context.md) で示されている「AIが事業構造を分析してマップ生成する業務ツール」の路線と、本ドキュメントが示す「ユーザーの脳が主役の思考装置」の方向性には**重点のずれ**がある。両者をどう統合するか、あるいはどちらに重心を置くかは、本ドキュメントでは結論を出さず、設計判断の選択肢として残す。
 
 関連:
 
 - [layered-map-future-concept.md](./layered-map-future-concept.md) — 本方向性と強く呼応する将来構想（MVP-1後）
-- [product-vision-business-principles.md](./product-vision-business-principles.md) — 現状の正式なプロダクト思想
+- [product-vision-business-principles.md](../product/product-vision-business-principles.md) — 現状の正式なプロダクト思想
 
 ## 1. 起点となる課題
 
@@ -84,7 +84,7 @@
 
 ### 商業上の位置づけ
 
-AI機能は本プロダクトの**目玉**であり、課金理由の中心軸。月額課金モデル（[product-vision-business-principles.md](./product-vision-business-principles.md) 参照）で継続利用してもらうためには、AI機能の質と使いやすさが決定的に重要。
+AI機能は本プロダクトの**目玉**であり、課金理由の中心軸。月額課金モデル（[product-vision-business-principles.md](../product/product-vision-business-principles.md) 参照）で継続利用してもらうためには、AI機能の質と使いやすさが決定的に重要。
 
 したがって、AI機能を**減らす方向の最適化は採らない**。
 
@@ -133,7 +133,7 @@ AIが代わりに考えてくれる状態になると本末転倒。しかし「
 ### 8.3 現状路線との統合
 
 - 現状のAI抽出パイプライン（資料 → AI抽出 → ノード化）を残しつつ、思考没入モードを載せるのか
-- 現状のデータモデル（[mvp1Types.ts](../src/lib/mvp1Types.ts)）は親子・階層構造を持たない。これをどう拡張するか
+- 現状のデータモデル（[mvp1Types.ts](../../src/lib/mvp1Types.ts)）は親子・階層構造を持たない。これをどう拡張するか
 - レイヤー型マップ構想（[layered-map-future-concept.md](./layered-map-future-concept.md)）との統合方針
 
 ## 9. 現状思想とのギャップ

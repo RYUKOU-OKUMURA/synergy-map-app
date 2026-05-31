@@ -361,6 +361,11 @@ button:disabled {
   background: #ffe4e6;
 }
 
+.icon-button {
+  width: 32px;
+  padding: 0;
+}
+
 .button-row {
   display: flex;
   flex-wrap: wrap;
@@ -1865,6 +1870,18 @@ button:disabled {
   font-size: 12px;
 }
 
+.export-folder-path {
+  min-height: 40px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-muted);
+  padding: 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .settings-detail-card dl {
   display: grid;
   grid-template-columns: 160px minmax(0, 1fr);
@@ -2230,7 +2247,7 @@ button:disabled {
 
 .source-row {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) minmax(190px, auto) 96px;
+  grid-template-columns: 22px minmax(0, 1fr) minmax(190px, auto) 96px 32px;
   align-items: start;
   gap: 12px;
   border: 1px solid var(--border);
@@ -2326,6 +2343,82 @@ button:disabled {
   font-size: 12px;
   font-weight: 750;
   text-align: right;
+}
+
+.records-panel {
+  overflow: auto;
+}
+
+.records-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.record-section,
+.record-form,
+.record-list,
+.record-card {
+  display: grid;
+  gap: 12px;
+}
+
+.record-section,
+.record-card,
+.named-version-form {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.record-card-open {
+  border-color: #bae6fd;
+  background: #f0f9ff;
+}
+
+.record-card-dismissed {
+  opacity: 0.78;
+}
+
+.record-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.export-destination {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.export-destination span {
+  min-width: 0;
+}
+
+.export-table .table-row {
+  grid-template-columns: 0.7fr 0.7fr minmax(0, 1.8fr) 120px 96px;
+}
+
+.named-version-form {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.snapshot-chip {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .ai-send-confirm {
@@ -2803,7 +2896,8 @@ button:disabled {
   }
 
   .source-overview,
-  .source-row {
+  .source-row,
+  .records-grid {
     grid-template-columns: 1fr;
   }
 

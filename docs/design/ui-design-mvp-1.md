@@ -4,7 +4,7 @@
 
 ## 参照画像
 
-![MVP-1 map UI reference](assets/mvp-1-map-ui-reference.png)
+![MVP-1 map UI reference](../assets/mvp-1-map-ui-reference.png)
 
 この画像をMVP-1のUI基準にする。完全なピクセル再現ではなく、React / CSS / React Flowで安定して再現できる構造、密度、色、状態表現を優先する。
 
@@ -189,7 +189,7 @@ font-family:
 
 - この画面ではメインキャンバスを最大化する。
 - 抽出カード、AIコメント、施策は折りたたみで補助に回す。
-- マップの視覚仕様は `docs/synergy-map-design-mvp-1.md` に従う。
+- マップの視覚仕様は `docs/design/synergy-map-design-mvp-1.md` に従う。
 
 ### エクスポート
 

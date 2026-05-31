@@ -26,6 +26,8 @@ export const emptyWorkspace: ProjectWorkspace = {
   exportJobs: [],
   versions: [],
   viewLayouts: [],
+  actionItems: [],
+  mapNotes: [],
 };
 
 export const demoWorkspace: ProjectWorkspace = {
@@ -369,6 +371,34 @@ export const demoWorkspace: ProjectWorkspace = {
   aiRuns: [],
   exportJobs: [],
   versions: [],
+  actionItems: [
+    {
+      id: "action-1",
+      projectId: demoProject.id,
+      aiRunId: "run-2",
+      sourceType: "ai_question",
+      sourceId: "run-2",
+      title: "確認質問",
+      body: "問い合わせから初回商談までの担当者と期限は決まっていますか？",
+      status: "open",
+      priority: "high",
+      memo: null,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+    },
+  ],
+  mapNotes: [
+    {
+      id: "note-1",
+      projectId: demoProject.id,
+      title: "次回確認メモ",
+      body: "Web問い合わせ後のフォロー期限と記録先を確認する。",
+      noteType: "thought",
+      createdAt: now,
+      updatedAt: now,
+    },
+  ],
   viewLayouts: [
     {
       id: "layout-impact",

@@ -4,10 +4,10 @@
 
 参照資料:
 
-- `docs/product-vision-business-principles.md`
+- `docs/product/product-vision-business-principles.md`
 - `docs/mvp-spec.md`
 - `docs/requirements.md`
-- `docs/シナジーマップ可視化ツール構想.md`
+- `docs/archive/シナジーマップ可視化ツール構想.md`
 
 ## 前提整理
 

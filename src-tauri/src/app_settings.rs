@@ -14,6 +14,8 @@ pub struct AiSettings {
     pub fallback_enabled: bool,
     #[serde(default = "default_cursor_model_id")]
     pub cursor_model_id: String,
+    #[serde(default)]
+    pub default_export_dir: Option<String>,
 }
 
 fn default_primary_provider() -> AiProviderKind {
@@ -34,6 +36,7 @@ impl Default for AiSettings {
             primary_provider: default_primary_provider(),
             fallback_enabled: default_fallback_enabled(),
             cursor_model_id: default_cursor_model_id(),
+            default_export_dir: None,
         }
     }
 }
@@ -63,8 +66,7 @@ pub fn save_ai_settings(db_path: &Path, settings: &AiSettings) -> Result<(), Str
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    let serialized =
-        serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
+    let serialized = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
     fs::write(path, serialized).map_err(|error| error.to_string())
 }
 
@@ -78,5 +80,24 @@ mod tests {
         assert_eq!(settings.primary_provider, AiProviderKind::Codex);
         assert!(settings.fallback_enabled);
         assert_eq!(settings.cursor_model_id, "composer-2.5");
+        assert_eq!(settings.default_export_dir, None);
+    }
+
+    #[test]
+    fn settings_persist_default_export_dir() {
+        let db_path =
+            std::env::temp_dir().join(format!("synergy-map-settings-{}.db", uuid::Uuid::new_v4()));
+        let export_dir = std::env::temp_dir().join("synergy-map-test-exports");
+        let settings = AiSettings {
+            default_export_dir: Some(export_dir.display().to_string()),
+            ..AiSettings::default()
+        };
+
+        save_ai_settings(&db_path, &settings).expect("settings should save");
+        let loaded = load_ai_settings(&db_path);
+
+        assert_eq!(loaded.default_export_dir, settings.default_export_dir);
+
+        let _ = fs::remove_file(app_settings_path(&db_path).expect("path should resolve"));
     }
 }

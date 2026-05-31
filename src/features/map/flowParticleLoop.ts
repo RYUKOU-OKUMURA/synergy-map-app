@@ -57,7 +57,7 @@ export function runFlowParticleFrame(
       if (!circle) continue;
 
       const progress =
-        (((now - startTime) + index * staggerMs) % durationMs) / durationMs;
+        ((now - startTime + index * staggerMs) % durationMs) / durationMs;
       const point = path.getPointAtLength(progress * length);
       const baseOpacity = fadeEnds ? fadeParticleOpacity(progress) : 1;
       const opacity = Math.min(

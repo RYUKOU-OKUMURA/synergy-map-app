@@ -19,6 +19,7 @@ use crate::ai_schema::{
     validate_extracted_items_json, validate_map_draft_json, validate_map_insight_json,
     validate_suggestion_cards_json, SCHEMA_VERSION,
 };
+use crate::app_settings::load_ai_settings;
 use crate::DbState;
 
 const LOCAL_MODEL: &str = "mvp-local-draft";
@@ -213,6 +214,8 @@ pub struct VersionRow {
     id: String,
     project_id: String,
     version_type: String,
+    name: Option<String>,
+    memo: Option<String>,
     snapshot_json: String,
     created_at: String,
 }
@@ -224,6 +227,36 @@ pub struct ViewLayoutRow {
     project_id: String,
     view_id: String,
     layout_json: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionItemRow {
+    id: String,
+    project_id: String,
+    ai_run_id: Option<String>,
+    source_type: String,
+    source_id: Option<String>,
+    title: String,
+    body: String,
+    status: String,
+    priority: String,
+    memo: Option<String>,
+    created_at: String,
+    updated_at: String,
+    completed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapNoteRow {
+    id: String,
+    project_id: String,
+    title: String,
+    body: String,
+    note_type: String,
     created_at: String,
     updated_at: String,
 }
@@ -242,6 +275,8 @@ pub struct ProjectWorkspace {
     export_jobs: Vec<ExportJobRow>,
     versions: Vec<VersionRow>,
     view_layouts: Vec<ViewLayoutRow>,
+    action_items: Vec<ActionItemRow>,
+    map_notes: Vec<MapNoteRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -258,7 +293,15 @@ pub struct MvpRunResult {
 pub struct ExportResult {
     ok: bool,
     export_job: ExportJobRow,
+    warning: Option<String>,
     workspace: ProjectWorkspace,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteSourceResult {
+    workspace: ProjectWorkspace,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -478,19 +521,15 @@ pub fn run_extract_items(
 
     if chunks.is_empty() {
         return Err(
-            "読み取り済みsource chunksがありません。先にマップの材料を追加してください。".to_string(),
+            "読み取り済みsource chunksがありません。先にマップの材料を追加してください。"
+                .to_string(),
         );
     }
 
     let purpose_context = prompt_purpose_context_from_chunks(&chunks);
     let prompt = extraction_prompt(&chunks, &purpose_context);
     let prompt_hash = hash_text(&prompt);
-    let ai_result = try_structured_ai(
-        app,
-        &state.db_path,
-        &prompt,
-        extracted_items_json_schema(),
-    );
+    let ai_result = try_structured_ai(app, &state.db_path, &prompt, extracted_items_json_schema());
     let (provider_used, duration_ms) = provider_metadata(&ai_result);
     let (output_json, model, status, error, fallback_used, message) = match ai_result.response_json
     {
@@ -869,6 +908,71 @@ pub fn create_text_information_source(
     transaction.commit().map_err(|error| error.to_string())?;
 
     load_workspace(&connection, &project_id)
+}
+
+#[tauri::command]
+pub fn delete_source_file(
+    state: State<'_, DbState>,
+    project_id: String,
+    source_file_id: String,
+) -> Result<DeleteSourceResult, String> {
+    delete_source_file_inner(&state.db_path, project_id, source_file_id)
+}
+
+fn delete_source_file_inner(
+    db_path: &PathBuf,
+    project_id: String,
+    source_file_id: String,
+) -> Result<DeleteSourceResult, String> {
+    let app_data_dir = app_data_dir_from_db(db_path)?.to_path_buf();
+    let mut connection = open_connection(db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+
+    let exists: Option<String> = connection
+        .query_row(
+            "SELECT id FROM source_files WHERE project_id = ?1 AND id = ?2",
+            params![project_id.as_str(), source_file_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+
+    if exists.is_none() {
+        return Err("情報ソースが見つかりません。".to_string());
+    }
+
+    let source_dir = source_files_dir(&app_data_dir, &project_id).join(&source_file_id);
+    let chunks_dir = source_chunks_dir(&app_data_dir, &project_id).join(&source_file_id);
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    transaction
+        .execute(
+            "DELETE FROM source_files WHERE project_id = ?1 AND id = ?2",
+            params![project_id.as_str(), source_file_id.as_str()],
+        )
+        .map_err(|error| error.to_string())?;
+    record_snapshot_in_transaction(&transaction, &project_id, "human_delete_source_file")?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    let mut warnings = Vec::new();
+    for directory in [source_dir, chunks_dir] {
+        if directory.exists() {
+            if let Err(error) = fs::remove_dir_all(&directory) {
+                warnings.push(format!(
+                    "{} を削除できませんでした: {}",
+                    directory.display(),
+                    error
+                ));
+            }
+        }
+    }
+
+    Ok(DeleteSourceResult {
+        workspace: load_workspace(&connection, &project_id)?,
+        warnings,
+    })
 }
 
 fn onboarding_brief_markdown(
@@ -1601,7 +1705,13 @@ pub fn generate_suggestions_from_map(
         suggestions_error,
         suggestions_fallback_used,
     ) = match suggestions_result.response_json {
-        Some(value) => (value, suggestions_result.model_label, "completed", None, false),
+        Some(value) => (
+            value,
+            suggestions_result.model_label,
+            "completed",
+            None,
+            false,
+        ),
         None => (
             build_suggestions_output(&workspace),
             LOCAL_MODEL.to_string(),
@@ -1676,6 +1786,7 @@ pub fn generate_suggestions_from_map(
         )
         .map_err(|error| error.to_string())?;
     insert_ai_comments(&transaction, &project_id, &analysis_run_id, &analysis)?;
+    insert_ai_question_action_items(&transaction, &project_id, &analysis_run_id, &analysis)?;
     insert_suggestions(
         &transaction,
         &project_id,
@@ -1936,6 +2047,244 @@ pub fn update_suggestion(
 }
 
 #[tauri::command]
+pub fn create_action_item(
+    state: State<'_, DbState>,
+    project_id: String,
+    title: String,
+    body: String,
+    priority: String,
+    memo: Option<String>,
+) -> Result<ProjectWorkspace, String> {
+    let mut connection = open_connection(&state.db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+    ensure_non_empty_input("title", &title)?;
+    ensure_non_empty_input("body", &body)?;
+    ensure_allowed_input("priority", &priority, &["low", "medium", "high"])?;
+    let now = now_rfc3339()?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    transaction
+        .execute(
+            "INSERT INTO action_items (
+                id, project_id, source_type, title, body, status, priority, memo, created_at, updated_at
+             ) VALUES (?1, ?2, 'manual', ?3, ?4, 'open', ?5, ?6, ?7, ?8)",
+            params![
+                Uuid::new_v4().to_string(),
+                project_id.as_str(),
+                title.trim(),
+                body.trim(),
+                priority.as_str(),
+                empty_to_none(memo),
+                now.as_str(),
+                now.as_str()
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    record_snapshot_in_transaction(&transaction, &project_id, "human_edit_records")?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    load_workspace(&connection, &project_id)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn update_action_item(
+    state: State<'_, DbState>,
+    project_id: String,
+    action_item_id: String,
+    title: String,
+    body: String,
+    status: String,
+    priority: String,
+    memo: Option<String>,
+) -> Result<ProjectWorkspace, String> {
+    let mut connection = open_connection(&state.db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+    ensure_non_empty_input("title", &title)?;
+    ensure_non_empty_input("body", &body)?;
+    ensure_allowed_action_status(&status)?;
+    ensure_allowed_input("priority", &priority, &["low", "medium", "high"])?;
+    let now = now_rfc3339()?;
+    let completed_at = if status == "done" {
+        Some(now.clone())
+    } else {
+        None
+    };
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let updated_count = transaction
+        .execute(
+            "UPDATE action_items
+             SET title = ?1, body = ?2, status = ?3, priority = ?4, memo = ?5,
+                 updated_at = ?6, completed_at = ?7
+             WHERE id = ?8 AND project_id = ?9",
+            params![
+                title.trim(),
+                body.trim(),
+                status.as_str(),
+                priority.as_str(),
+                empty_to_none(memo),
+                now.as_str(),
+                completed_at.as_deref(),
+                action_item_id.as_str(),
+                project_id.as_str()
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    if updated_count == 0 {
+        return Err("Action item was not found.".to_string());
+    }
+
+    record_snapshot_in_transaction(&transaction, &project_id, "human_edit_records")?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    load_workspace(&connection, &project_id)
+}
+
+#[tauri::command]
+pub fn create_map_note(
+    state: State<'_, DbState>,
+    project_id: String,
+    title: String,
+    body: String,
+    note_type: String,
+) -> Result<ProjectWorkspace, String> {
+    let mut connection = open_connection(&state.db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+    ensure_non_empty_input("title", &title)?;
+    ensure_non_empty_input("body", &body)?;
+    ensure_allowed_note_type(&note_type)?;
+    let now = now_rfc3339()?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    transaction
+        .execute(
+            "INSERT INTO map_notes (id, project_id, title, body, note_type, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                Uuid::new_v4().to_string(),
+                project_id.as_str(),
+                title.trim(),
+                body.trim(),
+                note_type.as_str(),
+                now.as_str(),
+                now.as_str()
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    record_snapshot_in_transaction(&transaction, &project_id, "human_edit_records")?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    load_workspace(&connection, &project_id)
+}
+
+#[tauri::command]
+pub fn update_map_note(
+    state: State<'_, DbState>,
+    project_id: String,
+    note_id: String,
+    title: String,
+    body: String,
+    note_type: String,
+) -> Result<ProjectWorkspace, String> {
+    let mut connection = open_connection(&state.db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+    ensure_non_empty_input("title", &title)?;
+    ensure_non_empty_input("body", &body)?;
+    ensure_allowed_note_type(&note_type)?;
+    let now = now_rfc3339()?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let updated_count = transaction
+        .execute(
+            "UPDATE map_notes
+             SET title = ?1, body = ?2, note_type = ?3, updated_at = ?4
+             WHERE id = ?5 AND project_id = ?6",
+            params![
+                title.trim(),
+                body.trim(),
+                note_type.as_str(),
+                now.as_str(),
+                note_id.as_str(),
+                project_id.as_str()
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    if updated_count == 0 {
+        return Err("Map note was not found.".to_string());
+    }
+
+    record_snapshot_in_transaction(&transaction, &project_id, "human_edit_records")?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    load_workspace(&connection, &project_id)
+}
+
+#[tauri::command]
+pub fn delete_map_note(
+    state: State<'_, DbState>,
+    project_id: String,
+    note_id: String,
+) -> Result<ProjectWorkspace, String> {
+    let mut connection = open_connection(&state.db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let deleted_count = transaction
+        .execute(
+            "DELETE FROM map_notes WHERE id = ?1 AND project_id = ?2",
+            params![note_id.as_str(), project_id.as_str()],
+        )
+        .map_err(|error| error.to_string())?;
+
+    if deleted_count == 0 {
+        return Err("Map note was not found.".to_string());
+    }
+
+    record_snapshot_in_transaction(&transaction, &project_id, "human_edit_records")?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    load_workspace(&connection, &project_id)
+}
+
+#[tauri::command]
+pub fn create_named_version(
+    state: State<'_, DbState>,
+    project_id: String,
+    name: String,
+    memo: Option<String>,
+) -> Result<ProjectWorkspace, String> {
+    let mut connection = open_connection(&state.db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+    ensure_non_empty_input("name", &name)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let memo = empty_to_none(memo);
+    record_snapshot_with_metadata_in_transaction(
+        &transaction,
+        &project_id,
+        "named",
+        Some(name.trim()),
+        memo.as_deref(),
+    )?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    load_workspace(&connection, &project_id)
+}
+
+#[tauri::command]
 pub fn export_markdown(
     state: State<'_, DbState>,
     project_id: String,
@@ -1946,16 +2295,19 @@ pub fn export_markdown(
     let workspace = load_workspace(&connection, &project_id)?;
     let project_name = project_name(&connection, &project_id)?;
     let now = now_rfc3339()?;
-    let dir = exports_dir(&app_data_dir, &project_id);
-    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-    let path = dir.join(format!("synergy-map-{}.md", timestamp_for_file(&now)));
     let markdown = render_markdown(&project_name, &workspace);
-    fs::write(&path, markdown).map_err(|error| error.to_string())?;
+    let export_target = resolve_export_target(&state.db_path, &app_data_dir, &project_id)?;
+    let file_name = format!("synergy-map-{}.md", timestamp_for_file(&now));
+    let (path, write_warning) = write_export_with_fallback(&export_target, &file_name, |path| {
+        fs::write(path, &markdown).map_err(|error| error.to_string())
+    })?;
     let job = insert_export_job(&connection, &project_id, "markdown", &path, &now)?;
+    let warning = combine_warnings(export_target.warning, write_warning);
 
     Ok(ExportResult {
         ok: true,
         export_job: job,
+        warning,
         workspace: load_workspace(&connection, &project_id)?,
     })
 }
@@ -1970,9 +2322,145 @@ pub fn export_csv_bundle(
     ensure_project_exists(&connection, &project_id)?;
     let workspace = load_workspace(&connection, &project_id)?;
     let now = now_rfc3339()?;
-    let dir =
-        exports_dir(&app_data_dir, &project_id).join(format!("csv-{}", timestamp_for_file(&now)));
-    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let export_target = resolve_export_target(&state.db_path, &app_data_dir, &project_id)?;
+    let folder_name = format!("csv-{}", timestamp_for_file(&now));
+    let (dir, write_warning) = write_export_with_fallback(&export_target, &folder_name, |dir| {
+        write_csv_bundle(dir, &workspace)
+    })?;
+    let job = insert_export_job(&connection, &project_id, "csv", &dir, &now)?;
+    let warning = combine_warnings(export_target.warning, write_warning);
+
+    Ok(ExportResult {
+        ok: true,
+        export_job: job,
+        warning,
+        workspace: load_workspace(&connection, &project_id)?,
+    })
+}
+
+#[derive(Debug)]
+struct ExportTarget {
+    primary_dir: PathBuf,
+    fallback_dir: PathBuf,
+    warning: Option<String>,
+    used_configured_dir: bool,
+}
+
+fn resolve_export_target(
+    db_path: &Path,
+    app_data_dir: &Path,
+    project_id: &str,
+) -> Result<ExportTarget, String> {
+    let fallback_dir = exports_dir(app_data_dir, project_id);
+    let settings = load_ai_settings(db_path);
+
+    if let Some(raw_dir) = settings.default_export_dir {
+        let trimmed_dir = raw_dir.trim();
+        if !trimmed_dir.is_empty() {
+            let configured_dir = PathBuf::from(trimmed_dir);
+            if configured_dir.is_absolute() {
+                match ensure_writable_export_dir(&configured_dir) {
+                    Ok(()) => {
+                        return Ok(ExportTarget {
+                            primary_dir: configured_dir,
+                            fallback_dir,
+                            warning: None,
+                            used_configured_dir: true,
+                        });
+                    }
+                    Err(error) => {
+                        ensure_writable_export_dir(&fallback_dir)?;
+                        return Ok(ExportTarget {
+                            primary_dir: fallback_dir.clone(),
+                            fallback_dir,
+                            warning: Some(format!(
+                                "設定済み出力フォルダを使えなかったため、アプリ内exportsへ保存しました: {error}"
+                            )),
+                            used_configured_dir: false,
+                        });
+                    }
+                }
+            }
+
+            ensure_writable_export_dir(&fallback_dir)?;
+            return Ok(ExportTarget {
+                primary_dir: fallback_dir.clone(),
+                fallback_dir,
+                warning: Some(
+                    "設定済み出力フォルダが絶対パスではないため、アプリ内exportsへ保存しました。"
+                        .to_string(),
+                ),
+                used_configured_dir: false,
+            });
+        }
+    }
+
+    ensure_writable_export_dir(&fallback_dir)?;
+    Ok(ExportTarget {
+        primary_dir: fallback_dir.clone(),
+        fallback_dir,
+        warning: None,
+        used_configured_dir: false,
+    })
+}
+
+fn ensure_writable_export_dir(directory: &Path) -> Result<(), String> {
+    fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    let probe_path = directory.join(format!(".synergy-map-write-test-{}", Uuid::new_v4()));
+    fs::write(&probe_path, b"ok").map_err(|error| error.to_string())?;
+    fs::remove_file(probe_path).map_err(|error| error.to_string())
+}
+
+fn write_export_with_fallback<F>(
+    target: &ExportTarget,
+    output_name: &str,
+    writer: F,
+) -> Result<(PathBuf, Option<String>), String>
+where
+    F: Fn(&Path) -> Result<(), String>,
+{
+    let primary_path = target.primary_dir.join(output_name);
+    match writer(&primary_path) {
+        Ok(()) => Ok((primary_path, None)),
+        Err(error) if target.used_configured_dir => {
+            cleanup_failed_export_path(&primary_path);
+            ensure_writable_export_dir(&target.fallback_dir)?;
+            let fallback_path = target.fallback_dir.join(output_name);
+            writer(&fallback_path).map_err(|fallback_error| {
+                format!(
+                    "設定済み出力先とアプリ内exportsのどちらにも保存できませんでした: {error}; fallback: {fallback_error}"
+                )
+            })?;
+            Ok((
+                fallback_path,
+                Some(format!(
+                    "設定済み出力先へ保存できなかったため、アプリ内exportsへ保存しました: {error}"
+                )),
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn cleanup_failed_export_path(path: &Path) {
+    if path.is_dir() {
+        let _ = fs::remove_dir_all(path);
+    } else if path.exists() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn combine_warnings(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first} / {second}")),
+        (Some(first), None) => Some(first),
+        (None, Some(second)) => Some(second),
+        (None, None) => None,
+    }
+}
+
+fn write_csv_bundle(dir: &Path, workspace: &ProjectWorkspace) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     let nodes = exportable_nodes(&workspace.nodes);
     let node_ids = nodes
         .iter()
@@ -1984,13 +2472,8 @@ pub fn export_csv_bundle(
     write_edges_csv(&dir.join("edges.csv"), &edges)?;
     write_suggestions_csv(&dir.join("suggestions.csv"), &suggestions)?;
     write_sources_csv(&dir.join("sources.csv"), &workspace.source_files)?;
-    let job = insert_export_job(&connection, &project_id, "csv", &dir, &now)?;
-
-    Ok(ExportResult {
-        ok: true,
-        export_job: job,
-        workspace: load_workspace(&connection, &project_id)?,
-    })
+    write_action_items_csv(&dir.join("action_items.csv"), &workspace.action_items)?;
+    write_map_notes_csv(&dir.join("map_notes.csv"), &workspace.map_notes)
 }
 
 fn empty_to_none(value: Option<String>) -> Option<String> {
@@ -2028,6 +2511,14 @@ fn ensure_allowed_input(field: &str, value: &str, allowed: &[&str]) -> Result<()
     }
 }
 
+fn ensure_allowed_action_status(value: &str) -> Result<(), String> {
+    ensure_allowed_input("status", value, &["open", "done", "dismissed"])
+}
+
+fn ensure_allowed_note_type(value: &str) -> Result<(), String> {
+    ensure_allowed_input("note_type", value, &["thought", "meeting", "daily"])
+}
+
 fn ensure_score_input(field: &str, value: i64, min: i64, max: i64) -> Result<(), String> {
     if (min..=max).contains(&value) {
         Ok(())
@@ -2049,6 +2540,8 @@ fn load_workspace(connection: &Connection, project_id: &str) -> Result<ProjectWo
         export_jobs: load_export_jobs(connection, project_id)?,
         versions: load_versions(connection, project_id)?,
         view_layouts: load_view_layouts(connection, project_id)?,
+        action_items: load_action_items(connection, project_id)?,
+        map_notes: load_map_notes(connection, project_id)?,
     })
 }
 
@@ -2473,7 +2966,7 @@ fn load_export_jobs(
 fn load_versions(connection: &Connection, project_id: &str) -> Result<Vec<VersionRow>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT id, project_id, version_type, snapshot_json, created_at
+            "SELECT id, project_id, version_type, name, memo, snapshot_json, created_at
              FROM versions
              WHERE project_id = ?1
              ORDER BY created_at DESC
@@ -2486,8 +2979,77 @@ fn load_versions(connection: &Connection, project_id: &str) -> Result<Vec<Versio
                 id: row.get(0)?,
                 project_id: row.get(1)?,
                 version_type: row.get(2)?,
-                snapshot_json: row.get(3)?,
-                created_at: row.get(4)?,
+                name: row.get(3)?,
+                memo: row.get(4)?,
+                snapshot_json: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn load_action_items(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Vec<ActionItemRow>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, project_id, ai_run_id, source_type, source_id, title, body,
+                    status, priority, memo, created_at, updated_at, completed_at
+             FROM action_items
+             WHERE project_id = ?1
+             ORDER BY
+               CASE status WHEN 'open' THEN 0 WHEN 'done' THEN 1 ELSE 2 END,
+               CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+               updated_at DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([project_id], |row| {
+            Ok(ActionItemRow {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                ai_run_id: row.get(2)?,
+                source_type: row.get(3)?,
+                source_id: row.get(4)?,
+                title: row.get(5)?,
+                body: row.get(6)?,
+                status: row.get(7)?,
+                priority: row.get(8)?,
+                memo: row.get(9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
+                completed_at: row.get(12)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn load_map_notes(connection: &Connection, project_id: &str) -> Result<Vec<MapNoteRow>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, project_id, title, body, note_type, created_at, updated_at
+             FROM map_notes
+             WHERE project_id = ?1
+             ORDER BY updated_at DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([project_id], |row| {
+            Ok(MapNoteRow {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                title: row.get(2)?,
+                body: row.get(3)?,
+                note_type: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -3736,7 +4298,9 @@ fn business_impact_prompt(
                 edge.label.as_deref().unwrap_or("導線"),
                 edge.flow_type.as_deref().unwrap_or("unknown"),
                 edge.strength.as_deref().unwrap_or("normal"),
-                edge.evidence.as_deref().unwrap_or("情報ソース要約からの推定")
+                edge.evidence
+                    .as_deref()
+                    .unwrap_or("情報ソース要約からの推定")
             )
         })
         .collect::<Vec<_>>()
@@ -3794,7 +4358,9 @@ fn map_insight_prompt(
                 edge.flow_type.as_deref().unwrap_or("unknown"),
                 edge.strength.as_deref().unwrap_or("normal"),
                 edge.confidence_status.as_deref().unwrap_or("estimated"),
-                edge.evidence.as_deref().unwrap_or("情報ソース要約からの推定")
+                edge.evidence
+                    .as_deref()
+                    .unwrap_or("情報ソース要約からの推定")
             )
         })
         .collect::<Vec<_>>()
@@ -3855,7 +4421,9 @@ fn map_insight_target_context(
                 edge.flow_type.as_deref().unwrap_or("unknown"),
                 edge.strength.as_deref().unwrap_or("normal"),
                 edge.confidence_status.as_deref().unwrap_or("estimated"),
-                edge.evidence.as_deref().unwrap_or("情報ソース要約からの推定")
+                edge.evidence
+                    .as_deref()
+                    .unwrap_or("情報ソース要約からの推定")
             ))
         }
         _ => Err(format!("Unsupported target_kind: {target_kind}")),
@@ -4133,6 +4701,60 @@ fn insert_ai_comments(
     Ok(())
 }
 
+fn insert_ai_question_action_items(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+    ai_run_id: &str,
+    output: &crate::ai_schema::AiAnalysisOutput,
+) -> Result<(), String> {
+    let now = now_rfc3339()?;
+
+    for question in &output.questions {
+        let body = question.trim();
+        if body.is_empty() {
+            continue;
+        }
+
+        let existing_id: Option<String> = transaction
+            .query_row(
+                "SELECT id
+                 FROM action_items
+                 WHERE project_id = ?1
+                   AND body = ?2
+                   AND status = 'open'
+                 LIMIT 1",
+                params![project_id, body],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+
+        if existing_id.is_some() {
+            continue;
+        }
+
+        transaction
+            .execute(
+                "INSERT INTO action_items (
+                    id, project_id, ai_run_id, source_type, source_id, title, body,
+                    status, priority, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, 'ai_question', ?4, '確認質問', ?5, 'open', 'medium', ?6, ?7)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    project_id,
+                    ai_run_id,
+                    ai_run_id,
+                    body,
+                    now.as_str(),
+                    now.as_str()
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
 fn insert_suggestions(
     transaction: &rusqlite::Transaction<'_>,
     project_id: &str,
@@ -4359,9 +4981,21 @@ fn record_snapshot_in_transaction(
     project_id: &str,
     version_type: &str,
 ) -> Result<(), String> {
+    record_snapshot_with_metadata_in_transaction(transaction, project_id, version_type, None, None)
+}
+
+fn record_snapshot_with_metadata_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+    version_type: &str,
+    name: Option<&str>,
+    memo: Option<&str>,
+) -> Result<(), String> {
     let now = now_rfc3339()?;
     let snapshot = json!({
         "versionType": version_type,
+        "name": name,
+        "memo": memo,
         "capturedAt": now,
         "extractedItems": snapshot_table(
             transaction,
@@ -4474,6 +5108,30 @@ fn record_snapshot_in_transaction(
             ],
             project_id,
         )?,
+        "actionItems": snapshot_table(
+            transaction,
+            "action_items",
+            &[
+                "id",
+                "ai_run_id",
+                "source_type",
+                "source_id",
+                "title",
+                "body",
+                "status",
+                "priority",
+                "memo",
+                "updated_at",
+                "completed_at",
+            ],
+            project_id,
+        )?,
+        "mapNotes": snapshot_table(
+            transaction,
+            "map_notes",
+            &["id", "title", "body", "note_type", "updated_at"],
+            project_id,
+        )?,
         "counts": {
             "extractedItems": count_table(transaction, "extracted_items", project_id)?,
             "itemSources": count_table(transaction, "item_sources", project_id)?,
@@ -4482,17 +5140,21 @@ fn record_snapshot_in_transaction(
             "suggestions": count_table(transaction, "suggestions", project_id)?,
             "aiComments": count_table(transaction, "ai_comments", project_id)?,
             "viewLayouts": count_table(transaction, "view_layouts", project_id)?,
+            "actionItems": count_table(transaction, "action_items", project_id)?,
+            "mapNotes": count_table(transaction, "map_notes", project_id)?,
         }
     });
 
     transaction
         .execute(
-            "INSERT INTO versions (id, project_id, version_type, snapshot_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO versions (id, project_id, version_type, name, memo, snapshot_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 Uuid::new_v4().to_string(),
                 project_id,
                 version_type,
+                name,
+                memo,
                 snapshot.to_string(),
                 now
             ],
@@ -4685,6 +5347,33 @@ fn render_markdown(project_name: &str, workspace: &ProjectWorkspace) -> String {
         .filter(|comment| comment.comment_type == "question")
     {
         body.push_str(&format!("- {}\n", question.body));
+    }
+
+    body.push_str("\n## 確認事項 / タスク\n\n");
+    if workspace.action_items.is_empty() {
+        body.push_str("確認事項 / タスクは未登録です。\n");
+    } else {
+        for action_item in &workspace.action_items {
+            body.push_str(&format!(
+                "- **{}** [{} / {}]: {}\n",
+                action_item.title, action_item.status, action_item.priority, action_item.body
+            ));
+            if let Some(memo) = action_item.memo.as_deref() {
+                body.push_str(&format!("  - メモ: {}\n", memo));
+            }
+        }
+    }
+
+    body.push_str("\n## 思考メモ\n\n");
+    if workspace.map_notes.is_empty() {
+        body.push_str("思考メモは未登録です。\n");
+    } else {
+        for note in &workspace.map_notes {
+            body.push_str(&format!(
+                "- **{}** [{}]: {}\n",
+                note.title, note.note_type, note.body
+            ));
+        }
     }
 
     body
@@ -4935,9 +5624,88 @@ fn write_sources_csv(path: &Path, sources: &[SourceFileRow]) -> Result<(), Strin
     writer.flush().map_err(|error| error.to_string())
 }
 
+fn write_action_items_csv(path: &Path, action_items: &[ActionItemRow]) -> Result<(), String> {
+    let mut writer = csv_writer(path)?;
+    writer
+        .write_record([
+            "id",
+            "title",
+            "body",
+            "status",
+            "priority",
+            "source_type",
+            "source_id",
+            "memo",
+            "created_at",
+            "updated_at",
+            "completed_at",
+        ])
+        .map_err(|error| error.to_string())?;
+    for action_item in action_items {
+        writer
+            .write_record([
+                action_item.id.as_str(),
+                action_item.title.as_str(),
+                action_item.body.as_str(),
+                action_item.status.as_str(),
+                action_item.priority.as_str(),
+                action_item.source_type.as_str(),
+                action_item.source_id.as_deref().unwrap_or(""),
+                action_item.memo.as_deref().unwrap_or(""),
+                action_item.created_at.as_str(),
+                action_item.updated_at.as_str(),
+                action_item.completed_at.as_deref().unwrap_or(""),
+            ])
+            .map_err(|error| error.to_string())?;
+    }
+    writer.flush().map_err(|error| error.to_string())
+}
+
+fn write_map_notes_csv(path: &Path, map_notes: &[MapNoteRow]) -> Result<(), String> {
+    let mut writer = csv_writer(path)?;
+    writer
+        .write_record([
+            "id",
+            "title",
+            "body",
+            "note_type",
+            "created_at",
+            "updated_at",
+        ])
+        .map_err(|error| error.to_string())?;
+    for note in map_notes {
+        writer
+            .write_record([
+                note.id.as_str(),
+                note.title.as_str(),
+                note.body.as_str(),
+                note.note_type.as_str(),
+                note.created_at.as_str(),
+                note.updated_at.as_str(),
+            ])
+            .map_err(|error| error.to_string())?;
+    }
+    writer.flush().map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_app_data_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("synergy-map-{label}-{}", Uuid::new_v4()))
+    }
+
+    fn insert_test_project(connection: &Connection, project_id: &str) {
+        let now = now_rfc3339().expect("time should format");
+        connection
+            .execute(
+                "INSERT INTO projects (id, name, created_at, updated_at)
+                 VALUES (?1, 'Test Project', ?2, ?3)",
+                params![project_id, now.as_str(), now.as_str()],
+            )
+            .expect("project should insert");
+    }
 
     #[test]
     fn local_extraction_fallback_does_not_persist_source_text() {
@@ -5177,5 +5945,140 @@ mod tests {
         assert_eq!(value["y"], json!(24.0));
         assert!(value.get("width").is_none());
         assert!(value.get("height").is_none());
+    }
+
+    #[test]
+    fn invalid_default_export_dir_falls_back_to_app_exports() {
+        let app_data_dir = temp_app_data_dir("export-fallback");
+        fs::create_dir_all(&app_data_dir).expect("app data dir should exist");
+        let db_path = app_data_dir.join("synergy-map.db");
+        let invalid_export_path = app_data_dir.join("not-a-directory");
+        fs::write(&invalid_export_path, b"file").expect("invalid path should be file");
+        crate::app_settings::save_ai_settings(
+            &db_path,
+            &crate::app_settings::AiSettings {
+                default_export_dir: Some(invalid_export_path.display().to_string()),
+                ..crate::app_settings::AiSettings::default()
+            },
+        )
+        .expect("settings should save");
+
+        let target =
+            resolve_export_target(&db_path, &app_data_dir, "project-1").expect("target resolves");
+
+        assert_eq!(target.primary_dir, exports_dir(&app_data_dir, "project-1"));
+        assert!(target.warning.is_some());
+        assert!(!target.used_configured_dir);
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn action_item_status_validation_allows_only_phase1_states() {
+        assert!(ensure_allowed_action_status("open").is_ok());
+        assert!(ensure_allowed_action_status("done").is_ok());
+        assert!(ensure_allowed_action_status("dismissed").is_ok());
+        assert!(ensure_allowed_action_status("blocked").is_err());
+    }
+
+    #[test]
+    fn named_version_stores_snapshot_with_name_and_memo() {
+        let app_data_dir = temp_app_data_dir("named-version");
+        fs::create_dir_all(&app_data_dir).expect("app data dir should exist");
+        let db_path = app_data_dir.join("synergy-map.db");
+        crate::init_database(&db_path).expect("db should initialize");
+        let mut connection = open_connection(&db_path).expect("connection should open");
+        let project_id = "project-1";
+        insert_test_project(&connection, project_id);
+
+        let transaction = connection.transaction().expect("transaction should start");
+        record_snapshot_with_metadata_in_transaction(
+            &transaction,
+            project_id,
+            "named",
+            Some("5月試験運用前"),
+            Some("実事業メモ投入前"),
+        )
+        .expect("snapshot should record");
+        transaction.commit().expect("transaction should commit");
+
+        let versions = load_versions(&connection, project_id).expect("versions should load");
+        assert_eq!(versions[0].name.as_deref(), Some("5月試験運用前"));
+        assert_eq!(versions[0].memo.as_deref(), Some("実事業メモ投入前"));
+        assert!(versions[0].snapshot_json.contains("5月試験運用前"));
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn delete_source_file_removes_rows_and_returns_cleanup_warning() {
+        let app_data_dir = temp_app_data_dir("delete-source");
+        fs::create_dir_all(&app_data_dir).expect("app data dir should exist");
+        let db_path = app_data_dir.join("synergy-map.db");
+        crate::init_database(&db_path).expect("db should initialize");
+        let connection = open_connection(&db_path).expect("connection should open");
+        let project_id = "project-1";
+        let source_file_id = "source-1";
+        let chunk_id = "chunk-1";
+        insert_test_project(&connection, project_id);
+        let now = now_rfc3339().expect("time should format");
+        let source_parent = source_files_dir(&app_data_dir, project_id);
+        let chunk_dir = source_chunks_dir(&app_data_dir, project_id).join(source_file_id);
+        fs::create_dir_all(&source_parent).expect("source parent should exist");
+        fs::create_dir_all(&chunk_dir).expect("chunk dir should exist");
+        let source_file_path = source_parent.join(source_file_id);
+        fs::write(&source_file_path, b"not a directory").expect("warning fixture should write");
+        let chunk_path = chunk_dir.join("0000.txt");
+        fs::write(&chunk_path, "chunk text").expect("chunk should write");
+        connection
+            .execute(
+                "INSERT INTO source_files (
+                    id, project_id, file_name, file_type, local_path, file_hash, status,
+                    metadata_json, created_at, updated_at
+                 ) VALUES (?1, ?2, 'source.md', 'markdown', ?3, 'hash', 'read', '{}', ?4, ?5)",
+                params![
+                    source_file_id,
+                    project_id,
+                    source_file_path.display().to_string(),
+                    now.as_str(),
+                    now.as_str()
+                ],
+            )
+            .expect("source should insert");
+        connection
+            .execute(
+                "INSERT INTO source_chunks (
+                    id, project_id, source_file_id, chunk_index, content_path, content_hash,
+                    metadata_json, created_at
+                 ) VALUES (?1, ?2, ?3, 0, ?4, 'chunk-hash', '{}', ?5)",
+                params![
+                    chunk_id,
+                    project_id,
+                    source_file_id,
+                    chunk_path.display().to_string(),
+                    now.as_str()
+                ],
+            )
+            .expect("chunk should insert");
+        drop(connection);
+
+        let result =
+            delete_source_file_inner(&db_path, project_id.to_string(), source_file_id.to_string())
+                .expect("source should delete");
+
+        let connection = open_connection(&db_path).expect("connection should reopen");
+        let source_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM source_files", [], |row| row.get(0))
+            .expect("source count should load");
+        let chunk_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM source_chunks", [], |row| row.get(0))
+            .expect("chunk count should load");
+
+        assert_eq!(source_count, 0);
+        assert_eq!(chunk_count, 0);
+        assert_eq!(result.workspace.source_files.len(), 0);
+        assert!(!result.warnings.is_empty());
+
+        let _ = fs::remove_dir_all(app_data_dir);
     }
 }

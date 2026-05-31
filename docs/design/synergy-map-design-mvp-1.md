@@ -4,7 +4,7 @@
 
 ## 参照画像
 
-![MVP-1 map UI reference](assets/mvp-1-map-ui-reference.png)
+![MVP-1 map UI reference](../assets/mvp-1-map-ui-reference.png)
 
 この仕様は、React Flowで確実に実装できる2D編集モデルを前提にする。見た目は軽い2.5Dにするが、座標、選択、ドラッグ、保存は通常の2Dとして扱う。
 

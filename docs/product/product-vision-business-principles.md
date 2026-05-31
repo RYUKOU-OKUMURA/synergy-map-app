@@ -4,8 +4,8 @@
 
 関連資料:
 
-- `docs/product-role-models-and-competitors-research.md`
-- `docs/product-competitive-positioning-and-strategy.md`
+- `docs/product/product-role-models-and-competitors-research.md`
+- `docs/product/product-competitive-positioning-and-strategy.md`
 
 ## 目指す状態
 

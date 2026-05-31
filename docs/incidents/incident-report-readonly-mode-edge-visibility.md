@@ -2,7 +2,7 @@
 
 作成日: 2026-05-21  
 ステータス: **解決済み（2026-05-26）** — `MapLayoutCoordinator` + `mergeFlowNodes` / `mergeFlowEdges` による再実装  
-関連セッション: [整理モード導線デバッグ](b4987a36-242f-40ca-8f78-3af36f773368)
+関連セッション: `整理モード導線デバッグ` (`b4987a36-242f-40ca-8f78-3af36f773368`)
 
 ---
 
@@ -48,7 +48,7 @@
 ### 2.4 ドキュメント
 
 - `docs/tech-stack.md` — 整理 vs 構造編集の切り分け追記
-- `docs/flow-animation-spec.md` — 同上
+- `docs/design/flow-animation-spec.md` — 同上
 
 ---
 
@@ -204,8 +204,8 @@
 - ツールバー: 「整理 / 構造編集」
 - `nodesDraggable` 常時 true（構造編集は `nodesConnectable` / `NodeResizer` / Handle のみ `editable` 依存）
 - `onNodeDragStop` → debounce 保存（400ms）+ ドラッグ直後 1s の position ガード
-- [`MapLayoutCoordinator.tsx`](../src/features/map/MapLayoutCoordinator.tsx): `useNodesInitialized` → `useUpdateNodeInternals` → 整理モード初回のみ imperative `fitView`
-- [`mergeFlowNodes.ts`](../src/features/map/mergeFlowNodes.ts) / [`mergeFlowEdges.ts`](../src/features/map/mergeFlowEdges.ts): workspace 同期時に RF 内部 state を保持
+- [`MapLayoutCoordinator.tsx`](../../src/features/map/MapLayoutCoordinator.tsx): `useNodesInitialized` → `useUpdateNodeInternals` → 整理モード初回のみ imperative `fitView`
+- [`mergeFlowNodes.ts`](../../src/features/map/mergeFlowNodes.ts) / [`mergeFlowEdges.ts`](../../src/features/map/mergeFlowEdges.ts): workspace 同期時に RF 内部 state を保持
 - `fitView` prop は使用しない
 
 ---
