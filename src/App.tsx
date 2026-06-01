@@ -43,17 +43,26 @@ import {
   SynergyMapCanvas,
   type MapViewMode,
   type MapNodeLayout,
-  type NodeImpactStats,
-  type NodePositionOverrides,
 } from "@/features/map/SynergyMapCanvas";
+import {
+  applyLocalMapLayouts,
+  buildImpactPositionOverrides,
+  buildNodeImpactStats,
+  levelRank,
+  parseRelatedNodeIds,
+  readableCustomerJourneyLayouts,
+} from "@/features/map/mapLayoutModel";
+import type { ViewId } from "@/lib/appViewTypes";
 import { demoProject, demoWorkspace, emptyWorkspace } from "@/lib/demoWorkspace";
 import {
+  actionStatusOptions,
   adoptionOptions,
   categoryOptions,
   confidenceOptions,
   costLevelOptions,
   impactLevelOptions,
   labelFor,
+  noteTypeOptions,
   priorityOptions,
   timeToImpactOptions,
 } from "@/lib/mvp1Labels";
@@ -80,26 +89,27 @@ import type {
   SelectedMapElement,
   SourceFileRow,
   SuggestionRow,
-  ViewLayoutRow,
 } from "@/lib/mvp1Types";
 import {
   mapPurposeLabel,
   mapPurposeOptions,
   type MapPurposeId,
 } from "@/lib/onboardingOptions";
-
-type ViewId =
-  | "home"
-  | "projects"
-  | "today"
-  | "sources"
-  | "extract"
-  | "map"
-  | "suggestions"
-  | "records"
-  | "export"
-  | "history"
-  | "settings";
+import {
+  activeSuggestions,
+  buildTodayNextStep,
+  buildWorkspaceReflectionSummary,
+  getPrimaryActionLabel,
+  hasOpenActionForSuggestion,
+  needsReflectionAttention,
+  reflectionActionView,
+  reflectionStateLabel,
+  reflectionSummaryText,
+  shouldRegenerateMap,
+  sortByDateDesc,
+  type SourceReflectionRow,
+  type WorkspaceReflectionSummary,
+} from "@/lib/workspaceProgress";
 
 type ProjectFormValues = {
   name: string;
@@ -156,35 +166,6 @@ type InformationSourceDraft = {
 };
 
 const CODEX_EVENT_NAME = "codex-app-server-event";
-
-type SourceReflectionState =
-  | "needs_extraction"
-  | "extracted"
-  | "no_cards"
-  | "needs_map"
-  | "mapped"
-  | "not_ready";
-
-type SourceReflectionRow = {
-  source: SourceFileRow;
-  title: string;
-  detail: string | null;
-  extractedItemCount: number;
-  mappedItemCount: number;
-  extractionState: SourceReflectionState;
-  mapState: SourceReflectionState;
-};
-
-type WorkspaceReflectionSummary = {
-  rows: SourceReflectionRow[];
-  sourceCount: number;
-  pendingExtractionCount: number;
-  extractedSourceCount: number;
-  noCardSourceCount: number;
-  pendingMapCount: number;
-  mappedSourceCount: number;
-  mapRefreshNeeded: boolean;
-};
 
 function emptyDeviceCodeResult(): DeviceCodeLoginResult {
   return {
@@ -300,537 +281,6 @@ function aiRunStatusLabel(run: AiRunRow | null | undefined) {
   if (run.status === "response_validated") return "検証済み";
   if (run.status === "fallback_response_validated") return "補完検証済み";
   return run.status;
-}
-
-function actionStatusLabel(status: ActionItemRow["status"]) {
-  if (status === "open") return "未完了";
-  if (status === "done") return "完了";
-  return "見送り";
-}
-
-function actionPriorityLabel(priority: ActionItemRow["priority"]) {
-  if (priority === "high") return "高";
-  if (priority === "low") return "低";
-  return "中";
-}
-
-function noteTypeLabel(noteType: MapNoteRow["noteType"]) {
-  if (noteType === "meeting") return "会議メモ";
-  if (noteType === "daily") return "日次メモ";
-  return "思考メモ";
-}
-
-function parseMetadataJson(metadataJson: string): Record<string, unknown> {
-  try {
-    const parsed = JSON.parse(metadataJson) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {};
-  } catch {
-    return {};
-  }
-}
-
-function metadataString(metadataJson: string, key: string) {
-  const value = parseMetadataJson(metadataJson)[key];
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function timestampMillis(value: string | null | undefined) {
-  if (!value) return null;
-  const time = Date.parse(value);
-  return Number.isFinite(time) ? time : null;
-}
-
-function latestRunCreatedAt(workspace: ProjectWorkspace, runType: string) {
-  return (
-    workspace.aiRuns.find((run) => run.runType === runType)?.completedAt ??
-    workspace.aiRuns.find((run) => run.runType === runType)?.createdAt ??
-    null
-  );
-}
-
-function hasAcceptedItemWithoutMapNode(workspace: ProjectWorkspace) {
-  const mappedItemIds = new Set(
-    workspace.nodes
-      .map((node) => node.extractedItemId)
-      .filter((id): id is string => Boolean(id)),
-  );
-
-  return workspace.extractedItems.some(
-    (item) => item.adoptionStatus !== "rejected" && !mappedItemIds.has(item.id),
-  );
-}
-
-function hasItemEditedAfterMapGeneration(workspace: ProjectWorkspace) {
-  const latestMapRunAt = latestRunCreatedAt(workspace, "generate_map");
-  if (!latestMapRunAt) return false;
-
-  const latestMapTime = Date.parse(latestMapRunAt);
-  if (!Number.isFinite(latestMapTime)) return false;
-
-  return workspace.extractedItems.some((item) => {
-    const itemUpdatedTime = Date.parse(item.updatedAt);
-    return Number.isFinite(itemUpdatedTime) && itemUpdatedTime > latestMapTime;
-  });
-}
-
-function shouldRegenerateMap(workspace: ProjectWorkspace) {
-  return (
-    workspace.nodes.length > 0 &&
-    (hasAcceptedItemWithoutMapNode(workspace) ||
-      hasItemEditedAfterMapGeneration(workspace))
-  );
-}
-
-function sourceDisplayTitle(source: SourceFileRow) {
-  return (
-    metadataString(source.metadataJson, "title") ??
-    metadataString(source.metadataJson, "url") ??
-    source.fileName
-  );
-}
-
-function sourceDisplayDetail(source: SourceFileRow) {
-  const url = metadataString(source.metadataJson, "url");
-  if (url) return url;
-  if (source.fileType === "onboarding_brief") return "初回マップ作成で入力した情報";
-  return null;
-}
-
-function buildWorkspaceReflectionSummary(
-  workspace: ProjectWorkspace,
-): WorkspaceReflectionSummary {
-  const latestExtractTime = timestampMillis(
-    latestRunCreatedAt(workspace, "extract_items"),
-  );
-  const latestMapTime = timestampMillis(latestRunCreatedAt(workspace, "generate_map"));
-  const chunksBySource = new Map<string, typeof workspace.sourceChunks>();
-
-  for (const chunk of workspace.sourceChunks) {
-    const current = chunksBySource.get(chunk.sourceFileId) ?? [];
-    current.push(chunk);
-    chunksBySource.set(chunk.sourceFileId, current);
-  }
-
-  const mappedItemIds = new Set(
-    workspace.nodes
-      .filter((node) => node.adoptionStatus !== "rejected")
-      .map((node) => node.extractedItemId)
-      .filter((id): id is string => Boolean(id)),
-  );
-
-  const rows = workspace.sourceFiles.map((source) => {
-    const sourceChunks = chunksBySource.get(source.id) ?? [];
-    const sourceChunkIds = new Set(sourceChunks.map((chunk) => chunk.id));
-    const linkedItems = workspace.extractedItems.filter(
-      (item) =>
-        item.adoptionStatus !== "rejected" &&
-        item.sources.some(
-          (itemSource) =>
-            itemSource.sourceFileId === source.id ||
-            (itemSource.sourceChunkId
-              ? sourceChunkIds.has(itemSource.sourceChunkId)
-              : false),
-        ),
-    );
-    const acceptedLinkedItems = linkedItems.filter(
-      (item) => item.adoptionStatus === "accepted",
-    );
-    const mappedItemCount = acceptedLinkedItems.filter((item) =>
-      mappedItemIds.has(item.id),
-    ).length;
-    const sourceTimes = [
-      timestampMillis(source.createdAt),
-      timestampMillis(source.updatedAt),
-      ...sourceChunks.map((chunk) => timestampMillis(chunk.createdAt)),
-    ].filter((time): time is number => typeof time === "number");
-    const latestSourceTime = sourceTimes.length > 0 ? Math.max(...sourceTimes) : null;
-    const hasReadableChunks =
-      (sourceChunks.length > 0 || source.chunkCount > 0) && source.status !== "error";
-    const addedAfterExtraction =
-      latestSourceTime !== null &&
-      latestExtractTime !== null &&
-      latestSourceTime > latestExtractTime;
-    const addedAfterMap =
-      latestSourceTime !== null &&
-      latestMapTime !== null &&
-      latestSourceTime > latestMapTime;
-    const itemEditedAfterMap =
-      latestMapTime !== null &&
-      acceptedLinkedItems.some((item) => {
-        const itemTime = timestampMillis(item.updatedAt);
-        return itemTime !== null && itemTime > latestMapTime;
-      });
-
-    let extractionState: SourceReflectionState;
-    if (!hasReadableChunks) {
-      extractionState = "not_ready";
-    } else if (!latestExtractTime || addedAfterExtraction) {
-      extractionState = "needs_extraction";
-    } else if (linkedItems.length === 0) {
-      extractionState = "no_cards";
-    } else {
-      extractionState = "extracted";
-    }
-
-    let mapState: SourceReflectionState;
-    if (extractionState === "not_ready") {
-      mapState = "not_ready";
-    } else if (extractionState === "needs_extraction") {
-      mapState = "needs_extraction";
-    } else if (acceptedLinkedItems.length === 0) {
-      mapState = "no_cards";
-    } else if (
-      workspace.nodes.length === 0 ||
-      !latestMapTime ||
-      addedAfterMap ||
-      itemEditedAfterMap ||
-      mappedItemCount < acceptedLinkedItems.length
-    ) {
-      mapState = "needs_map";
-    } else {
-      mapState = "mapped";
-    }
-
-    return {
-      source,
-      title: sourceDisplayTitle(source),
-      detail: sourceDisplayDetail(source),
-      extractedItemCount: linkedItems.length,
-      mappedItemCount,
-      extractionState,
-      mapState,
-    };
-  });
-
-  const pendingExtractionCount = rows.filter(
-    (row) => row.extractionState === "needs_extraction",
-  ).length;
-  const pendingMapCount = rows.filter((row) => row.mapState === "needs_map").length;
-
-  return {
-    rows,
-    sourceCount: rows.length,
-    pendingExtractionCount,
-    extractedSourceCount: rows.filter((row) => row.extractionState === "extracted")
-      .length,
-    noCardSourceCount: rows.filter((row) => row.extractionState === "no_cards").length,
-    pendingMapCount,
-    mappedSourceCount: rows.filter((row) => row.mapState === "mapped").length,
-    mapRefreshNeeded: pendingMapCount > 0 || shouldRegenerateMap(workspace),
-  };
-}
-
-function reflectionStateLabel(state: SourceReflectionState, phase: "extract" | "map") {
-  if (state === "needs_extraction") return "抽出未反映";
-  if (state === "extracted") return "抽出済み";
-  if (state === "no_cards")
-    return phase === "extract" ? "カードなし" : "マップ対象なし";
-  if (state === "needs_map") return "マップ未反映";
-  if (state === "mapped") return "マップ反映済み";
-  return "読み取り待ち";
-}
-
-function reflectionSummaryText(summary: WorkspaceReflectionSummary) {
-  if (summary.sourceCount === 0) {
-    return "情報ソースはまだありません。";
-  }
-  if (summary.pendingExtractionCount > 0) {
-    return `追加・更新された情報ソース ${summary.pendingExtractionCount}件が、まだ抽出カードに反映されていません。`;
-  }
-  if (summary.pendingMapCount > 0 || summary.mapRefreshNeeded) {
-    const countText =
-      summary.pendingMapCount > 0 ? ` ${summary.pendingMapCount}件分` : "";
-    return `抽出カードの内容${countText}が、まだマップに反映されていません。`;
-  }
-  return "登録済みの情報ソースは現在のマップに反映されています。";
-}
-
-function needsReflectionAttention(summary: WorkspaceReflectionSummary) {
-  return (
-    summary.pendingExtractionCount > 0 ||
-    summary.pendingMapCount > 0 ||
-    summary.mapRefreshNeeded
-  );
-}
-
-function getPrimaryActionLabel(workspace: ProjectWorkspace) {
-  if (workspace.sourceChunks.length === 0 && workspace.extractedItems.length === 0) {
-    return "情報を追加";
-  }
-  if (workspace.extractedItems.length === 0) {
-    return "AIで材料整理";
-  }
-  if (workspace.nodes.length === 0) {
-    return "マップ生成";
-  }
-  if (shouldRegenerateMap(workspace)) {
-    return "マップ再生成";
-  }
-  if (workspace.suggestions.length === 0 && workspace.aiComments.length === 0) {
-    return "施策と確認質問";
-  }
-  if (workspace.actionItems.some((actionItem) => actionItem.status === "open")) {
-    return "今日の確認";
-  }
-  return "マップに相談";
-}
-
-function activeSuggestions(workspace: ProjectWorkspace) {
-  return workspace.suggestions.filter(
-    (suggestion) => suggestion.adoptionStatus !== "rejected",
-  );
-}
-
-function comparableText(value: string) {
-  return value.trim().replace(/\s+/g, " ").toLowerCase();
-}
-
-function hasOpenActionForSuggestion(
-  workspace: ProjectWorkspace,
-  suggestion: SuggestionRow,
-) {
-  const suggestionTitle = comparableText(suggestion.title);
-  const suggestionBody = comparableText(suggestion.description);
-  return workspace.actionItems.some(
-    (actionItem) =>
-      actionItem.status === "open" &&
-      actionItem.sourceType === "suggestion" &&
-      (actionItem.sourceId === suggestion.id ||
-        (comparableText(actionItem.title) === suggestionTitle &&
-          comparableText(actionItem.body) === suggestionBody)),
-  );
-}
-
-function buildTodayNextStep(
-  workspace: ProjectWorkspace,
-  reflectionSummary: WorkspaceReflectionSummary,
-) {
-  const openActionCount = workspace.actionItems.filter(
-    (actionItem) => actionItem.status === "open",
-  ).length;
-
-  if (workspace.sourceChunks.length === 0 && workspace.extractedItems.length === 0) {
-    return {
-      title: "まず事業メモや資料を追加",
-      body: "短い自由メモだけでも始められます。実事業の売上導線、商品、集客、困っていることを入れてください。",
-      view: "map" as ViewId,
-      actionLabel: "情報を追加",
-    };
-  }
-  if (
-    workspace.extractedItems.length === 0 ||
-    reflectionSummary.pendingExtractionCount > 0
-  ) {
-    return {
-      title: "AIで材料を抽出カードに整理",
-      body: "AI送信前確認で送信範囲を見てから、事業・商品・集客・顧客接点へ分解します。",
-      view: "extract" as ViewId,
-      actionLabel: "抽出へ進む",
-    };
-  }
-  if (workspace.nodes.length === 0 || shouldRegenerateMap(workspace)) {
-    return {
-      title: "売上マップを生成/再生成",
-      body: "抽出カードの変更や追加情報を、顧客導線の売上マップへ反映します。",
-      view: "map" as ViewId,
-      actionLabel: "マップを見る",
-    };
-  }
-  if (workspace.suggestions.length === 0 && workspace.aiComments.length === 0) {
-    return {
-      title: "次の一手と確認質問を生成",
-      body: "マップから詰まり、未接続の可能性、次に確認すべきことを出します。",
-      view: "suggestions" as ViewId,
-      actionLabel: "施策へ進む",
-    };
-  }
-  if (openActionCount > 0) {
-    return {
-      title: "未完了の確認事項を片づける",
-      body: `${openActionCount}件の確認事項があります。完了・見送りを整理して、次に動くことを軽くします。`,
-      view: "records" as ViewId,
-      actionLabel: "記録で整理",
-    };
-  }
-  return {
-    title: "今の状態を保存して出力",
-    body: "今日の整理が落ち着いたら、名前付き保存とMarkdown/CSV出力で振り返りに残します。",
-    view: "history" as ViewId,
-    actionLabel: "保存へ進む",
-  };
-}
-
-function layoutToJson(layout: MapNodeLayout) {
-  const value: Record<string, string | number> = {
-    nodeId: layout.nodeId,
-    x: layout.x,
-    y: layout.y,
-  };
-  if (typeof layout.width === "number") value.width = layout.width;
-  if (typeof layout.height === "number") value.height = layout.height;
-  return value;
-}
-
-function parseNodeLayout(positionJson: string) {
-  try {
-    const parsed = JSON.parse(positionJson) as {
-      x?: number;
-      y?: number;
-      width?: number;
-      height?: number;
-    };
-    return {
-      x: typeof parsed.x === "number" ? parsed.x : 0,
-      y: typeof parsed.y === "number" ? parsed.y : 0,
-      width: typeof parsed.width === "number" ? parsed.width : undefined,
-      height: typeof parsed.height === "number" ? parsed.height : undefined,
-    };
-  } catch {
-    return { x: 0, y: 0 };
-  }
-}
-
-function readableCustomerJourneyLayouts(nodes: MapNodeRow[]): MapNodeLayout[] {
-  const categoryCounts = new Map<string, number>();
-  return nodes
-    .filter((node) => node.adoptionStatus !== "rejected")
-    .map((node) => {
-      const count = categoryCounts.get(node.nodeType) ?? 0;
-      categoryCounts.set(node.nodeType, count + 1);
-      const current = parseNodeLayout(node.positionJson);
-      const y = 88 + count * 132;
-      const x =
-        node.nodeType === "business"
-          ? 80
-          : node.nodeType === "channel"
-            ? 350
-            : node.nodeType === "touchpoint"
-              ? 625
-              : node.nodeType === "service"
-                ? 900
-                : node.nodeType === "finance"
-                  ? 900
-                  : 80;
-      const yOffset =
-        node.nodeType === "finance" ? 150 : node.nodeType === "data_source" ? 270 : 0;
-      return {
-        nodeId: node.id,
-        x,
-        y: y + yOffset,
-        width: current.width,
-        height: current.height,
-      };
-    });
-}
-
-function mergeNodePositionJson(positionJson: string, layout: MapNodeLayout) {
-  let current: Record<string, unknown>;
-  try {
-    current = JSON.parse(positionJson) as Record<string, unknown>;
-  } catch {
-    current = {};
-  }
-  return JSON.stringify({
-    ...current,
-    ...layoutToJson(layout),
-  });
-}
-
-function mergeViewLayoutJson(
-  currentLayoutJson: string | null,
-  viewId: MapViewMode,
-  layouts: MapNodeLayout[],
-) {
-  const layoutMap = new Map<string, MapNodeLayout>();
-  if (currentLayoutJson) {
-    try {
-      const parsed = JSON.parse(currentLayoutJson) as {
-        positions?: Array<{
-          nodeId?: string;
-          x?: number;
-          y?: number;
-          width?: number;
-          height?: number;
-        }>;
-      };
-      for (const position of parsed.positions ?? []) {
-        if (
-          typeof position.nodeId === "string" &&
-          typeof position.x === "number" &&
-          typeof position.y === "number"
-        ) {
-          layoutMap.set(position.nodeId, {
-            nodeId: position.nodeId,
-            x: position.x,
-            y: position.y,
-            width: position.width,
-            height: position.height,
-          });
-        }
-      }
-    } catch {
-      layoutMap.clear();
-    }
-  }
-
-  for (const layout of layouts) {
-    layoutMap.set(layout.nodeId, layout);
-  }
-
-  return JSON.stringify({
-    viewId,
-    positions: Array.from(layoutMap.values())
-      .sort((left, right) => left.nodeId.localeCompare(right.nodeId))
-      .map(layoutToJson),
-  });
-}
-
-function applyLocalMapLayouts(
-  workspace: ProjectWorkspace,
-  projectId: string,
-  viewMode: MapViewMode,
-  layouts: MapNodeLayout[],
-): ProjectWorkspace {
-  const now = new Date().toISOString();
-  if (viewMode === "customer_journey") {
-    return {
-      ...workspace,
-      nodes: workspace.nodes.map((node) => {
-        const layout = layouts.find((candidate) => candidate.nodeId === node.id);
-        if (!layout) return node;
-        return {
-          ...node,
-          positionJson: mergeNodePositionJson(node.positionJson, layout),
-          updatedAt: now,
-        };
-      }),
-    };
-  }
-
-  const currentLayout =
-    workspace.viewLayouts.find((layout) => layout.viewId === viewMode) ?? null;
-  const nextLayout: ViewLayoutRow = {
-    id: currentLayout?.id ?? `local-layout-${viewMode}`,
-    projectId,
-    viewId: viewMode,
-    layoutJson: mergeViewLayoutJson(
-      currentLayout?.layoutJson ?? null,
-      viewMode,
-      layouts,
-    ),
-    createdAt: currentLayout?.createdAt ?? now,
-    updatedAt: now,
-  };
-
-  return {
-    ...workspace,
-    viewLayouts: [
-      ...workspace.viewLayouts.filter((layout) => layout.viewId !== viewMode),
-      nextLayout,
-    ],
-  };
 }
 
 function App() {
@@ -1027,6 +477,16 @@ function App() {
     setIsMapEditMode(false);
   }
 
+  function clearInspectorSelection() {
+    setSelectedItemId(null);
+    setSelectedMapElement(null);
+    setSelectedSuggestionId(null);
+  }
+
+  function shouldClearInspectorForView(nextView: ViewId) {
+    return !["map", "extract", "suggestions"].includes(nextView);
+  }
+
   function handleStartNewMap() {
     setSelectedProjectId(null);
     setWorkspace(emptyWorkspace);
@@ -1057,9 +517,9 @@ function App() {
       handleClearProjectSelection("home");
       return;
     }
-    setSelectedItemId(null);
-    setSelectedMapElement(null);
-    setSelectedSuggestionId(null);
+    if (shouldClearInspectorForView(nextView)) {
+      clearInspectorSelection();
+    }
     setIsDrawerOpen(false);
     setView(nextView);
   }
@@ -2286,6 +1746,7 @@ function App() {
             isTauriRuntime={isTauriRuntime}
             item={selectedItem}
             node={selectedNode}
+            onClose={clearInspectorSelection}
             onWorkspaceChange={setWorkspace}
             projectId={activeProject.id}
             suggestion={selectedSuggestion}
@@ -3849,139 +3310,6 @@ function BusinessImpactPanel({
   );
 }
 
-function buildNodeImpactStats(workspace: ProjectWorkspace): NodeImpactStats {
-  const stats: NodeImpactStats = {};
-  for (const suggestion of workspace.suggestions) {
-    if (suggestion.adoptionStatus === "rejected") continue;
-    for (const nodeId of parseRelatedNodeIds(suggestion.relatedNodeIdsJson)) {
-      const current = stats[nodeId];
-      stats[nodeId] = {
-        score: Math.max(current?.score ?? 0, suggestion.impactScore),
-        revenueImpact: highestLevel(
-          current?.revenueImpact ?? "unknown",
-          suggestion.expectedRevenueImpact,
-        ),
-        profitImpact: highestLevel(
-          current?.profitImpact ?? "unknown",
-          suggestion.expectedProfitImpact,
-        ),
-        costLevel: lowestOperationalLevel(
-          current?.costLevel ?? "unknown",
-          suggestion.costLevel,
-        ),
-        effortLevel: lowestOperationalLevel(
-          current?.effortLevel ?? "unknown",
-          suggestion.effortLevel,
-        ),
-        confidenceStatus: strongestConfidence(
-          current?.confidenceStatus ?? "needs_review",
-          suggestion.confidenceStatus,
-        ),
-        sourceCount: (current?.sourceCount ?? 0) + 1,
-      };
-    }
-  }
-  return stats;
-}
-
-function buildImpactPositionOverrides(
-  workspace: ProjectWorkspace,
-  impactStats: NodeImpactStats,
-): NodePositionOverrides {
-  const saved = parseViewLayoutPositions(
-    workspace.viewLayouts.find((layout) => layout.viewId === "business_impact") ?? null,
-  );
-  const result: NodePositionOverrides = {};
-  const laneCounts = new Map<string, number>();
-
-  for (const node of workspace.nodes) {
-    if (saved[node.id]) {
-      result[node.id] = saved[node.id];
-      continue;
-    }
-    const stats = impactStats[node.id];
-    const impact = levelRank(stats?.revenueImpact ?? node.influenceLevel ?? "medium");
-    const effort = levelRank(stats?.effortLevel ?? "medium");
-    const lane = `${impact}-${effort}`;
-    const index = laneCounts.get(lane) ?? 0;
-    laneCounts.set(lane, index + 1);
-    result[node.id] = {
-      x: 330 + effort * 245,
-      y: 80 + (3 - Math.max(1, impact)) * 135 + index * 86,
-    };
-  }
-
-  return result;
-}
-
-function parseViewLayoutPositions(layout: ViewLayoutRow | null): NodePositionOverrides {
-  if (!layout) return {};
-  try {
-    const parsed = JSON.parse(layout.layoutJson) as {
-      positions?: Array<{
-        nodeId?: string;
-        x?: number;
-        y?: number;
-        width?: number;
-        height?: number;
-      }>;
-    };
-    return Object.fromEntries(
-      (parsed.positions ?? [])
-        .filter(
-          (position) =>
-            typeof position.nodeId === "string" &&
-            typeof position.x === "number" &&
-            typeof position.y === "number",
-        )
-        .map((position) => [
-          position.nodeId as string,
-          {
-            x: position.x as number,
-            y: position.y as number,
-            width: position.width,
-            height: position.height,
-          },
-        ]),
-    );
-  } catch {
-    return {};
-  }
-}
-
-function parseRelatedNodeIds(value: string): string[] {
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return Array.isArray(parsed)
-      ? parsed.filter((item): item is string => typeof item === "string")
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-function levelRank(value: string): number {
-  if (value === "high" || value === "3") return 3;
-  if (value === "medium" || value === "2") return 2;
-  if (value === "low" || value === "1") return 1;
-  return 0;
-}
-
-function highestLevel(current: string, next: string) {
-  return levelRank(next) > levelRank(current) ? next : current;
-}
-
-function lowestOperationalLevel(current: string, next: string) {
-  if (current === "unknown") return next;
-  if (next === "unknown") return current;
-  return levelRank(next) < levelRank(current) ? next : current;
-}
-
-function strongestConfidence(current: string, next: string) {
-  const ranks: Record<string, number> = { needs_review: 0, estimated: 1, confirmed: 2 };
-  return (ranks[next] ?? 0) > (ranks[current] ?? 0) ? next : current;
-}
-
 function ProjectsView({
   activeProject,
   activeProjectId,
@@ -4712,9 +4040,20 @@ function TodayView({
         right.impactScore - left.impactScore,
     )
     .slice(0, 4);
-  const recentNotes = workspace.mapNotes.slice(0, 3);
-  const recentVersions = workspace.versions.slice(0, 3);
-  const recentExports = workspace.exportJobs.slice(0, 3);
+  const recentNotes = [...workspace.mapNotes]
+    .sort((left, right) => sortByDateDesc(left.updatedAt, right.updatedAt))
+    .slice(0, 3);
+  const recentVersions = [...workspace.versions]
+    .sort((left, right) => sortByDateDesc(left.createdAt, right.createdAt))
+    .slice(0, 3);
+  const recentExports = [...workspace.exportJobs]
+    .sort((left, right) =>
+      sortByDateDesc(
+        left.completedAt ?? left.createdAt,
+        right.completedAt ?? right.createdAt,
+      ),
+    )
+    .slice(0, 3);
   const needsAttention = needsReflectionAttention(reflectionSummary);
 
   function updateActionStatus(
@@ -4768,11 +4107,7 @@ function TodayView({
           </div>
           <button
             className="ghost-button"
-            onClick={() =>
-              onNavigate(
-                reflectionSummary.pendingExtractionCount > 0 ? "extract" : "map",
-              )
-            }
+            onClick={() => onNavigate(reflectionActionView(reflectionSummary))}
             type="button"
           >
             確認する
@@ -4793,7 +4128,7 @@ function TodayView({
                   <strong>{actionItem.title}</strong>
                   <span>{actionItem.body}</span>
                   <small>
-                    優先度 {actionPriorityLabel(actionItem.priority)}
+                    優先度 {labelFor(priorityOptions, actionItem.priority)}
                     {actionItem.sourceType === "ai_question" ? " / AI確認質問" : ""}
                   </small>
                 </div>
@@ -4895,18 +4230,33 @@ function TodayView({
           </div>
           <div className="today-list">
             {recentNotes.map((note) => (
-              <article className="today-item today-item-compact" key={note.id}>
+              <button
+                className="today-item today-item-compact today-item-button"
+                key={note.id}
+                onClick={() => onNavigate("records")}
+                type="button"
+              >
                 <strong>{note.title}</strong>
                 <span>{shortText(note.body, 96)}</span>
                 <small>
-                  {noteTypeLabel(note.noteType)} / {formatTime(note.updatedAt)}
+                  {labelFor(noteTypeOptions, note.noteType)} /{" "}
+                  {formatTime(note.updatedAt)}
                 </small>
-              </article>
+              </button>
             ))}
             {recentNotes.length === 0 ? (
-              <div className="empty-panel">最近のメモはありません。</div>
+              <div className="empty-panel">
+                思考メモや会議メモを追加すると、ここから最近の状態へ戻れます。
+              </div>
             ) : null}
           </div>
+          <button
+            className="ghost-button"
+            onClick={() => onNavigate("records")}
+            type="button"
+          >
+            メモを書く
+          </button>
         </section>
 
         <section className="today-section">
@@ -4916,21 +4266,33 @@ function TodayView({
           </div>
           <div className="today-list">
             {recentVersions.map((version) => (
-              <article className="today-item today-item-compact" key={version.id}>
+              <button
+                className="today-item today-item-compact today-item-button"
+                key={version.id}
+                onClick={() => onNavigate("history")}
+                type="button"
+              >
                 <strong>{version.name ?? version.versionType}</strong>
                 <span>{version.memo ?? "メモなし"}</span>
                 <small>{formatTime(version.createdAt)}</small>
-              </article>
+              </button>
             ))}
             {recentExports.map((job) => (
-              <article className="today-item today-item-compact" key={job.id}>
+              <button
+                className="today-item today-item-compact today-item-button"
+                key={job.id}
+                onClick={() => onNavigate("export")}
+                type="button"
+              >
                 <strong>{job.exportType}</strong>
                 <span>{job.outputPath ?? "出力先未記録"}</span>
                 <small>{formatTime(job.completedAt)}</small>
-              </article>
+              </button>
             ))}
             {recentVersions.length === 0 && recentExports.length === 0 ? (
-              <div className="empty-panel">保存と出力の履歴はまだありません。</div>
+              <div className="empty-panel">
+                今日の整理が落ち着いたら、名前付き保存かMarkdown/CSV出力で残します。
+              </div>
             ) : null}
           </div>
           <div className="button-row">
@@ -5058,7 +4420,7 @@ function RecordsView({
                 >
                   {(["high", "medium", "low"] as const).map((priority) => (
                     <option key={priority} value={priority}>
-                      {actionPriorityLabel(priority)}
+                      {labelFor(priorityOptions, priority)}
                     </option>
                   ))}
                 </select>
@@ -5134,7 +4496,7 @@ function RecordsView({
                 >
                   {(["thought", "meeting", "daily"] as const).map((noteType) => (
                     <option key={noteType} value={noteType}>
-                      {noteTypeLabel(noteType)}
+                      {labelFor(noteTypeOptions, noteType)}
                     </option>
                   ))}
                 </select>
@@ -5207,9 +4569,11 @@ function ActionItemCard({
   return (
     <article className={`record-card record-card-${actionItem.status}`}>
       <div className="record-card-head">
-        <span className="status-chip">{actionStatusLabel(actionItem.status)}</span>
         <span className="status-chip">
-          優先度 {actionPriorityLabel(actionItem.priority)}
+          {labelFor(actionStatusOptions, actionItem.status)}
+        </span>
+        <span className="status-chip">
+          優先度 {labelFor(priorityOptions, actionItem.priority)}
         </span>
         {actionItem.sourceType === "ai_question" ? (
           <span className="status-chip">AI確認質問</span>
@@ -5247,7 +4611,7 @@ function ActionItemCard({
           >
             {(["open", "done", "dismissed"] as const).map((status) => (
               <option key={status} value={status}>
-                {actionStatusLabel(status)}
+                {labelFor(actionStatusOptions, status)}
               </option>
             ))}
           </select>
@@ -5265,7 +4629,7 @@ function ActionItemCard({
           >
             {(["high", "medium", "low"] as const).map((priority) => (
               <option key={priority} value={priority}>
-                {actionPriorityLabel(priority)}
+                {labelFor(priorityOptions, priority)}
               </option>
             ))}
           </select>
@@ -5338,7 +4702,7 @@ function MapNoteCard({
   return (
     <article className="record-card">
       <div className="record-card-head">
-        <span className="status-chip">{noteTypeLabel(note.noteType)}</span>
+        <span className="status-chip">{labelFor(noteTypeOptions, note.noteType)}</span>
         <span className="status-chip">更新 {formatTime(note.updatedAt)}</span>
       </div>
       <FormGrid>
@@ -5364,7 +4728,7 @@ function MapNoteCard({
           >
             {(["thought", "meeting", "daily"] as const).map((noteType) => (
               <option key={noteType} value={noteType}>
-                {noteTypeLabel(noteType)}
+                {labelFor(noteTypeOptions, noteType)}
               </option>
             ))}
           </select>
@@ -5774,6 +5138,7 @@ function InspectorPanel({
   isTauriRuntime,
   item,
   node,
+  onClose,
   onWorkspaceChange,
   projectId,
   suggestion,
@@ -5783,6 +5148,7 @@ function InspectorPanel({
   isTauriRuntime: boolean;
   item: ExtractedItemRow | null;
   node: MapNodeRow | null;
+  onClose: () => void;
   onWorkspaceChange: (workspace: ProjectWorkspace) => void;
   projectId: string | null;
   suggestion: SuggestionRow | null;
@@ -5956,10 +5322,20 @@ function InspectorPanel({
   return (
     <aside className="inspector">
       <div className="panel-heading">
-        <span>
-          {item ? "抽出カード" : node ? "ノード" : edge ? "導線" : "施策候補"}
-        </span>
-        <small>編集</small>
+        <div>
+          <span>
+            {item ? "抽出カード" : node ? "ノード" : edge ? "導線" : "施策候補"}
+          </span>
+          <small>編集</small>
+        </div>
+        <button
+          aria-label="詳細パネルを閉じる"
+          className="panel-close-button"
+          onClick={onClose}
+          type="button"
+        >
+          <X size={15} aria-hidden="true" />
+        </button>
       </div>
       {!item && !suggestion ? (
         <MapInsightActions

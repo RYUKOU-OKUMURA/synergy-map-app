@@ -2432,6 +2432,21 @@ button:disabled {
   gap: 10px;
 }
 
+.today-item-button {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.today-item-button:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-muted);
+}
+
 .today-item:not(.today-item-compact) {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;

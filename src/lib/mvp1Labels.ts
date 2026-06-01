@@ -21,10 +21,22 @@ export const adoptionOptions = [
   ["rejected", "却下"],
 ] as const satisfies readonly LabelOption[];
 
+export const actionStatusOptions = [
+  ["open", "未完了"],
+  ["done", "完了"],
+  ["dismissed", "見送り"],
+] as const satisfies readonly LabelOption[];
+
 export const priorityOptions = [
   ["high", "高"],
   ["medium", "中"],
   ["low", "低"],
+] as const satisfies readonly LabelOption[];
+
+export const noteTypeOptions = [
+  ["thought", "思考メモ"],
+  ["meeting", "会議メモ"],
+  ["daily", "日次メモ"],
 ] as const satisfies readonly LabelOption[];
 
 export const impactLevelOptions = [
