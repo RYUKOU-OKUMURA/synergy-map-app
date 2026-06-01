@@ -24,6 +24,7 @@ export type LayoutFlowEdge = {
   data?: {
     label?: string;
     edgeType?: string;
+    strength?: string;
   };
 };
 
@@ -35,8 +36,8 @@ export type EdgeLabelLayoutOptions = {
 type Rect = { x: number; y: number; width: number; height: number };
 
 type PlacedLabel = {
-  cx: number;
-  cy: number;
+  x: number;
+  y: number;
   width: number;
   height: number;
 };
@@ -54,6 +55,7 @@ type EdgeLayoutInput = {
   id: string;
   label: string;
   edgeType: string;
+  strength: string;
   pathD: string;
   defaultX: number;
   defaultY: number;
@@ -66,13 +68,11 @@ const LABEL_HEIGHT = 24;
 const CHAR_WIDTH_EST = 12;
 const LABEL_COLLISION_PADDING = 8;
 const NODE_MARGIN = 8;
-/** EdgeLabelRenderer 上で flow X が画面 X より強く圧縮される分を補正する */
-const EDGE_LABEL_HORIZONTAL_SCALE = 0.18;
 const LEADER_THRESHOLD = 20;
 const COLLISION_PENALTY = 1_000_000;
 
-const CANDIDATE_T_VALUES = [0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65];
-const NORMAL_OFFSETS = [0, 12, -12, 24, -24, 36, -36, 48, -48];
+const CANDIDATE_T_VALUES = [0.5, 0.45, 0.55, 0.4, 0.6];
+const NORMAL_OFFSETS = [0, 10, -10, 16, -16];
 
 let pathMeasureElement: SVGPathElement | null = null;
 
@@ -106,8 +106,9 @@ export function estimateLabelBox(label: string, hasWarningIcon: boolean) {
   return { width, height: LABEL_HEIGHT };
 }
 
-function edgePriority(edgeType: string) {
+function edgePriority(edgeType: string, strength: string) {
   if (edgeType === "bottleneck") return 0;
+  if (strength === "strong") return 1;
   if (edgeType === "strong") return 1;
   if (edgeType === "normal") return 2;
   return 3;
@@ -164,43 +165,72 @@ function normalAtPath(pathD: string, t: number) {
   return { nx: -dy / length, ny: dx / length };
 }
 
-function screenLabelOverlapArea(
+function labelRectInFlow(
+  candidate: LabelCandidate,
+  labelBox: { width: number; height: number },
+  zoom: number,
+  padding = 0,
+) {
+  const safeZoom = Math.max(zoom, 0.1);
+  const width = (labelBox.width + padding * 2) / safeZoom;
+  const height = (labelBox.height + padding * 2) / safeZoom;
+  return {
+    x: candidate.x - width / 2,
+    y: candidate.y - height / 2,
+    width,
+    height,
+  };
+}
+
+function rectOverlapArea(a: Rect, b: Rect) {
+  const overlapWidth = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+  const overlapHeight = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+  if (overlapWidth <= 0 || overlapHeight <= 0) return 0;
+  return overlapWidth * overlapHeight;
+}
+
+function labelOverlapArea(
   candidate: LabelCandidate,
   labelBox: { width: number; height: number },
   placed: PlacedLabel[],
   zoom: number,
 ) {
-  let overlap = 0;
-
-  for (const other of placed) {
-    const screenDx =
-      Math.abs(candidate.x - other.cx) * zoom * EDGE_LABEL_HORIZONTAL_SCALE;
-    const screenDy = Math.abs(candidate.y - other.cy) * zoom;
-    const minDx = (labelBox.width + other.width) / 2 + LABEL_COLLISION_PADDING;
-    const minDy = (labelBox.height + other.height) / 2 + LABEL_COLLISION_PADDING;
-
-    if (screenDx < minDx && screenDy < minDy) {
-      overlap += (minDx - screenDx) * (minDy - screenDy);
-    }
-  }
-
-  return overlap;
+  const candidateRect = labelRectInFlow(
+    candidate,
+    labelBox,
+    zoom,
+    LABEL_COLLISION_PADDING,
+  );
+  return placed.reduce(
+    (total, other) => total + rectOverlapArea(candidateRect, other),
+    0,
+  );
 }
 
-function labelCenterInsideRect(centerX: number, centerY: number, rect: Rect) {
+function nodeOverlapArea(
+  candidate: LabelCandidate,
+  labelBox: { width: number; height: number },
+  nodeObstacles: Rect[],
+  zoom: number,
+) {
+  const candidateRect = labelRectInFlow(candidate, labelBox, zoom);
+  return nodeObstacles.reduce(
+    (total, rect) => total + rectOverlapArea(candidateRect, rect),
+    0,
+  );
+}
+
+function candidateCollisionArea(
+  candidate: LabelCandidate,
+  labelBox: { width: number; height: number },
+  placed: PlacedLabel[],
+  nodeObstacles: Rect[],
+  zoom: number,
+) {
   return (
-    centerX >= rect.x &&
-    centerX <= rect.x + rect.width &&
-    centerY >= rect.y &&
-    centerY <= rect.y + rect.height
+    labelOverlapArea(candidate, labelBox, placed, zoom) +
+    nodeOverlapArea(candidate, labelBox, nodeObstacles, zoom)
   );
-}
-
-function nodeCollisionPenalty(centerX: number, centerY: number, nodeObstacles: Rect[]) {
-  const hitsNode = nodeObstacles.some((rect) =>
-    labelCenterInsideRect(centerX, centerY, rect),
-  );
-  return hitsNode ? COLLISION_PENALTY : 0;
 }
 
 function buildNodeObstacles(nodes: LayoutFlowNode[]): Rect[] {
@@ -246,9 +276,14 @@ function candidateCost(
   edgeId: string,
   selectedEdgeId: string | null | undefined,
 ) {
-  let cost =
-    screenLabelOverlapArea(candidate, labelBox, placed, zoom) * COLLISION_PENALTY;
-  cost += nodeCollisionPenalty(candidate.x, candidate.y, nodeObstacles);
+  const collisionArea = candidateCollisionArea(
+    candidate,
+    labelBox,
+    placed,
+    nodeObstacles,
+    zoom,
+  );
+  let cost = collisionArea * COLLISION_PENALTY;
 
   cost += Math.abs(candidate.t - 0.5) * 40;
   cost += Math.abs(candidate.offset) * 2;
@@ -293,9 +328,15 @@ function pickCandidate(
 ) {
   const candidates = generateCandidates(edge.pathD);
   const isSelected = edge.id === selectedEdgeId;
+  const shouldForceDisplay =
+    isSelected ||
+    edge.edgeType === "bottleneck" ||
+    edge.edgeType === "strong" ||
+    edge.strength === "strong";
 
-  let best: { candidate: LabelCandidate; cost: number } | null = null;
-  let bestColliding: { candidate: LabelCandidate; overlap: number } | null = null;
+  let best: { candidate: LabelCandidate; cost: number; collisionArea: number } | null =
+    null;
+  let bestColliding: { candidate: LabelCandidate; collisionArea: number } | null = null;
 
   for (const candidate of candidates) {
     const cost = candidateCost(
@@ -307,16 +348,20 @@ function pickCandidate(
       edge.id,
       selectedEdgeId,
     );
-    const overlap =
-      screenLabelOverlapArea(candidate, labelBox, placed, zoom) +
-      (nodeCollisionPenalty(candidate.x, candidate.y, nodeObstacles) > 0 ? 1 : 0);
+    const collisionArea = candidateCollisionArea(
+      candidate,
+      labelBox,
+      placed,
+      nodeObstacles,
+      zoom,
+    );
 
     if (!best || cost < best.cost) {
-      best = { candidate, cost };
+      best = { candidate, cost, collisionArea };
     }
 
-    if (!bestColliding || overlap < bestColliding.overlap) {
-      bestColliding = { candidate, overlap };
+    if (!bestColliding || collisionArea < bestColliding.collisionArea) {
+      bestColliding = { candidate, collisionArea };
     }
   }
 
@@ -334,20 +379,17 @@ function pickCandidate(
     );
   }
 
-  const hasCollision = best.cost >= COLLISION_PENALTY;
+  const hasCollision = best.collisionArea > 0;
 
   if (!hasCollision) {
     return toPlacement(best.candidate);
   }
 
-  if (bestColliding && (isSelected || bestColliding.overlap > 0)) {
-    return toPlacement(
-      bestColliding.candidate,
-      !isSelected && bestColliding.overlap > 0,
-    );
+  if (bestColliding) {
+    return toPlacement(bestColliding.candidate, !shouldForceDisplay);
   }
 
-  return toPlacement(best.candidate, !isSelected);
+  return toPlacement(best.candidate, !shouldForceDisplay);
 }
 
 export function computeEdgeLabelLayout(
@@ -369,10 +411,12 @@ export function computeEdgeLabelLayout(
 
     const { pathD, labelX, labelY } = buildEdgeBezierGeometry(sourceNode, targetNode);
     const edgeType = edge.data?.edgeType ?? "normal";
+    const strength = edge.data?.strength ?? "normal";
     edgeInputs.push({
       id: edge.id,
       label: edge.data?.label ?? "導線",
       edgeType,
+      strength,
       pathD,
       defaultX: labelX,
       defaultY: labelY,
@@ -381,7 +425,8 @@ export function computeEdgeLabelLayout(
   }
 
   edgeInputs.sort((a, b) => {
-    const priorityDiff = edgePriority(a.edgeType) - edgePriority(b.edgeType);
+    const priorityDiff =
+      edgePriority(a.edgeType, a.strength) - edgePriority(b.edgeType, b.strength);
     if (priorityDiff !== 0) return priorityDiff;
     return a.id.localeCompare(b.id);
   });
@@ -402,11 +447,24 @@ export function computeEdgeLabelLayout(
     placements[edge.id] = placement;
 
     if (!placement.hidden) {
+      const placedRect = labelRectInFlow(
+        {
+          t: 0.5,
+          offset: 0,
+          x: placement.x,
+          y: placement.y,
+          anchorX: placement.anchorX ?? placement.x,
+          anchorY: placement.anchorY ?? placement.y,
+        },
+        labelBox,
+        zoom,
+        LABEL_COLLISION_PADDING,
+      );
       placed.push({
-        cx: placement.x,
-        cy: placement.y,
-        width: labelBox.width,
-        height: labelBox.height,
+        x: placedRect.x,
+        y: placedRect.y,
+        width: placedRect.width,
+        height: placedRect.height,
       });
     }
   }

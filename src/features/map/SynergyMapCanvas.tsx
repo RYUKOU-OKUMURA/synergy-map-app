@@ -485,6 +485,9 @@ function SynergyEdge(props: EdgeProps<FlowEdge>) {
             }}
             role="button"
             style={{
+              left: 0,
+              position: "absolute",
+              top: 0,
               transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
             }}
             tabIndex={0}

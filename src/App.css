@@ -3009,6 +3009,7 @@ button:disabled {
   box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08);
   pointer-events: all;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .map-edge-label:hover,
