@@ -293,6 +293,15 @@ function aiRunStatusLabel(run: AiRunRow | null | undefined) {
   return run.status;
 }
 
+function isSameSelectedMapElement(
+  current: SelectedMapElement,
+  next: SelectedMapElement,
+) {
+  if (current === next) return true;
+  if (!current || !next) return false;
+  return current.kind === next.kind && current.id === next.id;
+}
+
 function App() {
   const isTauriRuntime = hasTauriRuntime();
   const [view, setView] = useState<ViewId>("home");
@@ -403,6 +412,15 @@ function App() {
   const visibleLayoutSaveStatus =
     layoutSaveScope === currentLayoutScope ? layoutSaveStatus : "idle";
   const primaryActionLabel = getPrimaryActionLabel(workspace);
+  const handleSelectMapElement = useCallback((selection: SelectedMapElement) => {
+    setSelectedMapElement((current) =>
+      isSameSelectedMapElement(current, selection) ? current : selection,
+    );
+    if (selection) {
+      setSelectedItemId(null);
+      setSelectedSuggestionId(null);
+    }
+  }, []);
 
   useEffect(() => {
     if (!notice) return;
@@ -1606,13 +1624,7 @@ function App() {
                 setSelectedMapElement(null);
                 setSelectedSuggestionId(null);
               }}
-              onSelectMapElement={(selection) => {
-                setSelectedMapElement(selection);
-                if (selection) {
-                  setSelectedItemId(null);
-                  setSelectedSuggestionId(null);
-                }
-              }}
+              onSelectMapElement={handleSelectMapElement}
               onSelectSuggestion={(suggestionId) => {
                 setSelectedSuggestionId(suggestionId);
                 setSelectedItemId(null);

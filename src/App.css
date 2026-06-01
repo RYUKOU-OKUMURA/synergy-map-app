@@ -3032,6 +3032,123 @@ button:disabled {
   color: #9a3412;
 }
 
+.map-edge-popover {
+  z-index: 20;
+  display: grid;
+  width: min(360px, 90vw);
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 16px;
+  pointer-events: all;
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.16);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.map-edge-popover-dragging {
+  cursor: grabbing;
+}
+
+.map-edge-popover-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.map-edge-popover-close:hover {
+  border-color: var(--border);
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+.map-edge-popover-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--primary-dark);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.map-edge-popover-title {
+  max-width: calc(100% - 34px);
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 850;
+  line-height: 1.3;
+}
+
+.map-edge-popover-route {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.map-edge-popover-route span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.map-edge-popover-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.map-edge-popover-chips span {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  border: 1px solid #b7e5df;
+  border-radius: 999px;
+  background: #ecfdf9;
+  color: var(--primary-dark);
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.map-edge-popover p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.map-edge-popover-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.map-edge-popover-actions .ghost-button,
+.map-edge-popover-actions .primary-button {
+  min-height: 38px;
+  cursor: pointer;
+}
+
 .map-edge-label-leader {
   stroke: var(--border);
   stroke-width: 1;

@@ -21,10 +21,13 @@ import {
   AlertTriangle,
   ArrowRight,
   Database,
+  Eye,
   Megaphone,
   Package,
+  Pencil,
   Store,
   Workflow,
+  X,
 } from "lucide-react";
 import {
   useCallback,
@@ -34,6 +37,8 @@ import {
   useRef,
   useState,
   createContext,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
   useContext,
 } from "react";
 
@@ -105,10 +110,18 @@ type SynergyEdgeData = {
   edgeType: string;
   strength: string;
   confidenceStatus: string | null;
+  evidence: string | null;
+  flowType: string | null;
   flowAnimation: FlowAnimationParams | null;
   labelPlacement?: EdgeLabelPlacement | null;
+  onCloseEdgePreview: () => void;
+  onOpenEdgePreview: (edgeId: string) => void;
   onSelectEdge: (edgeId: string) => void;
+  previewOpen: boolean;
+  sourceNodeLabel: string;
+  targetNodeLabel: string;
   viewMode: MapViewMode;
+  viewportZoom: number;
 };
 
 type FlowNode = Node<SynergyNodeData, "synergy">;
@@ -148,6 +161,17 @@ const MIN_NODE_WIDTH = 170;
 const MIN_NODE_HEIGHT = 92;
 const MAX_NODE_WIDTH = 380;
 const MAX_NODE_HEIGHT = 260;
+const EDGE_REASON_MAX_LENGTH = 72;
+
+const flowTypeLabels: Record<string, string> = {
+  awareness: "認知",
+  inquiry: "問い合わせ",
+  proposal: "提案",
+  purchase: "購入",
+  retention: "関係維持",
+  referral: "紹介",
+  data_reference: "データ連携",
+};
 
 function parsePosition(positionJson: string) {
   try {
@@ -193,6 +217,28 @@ function layoutFromFlowNode(node: FlowNode): MapNodeLayout {
     height:
       node.height ?? node.measured?.height ?? numericStyleValue(node.style?.height),
   };
+}
+
+function shortenEndpointLabel(label: string) {
+  const dividers = [label.indexOf("/"), label.indexOf(":")].filter(
+    (index) => index > 0,
+  );
+  const dividerIndex = dividers.length > 0 ? Math.min(...dividers) : -1;
+  const shortened = dividerIndex > 0 ? label.slice(0, dividerIndex) : label;
+  return shortened.trim() || label;
+}
+
+function summarizeEvidence(evidence: string | null | undefined) {
+  const fallback = "この導線の根拠は未設定です。";
+  const normalized = evidence?.trim().replace(/\s+/g, " ");
+  if (!normalized) return fallback;
+
+  const sentenceEnd = normalized.search(/[。！？!?]/);
+  const firstSentence =
+    sentenceEnd >= 0 ? normalized.slice(0, sentenceEnd + 1) : normalized;
+
+  if (firstSentence.length <= EDGE_REASON_MAX_LENGTH) return firstSentence;
+  return `${firstSentence.slice(0, EDGE_REASON_MAX_LENGTH - 1)}…`;
 }
 
 function snapshotLayoutNodes(nodes: FlowNode[]): LayoutFlowNode[] {
@@ -255,10 +301,16 @@ function toFlowNodes(
 
 function toFlowEdges(
   edges: MapEdgeRow[],
+  nodes: MapNodeRow[],
   viewMode: MapViewMode,
   onSelectEdge: (edgeId: string) => void,
+  onOpenEdgePreview: (edgeId: string) => void,
+  onCloseEdgePreview: () => void,
+  edgePreviewId: string | null,
   globalFlowAnimationEnabled: boolean,
 ): FlowEdge[] {
+  const nodeLabelById = new Map(nodes.map((node) => [node.id, node.label]));
+
   return edges
     .filter((edge) => edge.adoptionStatus !== "rejected")
     .map((edge) => {
@@ -275,11 +327,19 @@ function toFlowEdges(
           edgeType,
           strength,
           confidenceStatus: edge.confidenceStatus,
+          evidence: edge.evidence,
+          flowType: edge.flowType,
           flowAnimation: globalFlowAnimationEnabled
             ? resolveFlowAnimationConfig(strength, edgeType)
             : null,
+          onCloseEdgePreview,
+          onOpenEdgePreview,
           onSelectEdge,
+          previewOpen: edgePreviewId === edge.id,
+          sourceNodeLabel: nodeLabelById.get(edge.sourceNodeId) ?? "接続元",
+          targetNodeLabel: nodeLabelById.get(edge.targetNodeId) ?? "接続先",
           viewMode,
+          viewportZoom: 1,
         },
       };
     });
@@ -401,6 +461,19 @@ function SynergyEdge(props: EdgeProps<FlowEdge>) {
   const hideLabel = placement?.hidden === true && !props.selected && !isSelected;
   const particleRegistry = useFlowParticleRegistry();
 
+  useEffect(() => {
+    if (!props.data?.previewOpen) return;
+
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        props.data?.onCloseEdgePreview();
+      }
+    }
+
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [props.data]);
+
   useLayoutEffect(() => {
     if (!flowAnimation || !particleRegistry) return;
 
@@ -475,13 +548,13 @@ function SynergyEdge(props: EdgeProps<FlowEdge>) {
             }`}
             onClick={(event) => {
               event.stopPropagation();
-              props.data?.onSelectEdge(props.id);
+              props.data?.onOpenEdgePreview(props.id);
             }}
             onKeyDown={(event) => {
               if (event.key !== "Enter" && event.key !== " ") return;
               event.preventDefault();
               event.stopPropagation();
-              props.data?.onSelectEdge(props.id);
+              props.data?.onOpenEdgePreview(props.id);
             }}
             role="button"
             style={{
@@ -500,9 +573,171 @@ function SynergyEdge(props: EdgeProps<FlowEdge>) {
             )}
             {props.data?.label ?? "導線"}
           </div>
+          {props.data?.previewOpen ? (
+            <EdgeReasonPopover
+              confidenceStatus={props.data.confidenceStatus}
+              evidence={props.data.evidence}
+              flowType={props.data.flowType}
+              label={props.data.label}
+              onClose={props.data.onCloseEdgePreview}
+              onFocusDetails={() => {
+                props.data?.onSelectEdge(props.id);
+                props.data?.onCloseEdgePreview();
+              }}
+              sourceNodeLabel={props.data.sourceNodeLabel}
+              anchorX={labelX}
+              anchorY={labelY}
+              targetNodeLabel={props.data.targetNodeLabel}
+              viewportZoom={props.data.viewportZoom}
+            />
+          ) : null}
         </EdgeLabelRenderer>
       )}
     </>
+  );
+}
+
+function EdgeReasonPopover({
+  anchorX,
+  anchorY,
+  confidenceStatus,
+  evidence,
+  flowType,
+  label,
+  onClose,
+  onFocusDetails,
+  sourceNodeLabel,
+  targetNodeLabel,
+  viewportZoom,
+}: {
+  anchorX: number;
+  anchorY: number;
+  confidenceStatus: string | null;
+  evidence: string | null;
+  flowType: string | null;
+  label: string;
+  onClose: () => void;
+  onFocusDetails: () => void;
+  sourceNodeLabel: string;
+  targetNodeLabel: string;
+  viewportZoom: number;
+}) {
+  const flowLabel = flowTypeLabels[flowType ?? ""] ?? flowType ?? "流れ未設定";
+  const confidenceLabel = confidenceLabels[confidenceStatus ?? ""] ?? "推定";
+  const shortSource = shortenEndpointLabel(sourceNodeLabel);
+  const shortTarget = shortenEndpointLabel(targetNodeLabel);
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+  const dragRef = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  const popoverStyle: CSSProperties = {
+    left: 0,
+    position: "absolute",
+    top: 0,
+    transform: `translate(-50%, 18px) translate(${anchorX + dragOffset.x}px, ${
+      anchorY + dragOffset.y
+    }px)`,
+  };
+
+  function isInteractiveTarget(target: EventTarget | null) {
+    return (
+      target instanceof Element &&
+      Boolean(target.closest("button, a, input, textarea, select"))
+    );
+  }
+
+  function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || isInteractiveTarget(event.target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+    };
+    setDragging(true);
+  }
+
+  function handlePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const zoom = Math.max(viewportZoom, 0.1);
+    const deltaX = (event.clientX - drag.x) / zoom;
+    const deltaY = (event.clientY - drag.y) / zoom;
+    dragRef.current = {
+      ...drag,
+      x: event.clientX,
+      y: event.clientY,
+    };
+    setDragOffset((current) => ({
+      x: current.x + deltaX,
+      y: current.y + deltaY,
+    }));
+  }
+
+  function handlePointerEnd(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.stopPropagation();
+    dragRef.current = null;
+    setDragging(false);
+  }
+
+  return (
+    <div
+      aria-label="導線の理由"
+      className={`map-edge-popover nodrag nopan ${
+        dragging ? "map-edge-popover-dragging" : ""
+      }`}
+      onClick={(event) => event.stopPropagation()}
+      onLostPointerCapture={handlePointerEnd}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerEnd}
+      role="dialog"
+      style={popoverStyle}
+    >
+      <button
+        aria-label="導線の理由を閉じる"
+        className="map-edge-popover-close"
+        onClick={onClose}
+        type="button"
+      >
+        <X size={14} aria-hidden="true" />
+      </button>
+      <div className="map-edge-popover-kicker">
+        <Workflow size={14} aria-hidden="true" />
+        導線の理由
+      </div>
+      <div className="map-edge-popover-title">{label}</div>
+      <div className="map-edge-popover-route">
+        <span>{shortSource}</span>
+        <ArrowRight size={14} aria-hidden="true" />
+        <span>{shortTarget}</span>
+      </div>
+      <div className="map-edge-popover-chips">
+        <span>{flowLabel}</span>
+        <span>{confidenceLabel}</span>
+      </div>
+      <p>{summarizeEvidence(evidence)}</p>
+      <div className="map-edge-popover-actions">
+        <button className="ghost-button" onClick={onFocusDetails} type="button">
+          <Eye size={14} aria-hidden="true" />
+          詳しく見る
+        </button>
+        <button className="primary-button" onClick={onFocusDetails} type="button">
+          <Pencil size={14} aria-hidden="true" />
+          編集
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -542,6 +777,7 @@ export function SynergyMapCanvas({
     userEnabled: flowAnimationUserEnabled,
     captureSuppressed: flowAnimationSuppressed,
   });
+  const [edgePreviewId, setEdgePreviewId] = useState<string | null>(null);
   const handleNodeLayoutChange = useCallback(
     (layout: MapNodeLayout) => onPositionsChange([layout]),
     [onPositionsChange],
@@ -553,10 +789,37 @@ export function SynergyMapCanvas({
     },
     [editable, onConnectNodes],
   );
-  const handleSelectEdge = useCallback(
-    (edgeId: string) => onSelect({ kind: "edge", id: edgeId }),
-    [onSelect],
+  const isSelectedElement = useCallback(
+    (kind: "node" | "edge", id: string) =>
+      selected?.kind === kind && selected.id === id,
+    [selected],
   );
+  const handleSelectEdge = useCallback(
+    (edgeId: string) => {
+      if (isSelectedElement("edge", edgeId)) return;
+      onSelect({ kind: "edge", id: edgeId });
+    },
+    [isSelectedElement, onSelect],
+  );
+  const handleOpenEdgePreview = useCallback((edgeId: string) => {
+    setEdgePreviewId((current) => (current === edgeId ? current : edgeId));
+  }, []);
+  const handleCloseEdgePreview = useCallback(() => {
+    setEdgePreviewId(null);
+  }, []);
+  const handleSelectNode = useCallback(
+    (nodeId: string) => {
+      setEdgePreviewId(null);
+      if (isSelectedElement("node", nodeId)) return;
+      onSelect({ kind: "node", id: nodeId });
+    },
+    [isSelectedElement, onSelect],
+  );
+  const handleClearSelection = useCallback(() => {
+    setEdgePreviewId(null);
+    if (!selected) return;
+    onSelect(null);
+  }, [onSelect, selected]);
   const initialNodes = useMemo(
     () =>
       toFlowNodes(
@@ -577,8 +840,27 @@ export function SynergyMapCanvas({
     ],
   );
   const initialEdges = useMemo(
-    () => toFlowEdges(edges, viewMode, handleSelectEdge, globalFlowAnimationEnabled),
-    [edges, globalFlowAnimationEnabled, handleSelectEdge, viewMode],
+    () =>
+      toFlowEdges(
+        edges,
+        nodes,
+        viewMode,
+        handleSelectEdge,
+        handleOpenEdgePreview,
+        handleCloseEdgePreview,
+        edgePreviewId,
+        globalFlowAnimationEnabled,
+      ),
+    [
+      edges,
+      edgePreviewId,
+      globalFlowAnimationEnabled,
+      handleCloseEdgePreview,
+      handleOpenEdgePreview,
+      handleSelectEdge,
+      nodes,
+      viewMode,
+    ],
   );
   const [flowNodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [flowEdges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
@@ -587,6 +869,8 @@ export function SynergyMapCanvas({
   const [frozenLayoutNodes, setFrozenLayoutNodes] = useState<LayoutFlowNode[] | null>(
     null,
   );
+  const suppressSelectionChangeRef = useRef(false);
+  const suppressSelectionChangeTimerRef = useRef<number | null>(null);
   const flowNodesRef = useRef(flowNodes);
   useEffect(() => {
     flowNodesRef.current = flowNodes;
@@ -632,10 +916,11 @@ export function SynergyMapCanvas({
         data: {
           ...data,
           labelPlacement: labelPlacements[edge.id] ?? null,
+          viewportZoom,
         },
       };
     });
-  }, [flowEdges, labelPlacements]);
+  }, [flowEdges, labelPlacements, viewportZoom]);
 
   const flushPositionSave = useCallback(() => {
     const layouts = [...pendingLayoutsRef.current.values()];
@@ -717,6 +1002,15 @@ export function SynergyMapCanvas({
   }, []);
 
   useEffect(() => {
+    suppressSelectionChangeRef.current = true;
+    if (suppressSelectionChangeTimerRef.current !== null) {
+      window.clearTimeout(suppressSelectionChangeTimerRef.current);
+    }
+    suppressSelectionChangeTimerRef.current = window.setTimeout(() => {
+      suppressSelectionChangeRef.current = false;
+      suppressSelectionChangeTimerRef.current = null;
+    }, 80);
+
     if (!selected) {
       setNodes((current) => current.map((node) => ({ ...node, selected: false })));
       setEdges((current) => current.map((edge) => ({ ...edge, selected: false })));
@@ -737,7 +1031,16 @@ export function SynergyMapCanvas({
     );
   }, [selected, setEdges, setNodes]);
 
+  useEffect(() => {
+    return () => {
+      if (suppressSelectionChangeTimerRef.current !== null) {
+        window.clearTimeout(suppressSelectionChangeTimerRef.current);
+      }
+    };
+  }, []);
+
   const handleNodeDragStart = useCallback(() => {
+    setEdgePreviewId(null);
     setFrozenLayoutNodes(snapshotLayoutNodes(flowNodesRef.current));
     setIsNodeDragging(true);
   }, []);
@@ -773,20 +1076,25 @@ export function SynergyMapCanvas({
           onMove={handleViewportMove}
           onMoveEnd={(_, viewport) => setViewportZoom(viewport.zoom)}
           onConnect={handleConnect}
-          onEdgeClick={(_, edge) => onSelect({ kind: "edge", id: edge.id })}
+          onEdgeClick={(_, edge) => {
+            setEdgePreviewId(null);
+            handleSelectEdge(edge.id);
+          }}
           onEdgesChange={onEdgesChange}
-          onNodeClick={(_, node) => onSelect({ kind: "node", id: node.id })}
+          onNodeClick={(_, node) => handleSelectNode(node.id)}
           onNodeDragStart={handleNodeDragStart}
           onNodeDragStop={handleNodeDragStop}
           onNodesChange={onNodesChange}
-          onPaneClick={() => onSelect(null)}
+          onPaneClick={handleClearSelection}
           onSelectionChange={({ edges: selectedEdges, nodes: selectedNodes }) => {
+            if (suppressSelectionChangeRef.current) return;
             const selectedNode = selectedNodes[0];
             const selectedEdge = selectedEdges[0];
+            if (!selected && (selectedNode || selectedEdge)) return;
             if (selectedNode) {
-              onSelect({ kind: "node", id: selectedNode.id });
+              handleSelectNode(selectedNode.id);
             } else if (selectedEdge) {
-              onSelect({ kind: "edge", id: selectedEdge.id });
+              handleSelectEdge(selectedEdge.id);
             }
           }}
           panOnScroll
