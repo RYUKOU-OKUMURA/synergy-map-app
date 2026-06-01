@@ -369,7 +369,14 @@ button:disabled {
 .button-row {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
+}
+
+.button-row-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .workspace {
@@ -1501,6 +1508,20 @@ button:disabled {
   font-weight: 500;
 }
 
+.field textarea.research-memo-textarea {
+  min-height: 132px;
+}
+
+.url-input-note {
+  border: 1px solid #bae6fd;
+  border-radius: 7px;
+  background: #f0f9ff;
+  color: #075985;
+  padding: 9px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .url-remove-button {
   display: inline-flex;
   width: 32px;
@@ -1735,6 +1756,21 @@ button:disabled {
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.45;
+}
+
+.generation-stage-panel {
+  display: grid;
+  gap: 3px;
+  border: 1px solid #a7f3d0;
+  border-radius: 7px;
+  background: #ecfdf9;
+  padding: 10px;
+}
+
+.generation-stage-panel span {
+  color: var(--primary-dark);
+  font-size: 13px;
+  font-weight: 800;
 }
 
 .source-type-strip {

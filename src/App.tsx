@@ -129,6 +129,8 @@ type OnboardingDraft = {
   productInfo: string;
 };
 
+type OnboardingGenerationStage = "source" | "extract" | "map" | "suggestions";
+
 type ActionItemDraft = {
   title: string;
   body: string;
@@ -232,6 +234,14 @@ function compactStringList(values: string[]) {
   return values.map((value) => value.trim()).filter(Boolean);
 }
 
+function onboardingGenerationStageLabel(stage: OnboardingGenerationStage | null) {
+  if (stage === "source") return "材料を整理中";
+  if (stage === "extract") return "AI抽出中";
+  if (stage === "map") return "売上マップ生成中";
+  if (stage === "suggestions") return "次の一手を整理中";
+  return null;
+}
+
 function hasOnboardingBrief(workspace: ProjectWorkspace) {
   return workspace.sourceFiles.some((source) => source.fileType === "onboarding_brief");
 }
@@ -321,6 +331,8 @@ function App() {
     useState<CursorSdkSmokeResult | null>(null);
   const [cursorBusy, setCursorBusy] = useState<CursorConnectionAction | null>(null);
   const [aiSettingsBusy, setAiSettingsBusy] = useState(false);
+  const [onboardingGenerationStage, setOnboardingGenerationStage] =
+    useState<OnboardingGenerationStage | null>(null);
   const [approvedChunkSignature, setApprovedChunkSignature] = useState<string | null>(
     null,
   );
@@ -903,6 +915,7 @@ function App() {
     setIsBusy(true);
     setError(null);
     setNotice(null);
+    setOnboardingGenerationStage("source");
     try {
       let projectId = activeProjectId;
       let nextProjects: Project[];
@@ -955,17 +968,20 @@ function App() {
       setView("map");
 
       const sourceChunkIds = sourceWorkspace.sourceChunks.map((chunk) => chunk.id);
+      setOnboardingGenerationStage("extract");
       const extractResult = await invoke<MvpRunResult>("run_extract_items", {
         projectId,
         sourceChunkIds,
       });
       setWorkspace(extractResult.workspace);
 
+      setOnboardingGenerationStage("map");
       const mapResult = await invoke<MvpRunResult>("generate_map_from_items", {
         projectId,
       });
       setWorkspace(mapResult.workspace);
 
+      setOnboardingGenerationStage("suggestions");
       const suggestionsResult = await invoke<MvpRunResult>(
         "generate_suggestions_from_map",
         { projectId },
@@ -987,6 +1003,7 @@ function App() {
     } catch (caughtError) {
       setError(String(caughtError));
     } finally {
+      setOnboardingGenerationStage(null);
       setIsBusy(false);
     }
   }
@@ -1550,6 +1567,7 @@ function App() {
               editMode={isMapEditMode}
               flowAnimationUserEnabled={flowAnimationUserEnabled}
               generationBusy={isBusy}
+              generationStage={onboardingGenerationStage}
               layoutSaveStatus={visibleLayoutSaveStatus}
               latestAiRun={latestAiRun}
               mapInsightBusy={mapInsightBusy}
@@ -2098,6 +2116,7 @@ function MapWorkspace({
   editMode,
   flowAnimationUserEnabled,
   generationBusy,
+  generationStage,
   layoutSaveStatus,
   latestAiRun,
   mapInsightBusy,
@@ -2145,6 +2164,7 @@ function MapWorkspace({
   editMode: boolean;
   flowAnimationUserEnabled: boolean;
   generationBusy: boolean;
+  generationStage: OnboardingGenerationStage | null;
   layoutSaveStatus: "idle" | "saving" | "saved" | "error";
   latestAiRun: AiRunRow | null;
   mapInsightBusy: boolean;
@@ -2449,6 +2469,7 @@ function MapWorkspace({
             cursorSdkStatus={cursorSdkStatus}
             deviceCodeResult={deviceCodeResult}
             generationBusy={generationBusy}
+            generationStage={generationStage}
             key={activeProject?.id ?? "new-map"}
             onCreateMap={onCreateOnboardingMap}
             onOpenExternalUrl={onOpenExternalUrl}
@@ -2655,6 +2676,7 @@ function MapCreationFlow({
   cursorSdkStatus,
   deviceCodeResult,
   generationBusy,
+  generationStage,
   onCreateMap,
   onOpenExternalUrl,
   onPickFiles,
@@ -2676,6 +2698,7 @@ function MapCreationFlow({
   cursorSdkStatus: CursorSdkStatus | null;
   deviceCodeResult: DeviceCodeLoginResult | null;
   generationBusy: boolean;
+  generationStage: OnboardingGenerationStage | null;
   onCreateMap: (draft: OnboardingDraft) => void;
   onOpenExternalUrl: (url: string) => void;
   onPickFiles: (draft: OnboardingDraft) => void;
@@ -2701,6 +2724,7 @@ function MapCreationFlow({
   const sourceCount = workspace.sourceFiles.length;
   const websiteUrls = compactStringList(draft.websiteUrls);
   const snsUrls = compactStringList(draft.snsUrls);
+  const hasUrlReferences = websiteUrls.length > 0 || snsUrls.length > 0;
   const additionalInputs =
     [draft.memo, draft.productInfo].filter((value) => value.trim().length > 0).length +
     websiteUrls.length +
@@ -2711,14 +2735,16 @@ function MapCreationFlow({
   const hypothesisMode = informationScore === 0;
   const canGenerate = draft.companyName.trim().length > 0 && Boolean(purposeLabel);
   const targetSourceCount = sourceCount + 1;
+  const generationStageLabel = onboardingGenerationStageLabel(generationStage);
   const sendScopeItems = [
     `初回入力: ${draft.companyName.trim() || "事業名未入力"} / ${
       purposeLabel || "目的未選択"
     }`,
     draft.industry.trim() ? `業種: ${draft.industry.trim()}` : "",
-    draft.memo.trim() ? `メモ: ${shortText(draft.memo)}` : "",
+    draft.memo.trim() ? `調査メモ: ${shortText(draft.memo)}` : "",
     ...websiteUrls.map((url) => `ホームページURL: ${url}`),
     ...snsUrls.map((url) => `SNS URL: ${url}`),
+    hasUrlReferences ? "URL本文は未取得、入力URLを参照メモとして送信" : "",
     draft.productInfo.trim() ? `商品情報: ${shortText(draft.productInfo)}` : "",
     ...workspace.sourceFiles
       .slice(0, 6)
@@ -2804,10 +2830,11 @@ function MapCreationFlow({
                 />
               </Field>
             </FormGrid>
-            <Field label="今わかっていること / 困っていること">
+            <Field label="調査メモ / 今わかっていること">
               <textarea
+                className="research-memo-textarea"
                 onChange={(event) => updateDraft("memo", event.target.value)}
-                placeholder="例: Web問い合わせはあるが、商談化や継続提案への導線が見えていない。"
+                placeholder="公開情報を調べたメモ、商品、集客、顧客層、気になる導線をまとめて貼れます。"
                 value={draft.memo}
               />
             </Field>
@@ -2833,6 +2860,9 @@ function MapCreationFlow({
                 placeholder="Instagram、X、YouTubeなど"
                 values={draft.snsUrls}
               />
+            </div>
+            <div className="url-input-note">
+              URLやSNSの本文は自動取得しません。見てほしい内容は調査メモに貼ってください。
             </div>
             <Field label="商品 / サービス情報">
               <textarea
@@ -2931,12 +2961,20 @@ function MapCreationFlow({
             type="button"
           >
             <Sparkles size={15} aria-hidden="true" />
-            {generationBusy
-              ? "生成中"
-              : hypothesisMode
-                ? "仮説マップを生成する"
-                : "売上マップを生成する"}
+            {generationStageLabel
+              ? generationStageLabel
+              : generationBusy
+                ? "生成中"
+                : hypothesisMode
+                  ? "仮説マップを生成する"
+                  : "売上マップを生成する"}
           </button>
+          {generationStageLabel ? (
+            <div className="generation-stage-panel" aria-live="polite">
+              <span>{generationStageLabel}</span>
+              <small>材料整理、AI抽出、マップ生成、次の一手の順に進みます。</small>
+            </div>
+          ) : null}
           {!canGenerate ? (
             <small>事業名 / マップ名と目的を入力すると生成できます。</small>
           ) : !sendApproved ? (
@@ -2973,6 +3011,22 @@ function UrlListField({
     );
   }
 
+  function pasteValues(index: number, text: string) {
+    const pastedValues = text
+      .split(/[\s,，]+/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (pastedValues.length < 2) return false;
+
+    const beforeValues = visibleValues.slice(0, index);
+    const afterValues = visibleValues.slice(index + 1);
+    const nextValues = [...beforeValues, ...pastedValues, ...afterValues]
+      .map((value) => value.trim())
+      .filter(Boolean);
+    onChange([...nextValues, ""]);
+    return true;
+  }
+
   function addValue() {
     onChange([...visibleValues, ""]);
   }
@@ -2995,6 +3049,11 @@ function UrlListField({
             <input
               aria-label={`${label} ${index + 1}`}
               onChange={(event) => updateValue(index, event.target.value)}
+              onPaste={(event) => {
+                if (pasteValues(index, event.clipboardData.getData("text"))) {
+                  event.preventDefault();
+                }
+              }}
               placeholder={placeholder}
               value={value}
             />
@@ -4797,6 +4856,12 @@ function ExtractView({
   const allChunksSelected =
     workspace.sourceChunks.length > 0 &&
     selectedChunkIds.length === workspace.sourceChunks.length;
+  const extractDisabledReason =
+    selectedChunkIds.length === 0
+      ? "送信対象の情報ソースがありません"
+      : !aiSendApproved
+        ? "送信範囲を確認するとAI抽出できます"
+        : null;
 
   return (
     <section className="page-panel">
@@ -4808,13 +4873,17 @@ function ExtractView({
         <div className="button-row">
           <button
             className="primary-button"
-            disabled={!aiSendApproved || selectedChunkIds.length === 0}
+            disabled={Boolean(extractDisabledReason)}
             onClick={onExtract}
+            title={extractDisabledReason ?? "AI抽出を実行"}
             type="button"
           >
             <Sparkles size={15} aria-hidden="true" />
             AI抽出
           </button>
+          {extractDisabledReason ? (
+            <small className="button-row-hint">{extractDisabledReason}</small>
+          ) : null}
           <button className="ghost-button" onClick={onCreateManualItem} type="button">
             <Plus size={15} aria-hidden="true" />
             手動カード追加
