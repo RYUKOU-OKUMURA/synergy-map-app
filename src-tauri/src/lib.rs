@@ -132,6 +132,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "phase1_daily_use",
         sql: include_str!("../migrations/0004_phase1_daily_use.sql"),
     },
+    Migration {
+        version: 5,
+        name: "center_node",
+        sql: include_str!("../migrations/0005_center_node.sql"),
+    },
 ];
 
 const LEGACY_INITIAL_MIGRATION_CHECKSUM: &str = "0001_initial_v1";
@@ -1214,6 +1219,7 @@ pub fn run() {
             mvp1::get_project_workspace,
             mvp1::update_project,
             mvp1::delete_project,
+            mvp1::set_project_center_node,
             mvp1::run_extract_items,
             mvp1::create_onboarding_brief_source,
             mvp1::create_text_information_source,

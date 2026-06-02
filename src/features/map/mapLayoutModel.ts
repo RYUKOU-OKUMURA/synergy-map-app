@@ -6,37 +6,119 @@ import type {
 } from "@/features/map/SynergyMapCanvas";
 import type { MapNodeRow, ProjectWorkspace, ViewLayoutRow } from "@/lib/mvp1Types";
 
-export function readableCustomerJourneyLayouts(nodes: MapNodeRow[]): MapNodeLayout[] {
-  const categoryCounts = new Map<string, number>();
-  return nodes
-    .filter((node) => node.adoptionStatus !== "rejected")
-    .map((node) => {
-      const count = categoryCounts.get(node.nodeType) ?? 0;
-      categoryCounts.set(node.nodeType, count + 1);
-      const current = parseNodeLayout(node.positionJson);
-      const y = 88 + count * 132;
-      const x =
-        node.nodeType === "business"
-          ? 80
-          : node.nodeType === "channel"
-            ? 350
-            : node.nodeType === "touchpoint"
-              ? 625
-              : node.nodeType === "service"
-                ? 900
-                : node.nodeType === "finance"
-                  ? 900
-                  : 80;
-      const yOffset =
-        node.nodeType === "finance" ? 150 : node.nodeType === "data_source" ? 270 : 0;
+export function readableCustomerJourneyLayouts(
+  nodes: MapNodeRow[],
+  centerNodeId?: string | null,
+): MapNodeLayout[] {
+  const visibleNodes = nodes.filter((node) => node.adoptionStatus !== "rejected");
+  const resolvedCenterNodeId =
+    centerNodeId && visibleNodes.some((node) => node.id === centerNodeId)
+      ? centerNodeId
+      : null;
+  const laneCounts = new Map<string, number>();
+
+  return visibleNodes.map((node) => {
+    const current = parseNodeLayout(node.positionJson);
+    if (node.id === resolvedCenterNodeId) {
       return {
         nodeId: node.id,
-        x,
-        y: y + yOffset,
-        width: current.width,
-        height: current.height,
+        x: 560,
+        y: 260,
+        width: current.width ?? 260,
+        height: current.height ?? 148,
       };
-    });
+    }
+
+    const lane = node.nodeType;
+    const count = laneCounts.get(lane) ?? 0;
+    laneCounts.set(lane, count + 1);
+    const slotY = (base: number) => base + count * 142;
+    const layout =
+      node.nodeType === "channel"
+        ? { x: 120, y: slotY(70) }
+        : node.nodeType === "touchpoint"
+          ? { x: 850, y: slotY(250) }
+          : node.nodeType === "service"
+            ? { x: 990, y: slotY(80) }
+            : node.nodeType === "finance"
+              ? { x: 540 + count * 250, y: 500 }
+              : node.nodeType === "data_source"
+                ? { x: 300 + count * 250, y: 500 }
+                : { x: 350, y: slotY(160) };
+
+    return {
+      nodeId: node.id,
+      x: layout.x,
+      y: layout.y,
+      width: current.width,
+      height: current.height,
+    };
+  });
+}
+
+export function resolveCenterNodeId(workspace: ProjectWorkspace): string | null {
+  const visibleNodes = workspace.nodes.filter(
+    (node) => node.adoptionStatus !== "rejected",
+  );
+  if (visibleNodes.length === 0) return null;
+  if (
+    workspace.centerNodeId &&
+    visibleNodes.some((node) => node.id === workspace.centerNodeId)
+  ) {
+    return workspace.centerNodeId;
+  }
+
+  const businessNodes = visibleNodes.filter((node) => node.nodeType === "business");
+  if (businessNodes.length === 1) return businessNodes[0].id;
+
+  const suggestionNodeCounts = new Map<string, number>();
+  for (const suggestion of workspace.suggestions) {
+    if (suggestion.adoptionStatus === "rejected") continue;
+    for (const nodeId of parseRelatedNodeIds(suggestion.relatedNodeIdsJson)) {
+      suggestionNodeCounts.set(nodeId, (suggestionNodeCounts.get(nodeId) ?? 0) + 1);
+    }
+  }
+
+  const strongConnectionCounts = new Map<string, number>();
+  for (const edge of workspace.edges) {
+    if (edge.adoptionStatus === "rejected") continue;
+    if (edge.strength !== "strong") continue;
+    strongConnectionCounts.set(
+      edge.sourceNodeId,
+      (strongConnectionCounts.get(edge.sourceNodeId) ?? 0) + 1,
+    );
+    strongConnectionCounts.set(
+      edge.targetNodeId,
+      (strongConnectionCounts.get(edge.targetNodeId) ?? 0) + 1,
+    );
+  }
+
+  const rankedNodes = [...visibleNodes].sort(
+    (left, right) => centerNodeScore(right) - centerNodeScore(left),
+  );
+  return rankedNodes[0]?.id ?? null;
+
+  function centerNodeScore(node: MapNodeRow) {
+    return (
+      (node.nodeType === "business" ? 1000 : 0) +
+      (strongConnectionCounts.get(node.id) ?? 0) * 100 +
+      (suggestionNodeCounts.get(node.id) ?? 0) * 50 +
+      influenceScore(node.influenceLevel) * 10 +
+      informationRichnessScore(node.informationRichness)
+    );
+  }
+}
+
+function influenceScore(value: string | null) {
+  if (value === "high" || value === "3") return 3;
+  if (value === "medium" || value === "2") return 2;
+  if (value === "low" || value === "1") return 1;
+  return 0;
+}
+
+function informationRichnessScore(value: string | null) {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) ? parsed / 10 : 0;
 }
 
 export function applyLocalMapLayouts(

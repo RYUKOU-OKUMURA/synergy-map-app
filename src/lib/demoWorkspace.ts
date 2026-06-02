@@ -15,6 +15,7 @@ export const demoProject: Project = {
 };
 
 export const emptyWorkspace: ProjectWorkspace = {
+  centerNodeId: null,
   sourceFiles: [],
   sourceChunks: [],
   extractedItems: [],
@@ -31,6 +32,7 @@ export const emptyWorkspace: ProjectWorkspace = {
 };
 
 export const demoWorkspace: ProjectWorkspace = {
+  centerNodeId: null,
   sourceFiles: [
     {
       id: "source-1",

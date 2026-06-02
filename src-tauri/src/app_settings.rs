@@ -16,6 +16,25 @@ pub struct AiSettings {
     pub cursor_model_id: String,
     #[serde(default)]
     pub default_export_dir: Option<String>,
+    #[serde(default)]
+    pub map_ui_preferences: MapUiPreferences,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MapUiPreferences {
+    #[serde(default = "default_bottom_drawer_open")]
+    pub bottom_drawer_open: bool,
+    #[serde(default = "default_bottom_drawer_height")]
+    pub bottom_drawer_height: i64,
+    #[serde(default = "default_show_influence")]
+    pub show_influence: bool,
+    #[serde(default)]
+    pub layout_locked: bool,
+    #[serde(default = "default_drawer_sort")]
+    pub drawer_sort: String,
+    #[serde(default)]
+    pub show_open_questions_only: bool,
 }
 
 fn default_primary_provider() -> AiProviderKind {
@@ -30,6 +49,35 @@ fn default_cursor_model_id() -> String {
     "composer-2.5".to_string()
 }
 
+fn default_bottom_drawer_open() -> bool {
+    true
+}
+
+fn default_bottom_drawer_height() -> i64 {
+    260
+}
+
+fn default_show_influence() -> bool {
+    true
+}
+
+fn default_drawer_sort() -> String {
+    "relevance".to_string()
+}
+
+impl Default for MapUiPreferences {
+    fn default() -> Self {
+        Self {
+            bottom_drawer_open: default_bottom_drawer_open(),
+            bottom_drawer_height: default_bottom_drawer_height(),
+            show_influence: default_show_influence(),
+            layout_locked: false,
+            drawer_sort: default_drawer_sort(),
+            show_open_questions_only: false,
+        }
+    }
+}
+
 impl Default for AiSettings {
     fn default() -> Self {
         Self {
@@ -37,6 +85,7 @@ impl Default for AiSettings {
             fallback_enabled: default_fallback_enabled(),
             cursor_model_id: default_cursor_model_id(),
             default_export_dir: None,
+            map_ui_preferences: MapUiPreferences::default(),
         }
     }
 }
@@ -81,6 +130,9 @@ mod tests {
         assert!(settings.fallback_enabled);
         assert_eq!(settings.cursor_model_id, "composer-2.5");
         assert_eq!(settings.default_export_dir, None);
+        assert_eq!(settings.map_ui_preferences.bottom_drawer_height, 260);
+        assert!(settings.map_ui_preferences.bottom_drawer_open);
+        assert!(settings.map_ui_preferences.show_influence);
     }
 
     #[test]
@@ -90,6 +142,12 @@ mod tests {
         let export_dir = std::env::temp_dir().join("synergy-map-test-exports");
         let settings = AiSettings {
             default_export_dir: Some(export_dir.display().to_string()),
+            map_ui_preferences: MapUiPreferences {
+                bottom_drawer_height: 420,
+                layout_locked: true,
+                drawer_sort: "priority".to_string(),
+                ..MapUiPreferences::default()
+            },
             ..AiSettings::default()
         };
 
@@ -97,6 +155,7 @@ mod tests {
         let loaded = load_ai_settings(&db_path);
 
         assert_eq!(loaded.default_export_dir, settings.default_export_dir);
+        assert_eq!(loaded.map_ui_preferences, settings.map_ui_preferences);
 
         let _ = fs::remove_file(app_settings_path(&db_path).expect("path should resolve"));
     }

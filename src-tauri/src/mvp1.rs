@@ -264,6 +264,7 @@ pub struct MapNoteRow {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectWorkspace {
+    center_node_id: Option<String>,
     source_files: Vec<SourceFileRow>,
     source_chunks: Vec<SourceChunkRow>,
     extracted_items: Vec<ExtractedItemRow>,
@@ -505,6 +506,64 @@ pub fn delete_project(state: State<'_, DbState>, project_id: String) -> Result<(
     transaction.commit().map_err(|error| error.to_string())?;
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn set_project_center_node(
+    state: State<'_, DbState>,
+    project_id: String,
+    node_id: Option<String>,
+) -> Result<ProjectWorkspace, String> {
+    set_project_center_node_inner(&state.db_path, project_id, node_id)
+}
+
+fn set_project_center_node_inner(
+    db_path: &PathBuf,
+    project_id: String,
+    node_id: Option<String>,
+) -> Result<ProjectWorkspace, String> {
+    let connection = open_connection(db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+    let trimmed_node_id = node_id.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+
+    if let Some(node_id) = trimmed_node_id.as_deref() {
+        let exists = connection
+            .query_row(
+                "SELECT id
+                 FROM nodes
+                 WHERE id = ?1 AND project_id = ?2 AND adoption_status != 'rejected'",
+                params![node_id, project_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .is_some();
+        if !exists {
+            return Err("Center node was not found in this project.".to_string());
+        }
+    }
+
+    connection
+        .execute(
+            "UPDATE projects
+             SET center_node_id = ?1, updated_at = ?2
+             WHERE id = ?3 AND archived_at IS NULL",
+            params![
+                trimmed_node_id.as_deref(),
+                now_rfc3339()?,
+                project_id.as_str()
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    load_workspace(&connection, &project_id)
 }
 
 #[tauri::command]
@@ -2622,6 +2681,7 @@ fn ensure_score_input(field: &str, value: i64, min: i64, max: i64) -> Result<(),
 
 fn load_workspace(connection: &Connection, project_id: &str) -> Result<ProjectWorkspace, String> {
     Ok(ProjectWorkspace {
+        center_node_id: load_center_node_id(connection, project_id)?,
         source_files: load_source_files(connection, project_id)?,
         source_chunks: load_source_chunks(connection, project_id)?,
         extracted_items: load_extracted_items(connection, project_id)?,
@@ -2636,6 +2696,28 @@ fn load_workspace(connection: &Connection, project_id: &str) -> Result<ProjectWo
         action_items: load_action_items(connection, project_id)?,
         map_notes: load_map_notes(connection, project_id)?,
     })
+}
+
+fn load_center_node_id(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Option<String>, String> {
+    connection
+        .query_row(
+            "SELECT p.center_node_id
+             FROM projects p
+             LEFT JOIN nodes n
+               ON n.id = p.center_node_id
+              AND n.project_id = p.id
+              AND n.adoption_status != 'rejected'
+             WHERE p.id = ?1
+               AND (p.center_node_id IS NULL OR n.id IS NOT NULL)",
+            [project_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|value| value.flatten())
+        .map_err(|error| error.to_string())
 }
 
 fn load_source_files(
@@ -5814,6 +5896,21 @@ mod tests {
             .expect("suggestion should insert");
     }
 
+    fn insert_test_node(connection: &Connection, project_id: &str, node_id: &str) {
+        let now = now_rfc3339().expect("time should format");
+        connection
+            .execute(
+                "INSERT INTO nodes (
+                    id, project_id, node_type, label, description, influence_level,
+                    information_richness, confidence_status, badges_json, position_json,
+                    adoption_status, created_at, updated_at
+                 ) VALUES (?1, ?2, 'business', '売上の核候補', '中心候補', '3',
+                    '80', 'confirmed', '[]', '{}', 'accepted', ?3, ?4)",
+                params![node_id, project_id, now.as_str(), now.as_str()],
+            )
+            .expect("node should insert");
+    }
+
     #[test]
     fn local_extraction_fallback_does_not_persist_source_text() {
         let chunks = vec![ExtractionChunk {
@@ -6052,6 +6149,41 @@ mod tests {
         assert_eq!(value["y"], json!(24.0));
         assert!(value.get("width").is_none());
         assert!(value.get("height").is_none());
+    }
+
+    #[test]
+    fn center_node_can_be_saved_and_must_belong_to_project() {
+        let app_data_dir = temp_app_data_dir("center-node");
+        fs::create_dir_all(&app_data_dir).expect("app data dir should exist");
+        let db_path = app_data_dir.join("synergy-map.db");
+        crate::init_database(&db_path).expect("db should initialize");
+        let connection = open_connection(&db_path).expect("connection should open");
+        insert_test_project(&connection, "project-1");
+        insert_test_project(&connection, "project-2");
+        insert_test_node(&connection, "project-1", "node-1");
+        insert_test_node(&connection, "project-2", "node-2");
+        drop(connection);
+
+        let invalid = set_project_center_node_inner(
+            &db_path,
+            "project-1".to_string(),
+            Some("node-2".to_string()),
+        );
+        assert!(invalid.is_err());
+
+        let workspace = set_project_center_node_inner(
+            &db_path,
+            "project-1".to_string(),
+            Some("node-1".to_string()),
+        )
+        .expect("center node should save");
+        assert_eq!(workspace.center_node_id.as_deref(), Some("node-1"));
+
+        let workspace = set_project_center_node_inner(&db_path, "project-1".to_string(), None)
+            .expect("center node should clear");
+        assert_eq!(workspace.center_node_id, None);
+
+        let _ = fs::remove_dir_all(app_data_dir);
     }
 
     #[test]

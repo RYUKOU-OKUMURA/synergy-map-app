@@ -220,6 +220,7 @@ export type MapNoteRow = {
 };
 
 export type ProjectWorkspace = {
+  centerNodeId: string | null;
   sourceFiles: SourceFileRow[];
   sourceChunks: SourceChunkRow[];
   extractedItems: ExtractedItemRow[];
@@ -242,6 +243,16 @@ export type AiSettings = {
   fallbackEnabled: boolean;
   cursorModelId: string;
   defaultExportDir: string | null;
+  mapUiPreferences: MapUiPreferences;
+};
+
+export type MapUiPreferences = {
+  bottomDrawerOpen: boolean;
+  bottomDrawerHeight: number;
+  showInfluence: boolean;
+  layoutLocked: boolean;
+  drawerSort: "relevance" | "priority" | "newest";
+  showOpenQuestionsOnly: boolean;
 };
 
 export type CursorSdkStatus = {

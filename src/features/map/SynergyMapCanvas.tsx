@@ -93,6 +93,7 @@ export type NodeImpactStats = Record<
 
 type SynergyNodeData = {
   editable: boolean;
+  isCenterNode: boolean;
   label: string;
   nodeType: string;
   description: string | null;
@@ -102,6 +103,7 @@ type SynergyNodeData = {
   sourceCount: number;
   businessImpact: NodeImpactStats[string] | null;
   onLayoutChange: (layout: MapNodeLayout) => void;
+  showInfluence: boolean;
   viewMode: MapViewMode;
 };
 
@@ -113,6 +115,8 @@ type SynergyEdgeData = {
   evidence: string | null;
   flowType: string | null;
   flowAnimation: FlowAnimationParams | null;
+  isCenterConnected: boolean;
+  showInfluence: boolean;
   labelPlacement?: EdgeLabelPlacement | null;
   onCloseEdgePreview: () => void;
   onOpenEdgePreview: (edgeId: string) => void;
@@ -135,12 +139,15 @@ type SynergyMapCanvasProps = {
   flowAnimationSuppressed?: boolean;
   flowAnimationUserEnabled?: boolean;
   impactStats?: NodeImpactStats;
+  centerNodeId?: string | null;
+  layoutLocked?: boolean;
   nodes: MapNodeRow[];
   onConnectNodes: (sourceNodeId: string, targetNodeId: string) => void;
   onPositionsChange: (positions: MapNodeLayout[]) => void;
   onSelect: (selection: SelectedMapElement) => void;
   positionOverrides?: NodePositionOverrides;
   selected: SelectedMapElement;
+  showInfluence?: boolean;
   viewMode?: MapViewMode;
 };
 
@@ -208,6 +215,15 @@ function numericStyleValue(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function influenceLevelToScore(value: string | null | undefined) {
+  if (value === "high") return 3;
+  if (value === "medium") return 2;
+  if (value === "low") return 1;
+  const parsed = Number(value ?? 2);
+  if (!Number.isFinite(parsed)) return 2;
+  return Math.max(1, Math.min(3, parsed));
+}
+
 function layoutFromFlowNode(node: FlowNode): MapNodeLayout {
   return {
     nodeId: node.id,
@@ -265,6 +281,8 @@ function toFlowNodes(
   positionOverrides: NodePositionOverrides,
   impactStats: NodeImpactStats,
   editable: boolean,
+  centerNodeId: string | null,
+  showInfluence: boolean,
   onLayoutChange: (layout: MapNodeLayout) => void,
 ): FlowNode[] {
   return nodes
@@ -284,15 +302,17 @@ function toFlowNodes(
         },
         data: {
           editable,
+          isCenterNode: node.id === centerNodeId,
           label: node.label,
           nodeType: node.nodeType,
           description: node.description,
           confidenceStatus: node.confidenceStatus,
-          impactScore: Number(node.influenceLevel ?? 2),
+          impactScore: influenceLevelToScore(node.influenceLevel),
           informationRichness: Number(node.informationRichness ?? 50),
           sourceCount: node.extractedItemId ? 1 : 0,
           businessImpact: impactStats[node.id] ?? null,
           onLayoutChange,
+          showInfluence,
           viewMode,
         },
       };
@@ -308,6 +328,8 @@ function toFlowEdges(
   onCloseEdgePreview: () => void,
   edgePreviewId: string | null,
   globalFlowAnimationEnabled: boolean,
+  centerNodeId: string | null,
+  showInfluence: boolean,
 ): FlowEdge[] {
   const nodeLabelById = new Map(nodes.map((node) => [node.id, node.label]));
 
@@ -332,6 +354,10 @@ function toFlowEdges(
           flowAnimation: globalFlowAnimationEnabled
             ? resolveFlowAnimationConfig(strength, edgeType)
             : null,
+          isCenterConnected:
+            Boolean(centerNodeId) &&
+            (edge.sourceNodeId === centerNodeId || edge.targetNodeId === centerNodeId),
+          showInfluence,
           onCloseEdgePreview,
           onOpenEdgePreview,
           onSelectEdge,
@@ -356,6 +382,8 @@ function SynergyNode({ data, id, selected }: NodeProps<FlowNode>) {
         selected ? "map-node-selected" : ""
       } map-node-impact-${data.impactScore} map-node-view-${data.viewMode} ${
         data.businessImpact ? "map-node-has-business-impact" : ""
+      } ${data.isCenterNode ? "map-node-center" : ""} ${
+        data.isCenterNode && selected ? "map-node-center-selected" : ""
       } ${data.editable ? "map-node-editable" : "map-node-readonly map-node-arrangeable"} ${
         selected && data.editable ? "map-node-resizable" : ""
       } ${data.editable ? "map-node-drag-handle" : ""}`}
@@ -385,6 +413,11 @@ function SynergyNode({ data, id, selected }: NodeProps<FlowNode>) {
         type="target"
       />
       <div className="map-node-stripe" />
+      {data.isCenterNode ? (
+        <div className="map-node-center-badge">
+          <span>中心</span>
+        </div>
+      ) : null}
       <div className="map-node-main">
         <div className="map-node-icon">
           <Icon size={15} aria-hidden="true" />
@@ -409,6 +442,20 @@ function SynergyNode({ data, id, selected }: NodeProps<FlowNode>) {
               <span>
                 工数 {levelLabels[data.businessImpact?.effortLevel ?? "unknown"]}
               </span>
+            </div>
+          ) : null}
+          {data.showInfluence ? (
+            <div className="influence-dots" aria-label="影響度">
+              {Array.from({ length: 5 }, (_, index) => (
+                <span
+                  className={
+                    index < Math.max(1, Math.min(5, data.impactScore + 2))
+                      ? "active"
+                      : ""
+                  }
+                  key={index}
+                />
+              ))}
             </div>
           ) : null}
           <div className="richness-bar" aria-label="情報充実度">
@@ -448,6 +495,8 @@ function SynergyEdge(props: EdgeProps<FlowEdge>) {
   const flowAnimation = props.data?.flowAnimation ?? null;
   const showWarning = edgeType === "bottleneck";
   const halo = strength === "strong";
+  const centerConnected =
+    props.data?.showInfluence && props.data?.isCenterConnected && strength === "strong";
   const selectedClass = props.selected ? "map-edge-selected" : "";
   const animatedTrackClass = flowAnimation ? "map-edge-flow-animated" : "";
   const pathRef = useRef<SVGPathElement>(null);
@@ -497,12 +546,24 @@ function SynergyEdge(props: EdgeProps<FlowEdge>) {
 
   return (
     <>
-      {halo ? <path className="map-edge-halo" d={edgePath} fill="none" /> : null}
+      {halo ? (
+        <path
+          className={`map-edge-halo ${centerConnected ? "map-edge-halo-center" : ""}`}
+          d={edgePath}
+          fill="none"
+        />
+      ) : null}
       <BaseEdge
         id={props.id}
         markerEnd={props.markerEnd}
         path={edgePath}
-        className={`map-edge map-edge-${edgeType} map-edge-strength-${strength} map-edge-view-${viewMode} ${animatedTrackClass} ${selectedClass}`}
+        className={`map-edge map-edge-${edgeType} map-edge-strength-${strength} map-edge-view-${viewMode} ${
+          props.data?.showInfluence && props.data?.isCenterConnected
+            ? "map-edge-center-connected"
+            : props.data?.showInfluence
+              ? "map-edge-influence-muted"
+              : ""
+        } ${animatedTrackClass} ${selectedClass}`}
       />
       {flowAnimation ? (
         <>
@@ -760,14 +821,18 @@ export function SynergyMapCanvas({
   flowAnimationSuppressed = false,
   flowAnimationUserEnabled = true,
   impactStats,
+  centerNodeId = null,
+  layoutLocked = false,
   nodes,
   onConnectNodes,
   onPositionsChange,
   onSelect,
   positionOverrides,
   selected,
+  showInfluence = true,
   viewMode = "customer_journey",
 }: SynergyMapCanvasProps) {
+  const mapInteractionsEnabled = editable && !layoutLocked;
   const resolvedImpactStats = impactStats ?? EMPTY_IMPACT_STATS;
   const resolvedPositionOverrides = positionOverrides ?? EMPTY_POSITION_OVERRIDES;
   const prefersReducedMotion = usePrefersReducedMotion();
@@ -784,10 +849,10 @@ export function SynergyMapCanvas({
   );
   const handleConnect = useCallback(
     (connection: Connection) => {
-      if (!editable || !connection.source || !connection.target) return;
+      if (!mapInteractionsEnabled || !connection.source || !connection.target) return;
       onConnectNodes(connection.source, connection.target);
     },
-    [editable, onConnectNodes],
+    [mapInteractionsEnabled, onConnectNodes],
   );
   const isSelectedElement = useCallback(
     (kind: "node" | "edge", id: string) =>
@@ -827,16 +892,20 @@ export function SynergyMapCanvas({
         viewMode,
         resolvedPositionOverrides,
         resolvedImpactStats,
-        editable,
+        mapInteractionsEnabled,
+        centerNodeId,
+        showInfluence,
         handleNodeLayoutChange,
       ),
     [
-      editable,
       handleNodeLayoutChange,
+      mapInteractionsEnabled,
       nodes,
       resolvedImpactStats,
       resolvedPositionOverrides,
+      centerNodeId,
       viewMode,
+      showInfluence,
     ],
   );
   const initialEdges = useMemo(
@@ -850,6 +919,8 @@ export function SynergyMapCanvas({
         handleCloseEdgePreview,
         edgePreviewId,
         globalFlowAnimationEnabled,
+        centerNodeId,
+        showInfluence,
       ),
     [
       edges,
@@ -859,6 +930,8 @@ export function SynergyMapCanvas({
       handleOpenEdgePreview,
       handleSelectEdge,
       nodes,
+      centerNodeId,
+      showInfluence,
       viewMode,
     ],
   );
@@ -882,14 +955,14 @@ export function SynergyMapCanvas({
   const layoutRevision = useMemo(
     () =>
       [
-        editable ? "edit" : "arrange",
+        mapInteractionsEnabled ? "edit" : "arrange",
         viewMode,
         initialNodes.length,
         initialEdges.length,
         globalFlowAnimationEnabled ? "flow" : "static",
       ].join(":"),
     [
-      editable,
+      mapInteractionsEnabled,
       globalFlowAnimationEnabled,
       initialEdges.length,
       initialNodes.length,
@@ -1040,20 +1113,22 @@ export function SynergyMapCanvas({
   }, []);
 
   const handleNodeDragStart = useCallback(() => {
+    if (layoutLocked) return;
     setEdgePreviewId(null);
     setFrozenLayoutNodes(snapshotLayoutNodes(flowNodesRef.current));
     setIsNodeDragging(true);
-  }, []);
+  }, [layoutLocked]);
 
   const handleNodeDragStop = useCallback(
     (_: unknown, node: FlowNode) => {
+      if (layoutLocked) return;
       lastDragAtRef.current = Date.now();
       lastDraggedNodeIdsRef.current = new Set([node.id]);
       schedulePositionSave(layoutFromFlowNode(node));
       setIsNodeDragging(false);
       setFrozenLayoutNodes(null);
     },
-    [schedulePositionSave],
+    [layoutLocked, schedulePositionSave],
   );
 
   return (
@@ -1062,15 +1137,15 @@ export function SynergyMapCanvas({
         value={selected?.kind === "edge" ? selected.id : null}
       >
         <ReactFlow
-          className={`map-canvas ${editable ? "map-canvas-editable" : "map-canvas-readonly"}`}
+          className={`map-canvas ${mapInteractionsEnabled ? "map-canvas-editable" : "map-canvas-readonly"}`}
           edges={displayEdges}
           edgeTypes={edgeTypes}
           maxZoom={1.45}
           minZoom={0.35}
           nodeTypes={nodeTypes}
           nodes={flowNodes}
-          nodesConnectable={editable}
-          nodesDraggable
+          nodesConnectable={mapInteractionsEnabled}
+          nodesDraggable={!layoutLocked}
           nodeDragThreshold={4}
           onInit={(instance) => setViewportZoom(instance.getZoom())}
           onMove={handleViewportMove}

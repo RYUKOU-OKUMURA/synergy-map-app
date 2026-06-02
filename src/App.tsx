@@ -4,6 +4,9 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   Archive,
   BarChart3,
+  Check,
+  ChevronDown,
+  ChevronUp,
   Clock3,
   Database,
   Download,
@@ -20,13 +23,16 @@ import {
   Link as LinkIcon,
   ListChecks,
   Map as MapIcon,
+  Maximize2,
   MessageSquareText,
+  Minimize2,
   MousePointer2,
   PencilRuler,
   Plus,
   Save,
   Settings,
   Sparkles,
+  Star,
   Target,
   Trash2,
   TriangleAlert,
@@ -36,7 +42,7 @@ import {
   X,
 } from "lucide-react";
 import type * as React from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import "./App.css";
 import {
@@ -51,6 +57,7 @@ import {
   levelRank,
   parseRelatedNodeIds,
   readableCustomerJourneyLayouts,
+  resolveCenterNodeId,
 } from "@/features/map/mapLayoutModel";
 import type { ViewId } from "@/lib/appViewTypes";
 import { demoProject, demoWorkspace, emptyWorkspace } from "@/lib/demoWorkspace";
@@ -68,9 +75,11 @@ import {
 } from "@/lib/mvp1Labels";
 import type {
   ActionItemRow,
+  AiCommentRow,
   AiProviderKind,
   AiRunRow,
   AiSettings,
+  MapUiPreferences,
   CodexUiEvent,
   CodexRuntimeInfo,
   CodexSmokeResult,
@@ -156,6 +165,14 @@ const defaultAiSettings = (): AiSettings => ({
   fallbackEnabled: true,
   cursorModelId: "composer-2.5",
   defaultExportDir: null,
+  mapUiPreferences: {
+    bottomDrawerOpen: true,
+    bottomDrawerHeight: 260,
+    showInfluence: true,
+    layoutLocked: false,
+    drawerSort: "relevance",
+    showOpenQuestionsOnly: false,
+  },
 });
 
 type InformationSourceKind = "manual_note" | "website_url" | "sns_url" | "product_info";
@@ -658,7 +675,7 @@ function App() {
         (result) => {
           setWorkspace(result.workspace);
           setNotice(result.message);
-          setIsDrawerOpen(true);
+          void handleMapUiPreferencesChange({ bottomDrawerOpen: true });
         },
       );
       return;
@@ -736,7 +753,7 @@ function App() {
       (result) => {
         setWorkspace(result.workspace);
         setNotice(result.message);
-        setIsDrawerOpen(true);
+        void handleMapUiPreferencesChange({ bottomDrawerOpen: true });
       },
     );
   }
@@ -834,6 +851,37 @@ function App() {
     } finally {
       setAiSettingsBusy(false);
     }
+  }
+
+  async function handleMapUiPreferencesChange(
+    patch: Partial<MapUiPreferences>,
+    options: { notify?: boolean } = {},
+  ) {
+    const nextSettings: AiSettings = {
+      ...aiSettings,
+      mapUiPreferences: {
+        ...aiSettings.mapUiPreferences,
+        ...patch,
+      },
+    };
+    setAiSettings(nextSettings);
+    if (patch.bottomDrawerOpen !== undefined) {
+      setIsDrawerOpen(patch.bottomDrawerOpen);
+    }
+    if (!isTauriRuntime) return;
+    try {
+      const saved = await invoke<AiSettings>("save_ai_settings_command", {
+        settings: nextSettings,
+      });
+      setAiSettings(saved);
+      if (options.notify) setNotice("マップ表示設定を保存しました。");
+    } catch (caughtError) {
+      setError(String(caughtError));
+    }
+  }
+
+  function handleDrawerOpenChange(open: boolean) {
+    void handleMapUiPreferencesChange({ bottomDrawerOpen: open });
   }
 
   async function handleSelectDefaultExportDir() {
@@ -1012,7 +1060,7 @@ function App() {
             ? mapResult.workspace
             : extractResult.workspace,
       );
-      setIsDrawerOpen(true);
+      void handleMapUiPreferencesChange({ bottomDrawerOpen: true });
       setNotice(
         `${
           suggestionsResult.message || mapResult.message || extractResult.message
@@ -1058,8 +1106,28 @@ function App() {
     [activeProjectId, workspace, isTauriRuntime],
   );
 
+  async function handleSetCenterNode(nodeId: string | null) {
+    if (!activeProjectId) return;
+    setError(null);
+    try {
+      const nextWorkspace = isTauriRuntime
+        ? await invoke<ProjectWorkspace>("set_project_center_node", {
+            projectId: activeProjectId,
+            nodeId,
+          })
+        : { ...workspace, centerNodeId: nodeId };
+      setWorkspace(nextWorkspace);
+      setNotice(
+        nodeId ? "売上の核を設定しました。" : "売上の核の手動指定を解除しました。",
+      );
+    } catch (caughtError) {
+      setError(String(caughtError));
+    }
+  }
+
   async function handleArrangeMap() {
     if (!activeProjectId || workspace.nodes.length === 0) return;
+    const centerNodeId = resolveCenterNodeId(workspace);
     const positions =
       mapViewMode === "business_impact"
         ? Object.entries(
@@ -1071,7 +1139,7 @@ function App() {
             width: layout.width,
             height: layout.height,
           }))
-        : readableCustomerJourneyLayouts(workspace.nodes);
+        : readableCustomerJourneyLayouts(workspace.nodes, centerNodeId);
     await handleSavePositions(mapViewMode, positions);
     setNotice("マップを見やすい配置に整えました。");
   }
@@ -1391,7 +1459,7 @@ function App() {
             ...workspace.aiComments,
           ],
         });
-        setIsDrawerOpen(true);
+        void handleMapUiPreferencesChange({ bottomDrawerOpen: true });
         return;
       }
       const result = await invoke<MvpRunResult>("ask_map_insight", {
@@ -1402,7 +1470,7 @@ function App() {
       });
       setWorkspace(result.workspace);
       setNotice(result.message);
-      setIsDrawerOpen(true);
+      void handleMapUiPreferencesChange({ bottomDrawerOpen: true });
     } catch (caughtError) {
       setError(String(caughtError));
     } finally {
@@ -1422,6 +1490,7 @@ function App() {
         ]);
         if (cancelled) return;
         setAiSettings(settings);
+        setIsDrawerOpen(settings.mapUiPreferences.bottomDrawerOpen);
         setCursorSdkStatus(status);
       } catch (caughtError) {
         if (!cancelled) {
@@ -1589,16 +1658,18 @@ function App() {
               layoutSaveStatus={visibleLayoutSaveStatus}
               latestAiRun={latestAiRun}
               mapInsightBusy={mapInsightBusy}
+              mapUiPreferences={aiSettings.mapUiPreferences}
               mapViewMode={mapViewMode}
               onArrangeMap={handleArrangeMap}
               onAskWholeMap={handleAskWholeMap}
               onCreateMapEdge={handleCreateMapEdge}
               onCreateOnboardingMap={handleCreateOnboardingMap}
-              onDrawerOpenChange={setIsDrawerOpen}
+              onDrawerOpenChange={handleDrawerOpenChange}
               onEditModeChange={setIsMapEditMode}
               onFlowAnimationUserEnabledChange={setFlowAnimationUserEnabled}
               onGenerateMap={handleRegenerateMap}
               onGenerateSuggestions={handleGenerateSuggestions}
+              onMapUiPreferencesChange={handleMapUiPreferencesChange}
               onOpenExtractReview={() => {
                 setSelectedItemId(workspace.extractedItems[0]?.id ?? null);
                 setIsDrawerOpen(false);
@@ -1634,6 +1705,7 @@ function App() {
               selectedSuggestionId={selectedSuggestionId}
               trayOpen={isTrayOpen}
               onTrayOpenChange={setIsTrayOpen}
+              onUpdateActionItem={handleUpdateActionItem}
               workspace={workspace}
             />
           ) : null}
@@ -1777,6 +1849,7 @@ function App() {
             item={selectedItem}
             node={selectedNode}
             onClose={clearInspectorSelection}
+            onSetCenterNode={handleSetCenterNode}
             onWorkspaceChange={setWorkspace}
             projectId={activeProject.id}
             suggestion={selectedSuggestion}
@@ -2132,6 +2205,7 @@ function MapWorkspace({
   layoutSaveStatus,
   latestAiRun,
   mapInsightBusy,
+  mapUiPreferences,
   mapViewMode,
   onArrangeMap,
   onAskWholeMap,
@@ -2142,6 +2216,7 @@ function MapWorkspace({
   onFlowAnimationUserEnabledChange,
   onGenerateSuggestions,
   onGenerateMap,
+  onMapUiPreferencesChange,
   onOpenExtractReview,
   onOpenExternalUrl,
   onPickFiles,
@@ -2160,6 +2235,7 @@ function MapWorkspace({
   selectedSuggestionId,
   trayOpen,
   onTrayOpenChange,
+  onUpdateActionItem,
   workspace,
 }: {
   activeProject: Project | null;
@@ -2180,6 +2256,7 @@ function MapWorkspace({
   layoutSaveStatus: "idle" | "saving" | "saved" | "error";
   latestAiRun: AiRunRow | null;
   mapInsightBusy: boolean;
+  mapUiPreferences: MapUiPreferences;
   mapViewMode: MapViewMode;
   onArrangeMap: () => void;
   onAskWholeMap: (questionType?: string) => void;
@@ -2190,6 +2267,10 @@ function MapWorkspace({
   onFlowAnimationUserEnabledChange: (enabled: boolean) => void;
   onGenerateSuggestions: () => void;
   onGenerateMap: () => void;
+  onMapUiPreferencesChange: (
+    patch: Partial<MapUiPreferences>,
+    options?: { notify?: boolean },
+  ) => void;
   onOpenExtractReview: () => void;
   onOpenExternalUrl: (url: string) => void;
   onPickFiles: (draft: OnboardingDraft) => void;
@@ -2208,9 +2289,11 @@ function MapWorkspace({
   selectedSuggestionId: string | null;
   trayOpen: boolean;
   onTrayOpenChange: (open: boolean) => void;
+  onUpdateActionItem: (actionItem: ActionItemRow, draft: ActionItemUpdateDraft) => void;
   workspace: ProjectWorkspace;
 }) {
   const impactStats = useMemo(() => buildNodeImpactStats(workspace), [workspace]);
+  const centerNodeId = useMemo(() => resolveCenterNodeId(workspace), [workspace]);
   const impactPositions = useMemo(
     () => buildImpactPositionOverrides(workspace, impactStats),
     [impactStats, workspace],
@@ -2293,6 +2376,34 @@ function MapWorkspace({
                 整える
               </button>
               <button
+                aria-pressed={mapUiPreferences.layoutLocked}
+                className={mapUiPreferences.layoutLocked ? "active" : ""}
+                onClick={() =>
+                  onMapUiPreferencesChange({
+                    layoutLocked: !mapUiPreferences.layoutLocked,
+                  })
+                }
+                title="レイアウト固定"
+                type="button"
+              >
+                <Save size={14} aria-hidden="true" />
+                固定
+              </button>
+              <button
+                aria-pressed={mapUiPreferences.showInfluence}
+                className={mapUiPreferences.showInfluence ? "active" : ""}
+                onClick={() =>
+                  onMapUiPreferencesChange({
+                    showInfluence: !mapUiPreferences.showInfluence,
+                  })
+                }
+                title="影響度を表示"
+                type="button"
+              >
+                <Gauge size={14} aria-hidden="true" />
+                影響度
+              </button>
+              <button
                 disabled={generationBusy}
                 onClick={onGenerateMap}
                 title="抽出カードからマップを再生成"
@@ -2329,7 +2440,11 @@ function MapWorkspace({
               >
                 {aiRunSourceLabel(latestAiRun)}
               </span>
-              {editMode ? (
+              {mapUiPreferences.layoutLocked ? (
+                <span className="map-edit-hint">
+                  レイアウト固定中。固定を解除するとノードを動かせます。
+                </span>
+              ) : editMode ? (
                 <span className="map-edit-hint">
                   ノードをドラッグ。選択後、角で大きさを調整。ハンドルから導線を追加。
                 </span>
@@ -2446,10 +2561,12 @@ function MapWorkspace({
       <section className="map-stage">
         {workspace.nodes.length > 0 ? (
           <SynergyMapCanvas
+            centerNodeId={centerNodeId}
             editable={editMode}
             edges={workspace.edges}
             flowAnimationUserEnabled={flowAnimationUserEnabled}
             impactStats={impactStats}
+            layoutLocked={mapUiPreferences.layoutLocked}
             nodes={workspace.nodes}
             onConnectNodes={onCreateMapEdge}
             onPositionsChange={handleCanvasPositionsChange}
@@ -2458,6 +2575,7 @@ function MapWorkspace({
               mapViewMode === "business_impact" ? impactPositions : undefined
             }
             selected={selectedMapElement}
+            showInfluence={mapUiPreferences.showInfluence}
             viewMode={mapViewMode}
           />
         ) : canGenerateFromItems ? (
@@ -2497,81 +2615,21 @@ function MapWorkspace({
       </section>
 
       {hasGeneratedMap ? (
-        <div className={`bottom-drawer ${drawerOpen ? "bottom-drawer-open" : ""}`}>
-          <button
-            className="drawer-summary"
-            onClick={() => onDrawerOpenChange(!drawerOpen)}
-            type="button"
-          >
-            <span>AIコメント・確認質問</span>
-            <StatusChip>
-              強い導線{" "}
-              {workspace.edges.filter((edge) => edge.strength === "strong").length}
-            </StatusChip>
-            <StatusChip>
-              詰まり{" "}
-              {
-                workspace.aiComments.filter(
-                  (comment) => comment.commentType === "bottleneck",
-                ).length
-              }
-            </StatusChip>
-            <StatusChip>
-              未接続候補{" "}
-              {
-                workspace.aiComments.filter(
-                  (comment) => comment.commentType === "unconnected",
-                ).length
-              }
-            </StatusChip>
-          </button>
-          {drawerOpen ? (
-            <div className="drawer-content">
-              {workspace.nodes.length > 0 ? (
-                <MapInsightActions
-                  busy={mapInsightBusy}
-                  error={null}
-                  onAsk={onAskWholeMap}
-                  targetLabel="マップ全体"
-                />
-              ) : null}
-              {shouldReviewDraft ? (
-                <div className="draft-review-banner">
-                  <TriangleAlert size={15} aria-hidden="true" />
-                  <div>
-                    <strong>初回生成ドラフトです</strong>
-                    <span>
-                      推定や要確認を含みます。施策判断の前に抽出カードの確度を確認してください。
-                    </span>
-                  </div>
-                  <button
-                    className="ghost-button"
-                    onClick={onOpenExtractReview}
-                    type="button"
-                  >
-                    抽出カードを確認
-                  </button>
-                </div>
-              ) : null}
-              <button
-                className="ghost-button"
-                onClick={onGenerateSuggestions}
-                type="button"
-              >
-                <Sparkles size={15} aria-hidden="true" />
-                {mapViewMode === "business_impact"
-                  ? "インパクト評価生成"
-                  : "AIコメント生成"}
-              </button>
-              {workspace.aiComments.map((comment) => (
-                <div className="comment-line" key={comment.id}>
-                  <strong>{comment.title}</strong>
-                  <span>{comment.body}</span>
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </div>
+        <MapAiDrawer
+          drawerOpen={drawerOpen}
+          key={mapUiPreferences.bottomDrawerHeight}
+          mapInsightBusy={mapInsightBusy}
+          mapUiPreferences={mapUiPreferences}
+          mapViewMode={mapViewMode}
+          onAskWholeMap={onAskWholeMap}
+          onDrawerOpenChange={onDrawerOpenChange}
+          onGenerateSuggestions={onGenerateSuggestions}
+          onMapUiPreferencesChange={onMapUiPreferencesChange}
+          onOpenExtractReview={onOpenExtractReview}
+          onUpdateActionItem={onUpdateActionItem}
+          shouldReviewDraft={shouldReviewDraft}
+          workspace={workspace}
+        />
       ) : null}
     </div>
   );
@@ -4081,6 +4139,388 @@ function SourceReflectionCard({
   );
 }
 
+const DRAWER_MIN_HEIGHT = 56;
+const DRAWER_STANDARD_HEIGHT = 260;
+
+function expandedDrawerHeight() {
+  return Math.round(window.innerHeight * 0.45);
+}
+
+function clampDrawerHeight(height: number) {
+  return Math.max(DRAWER_MIN_HEIGHT, Math.min(expandedDrawerHeight(), height));
+}
+
+function MapAiDrawer({
+  drawerOpen,
+  mapInsightBusy,
+  mapUiPreferences,
+  mapViewMode,
+  onAskWholeMap,
+  onDrawerOpenChange,
+  onGenerateSuggestions,
+  onMapUiPreferencesChange,
+  onOpenExtractReview,
+  onUpdateActionItem,
+  shouldReviewDraft,
+  workspace,
+}: {
+  drawerOpen: boolean;
+  mapInsightBusy: boolean;
+  mapUiPreferences: MapUiPreferences;
+  mapViewMode: MapViewMode;
+  onAskWholeMap: (questionType?: string) => void;
+  onDrawerOpenChange: (open: boolean) => void;
+  onGenerateSuggestions: () => void;
+  onMapUiPreferencesChange: (
+    patch: Partial<MapUiPreferences>,
+    options?: { notify?: boolean },
+  ) => void;
+  onOpenExtractReview: () => void;
+  onUpdateActionItem: (actionItem: ActionItemRow, draft: ActionItemUpdateDraft) => void;
+  shouldReviewDraft: boolean;
+  workspace: ProjectWorkspace;
+}) {
+  const [draftHeight, setDraftHeight] = useState(
+    clampDrawerHeight(mapUiPreferences.bottomDrawerHeight),
+  );
+  const [expandedCommentIds, setExpandedCommentIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const dragRef = useRef<{
+    pointerId: number;
+    startY: number;
+    startHeight: number;
+  } | null>(null);
+
+  const aiQuestions = useMemo(() => {
+    const rows = workspace.actionItems.filter(
+      (actionItem) => actionItem.sourceType === "ai_question",
+    );
+    const filtered = mapUiPreferences.showOpenQuestionsOnly
+      ? rows.filter((actionItem) => actionItem.status === "open")
+      : rows;
+    return [...filtered].sort((left, right) => {
+      if (mapUiPreferences.drawerSort === "priority") {
+        return (
+          priorityRank(left.priority) - priorityRank(right.priority) ||
+          sortByDateDesc(left.createdAt, right.createdAt)
+        );
+      }
+      if (mapUiPreferences.drawerSort === "newest") {
+        return sortByDateDesc(left.createdAt, right.createdAt);
+      }
+      return (
+        (left.status === "open" ? 0 : 1) - (right.status === "open" ? 0 : 1) ||
+        priorityRank(left.priority) - priorityRank(right.priority) ||
+        sortByDateDesc(left.createdAt, right.createdAt)
+      );
+    });
+  }, [
+    mapUiPreferences.drawerSort,
+    mapUiPreferences.showOpenQuestionsOnly,
+    workspace.actionItems,
+  ]);
+
+  const strongEdgeCount = workspace.edges.filter(
+    (edge) => edge.strength === "strong",
+  ).length;
+  const bottleneckCount = workspace.aiComments.filter(
+    (comment) => comment.commentType === "bottleneck",
+  ).length;
+
+  function persistHeight(height: number) {
+    const nextHeight = clampDrawerHeight(height);
+    setDraftHeight(nextHeight);
+    onMapUiPreferencesChange({
+      bottomDrawerHeight: nextHeight,
+      bottomDrawerOpen: true,
+    });
+  }
+
+  function toggleExpandedHeight() {
+    const expanded = expandedDrawerHeight();
+    persistHeight(draftHeight >= expanded - 12 ? DRAWER_STANDARD_HEIGHT : expanded);
+    onDrawerOpenChange(true);
+  }
+
+  function handlePointerDown(event: React.PointerEvent<HTMLButtonElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      startHeight: draftHeight,
+    };
+  }
+
+  function handlePointerMove(event: React.PointerEvent<HTMLButtonElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const nextHeight = clampDrawerHeight(
+      drag.startHeight + drag.startY - event.clientY,
+    );
+    setDraftHeight(nextHeight);
+    if (!drawerOpen) onDrawerOpenChange(true);
+  }
+
+  function handlePointerEnd(event: React.PointerEvent<HTMLButtonElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    persistHeight(draftHeight);
+  }
+
+  return (
+    <div
+      className={`bottom-drawer ${drawerOpen ? "bottom-drawer-open" : ""}`}
+      style={{ height: drawerOpen ? draftHeight : DRAWER_MIN_HEIGHT }}
+    >
+      <button
+        aria-label="AIコメント領域の高さを調整"
+        className="drawer-resize-handle"
+        onDoubleClick={toggleExpandedHeight}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerEnd}
+        type="button"
+      >
+        <span />
+      </button>
+      <div className="drawer-summary">
+        <button
+          className="drawer-title-button"
+          onClick={() => onDrawerOpenChange(!drawerOpen)}
+          type="button"
+        >
+          <MessageSquareText size={15} aria-hidden="true" />
+          <span>AIコメント・確認質問</span>
+          {drawerOpen ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+        </button>
+        <StatusChip>{workspace.aiComments.length}件 コメント</StatusChip>
+        <StatusChip>{aiQuestions.length}件 質問</StatusChip>
+        <StatusChip>強い導線 {strongEdgeCount}</StatusChip>
+        <StatusChip>詰まり {bottleneckCount}</StatusChip>
+        <div className="drawer-summary-actions">
+          <label className="compact-toggle">
+            <input
+              checked={mapUiPreferences.showOpenQuestionsOnly}
+              onChange={(event) =>
+                onMapUiPreferencesChange({
+                  showOpenQuestionsOnly: event.target.checked,
+                })
+              }
+              type="checkbox"
+            />
+            未確認のみ
+          </label>
+          <select
+            aria-label="確認質問の並び替え"
+            value={mapUiPreferences.drawerSort}
+            onChange={(event) =>
+              onMapUiPreferencesChange({
+                drawerSort: event.target.value as MapUiPreferences["drawerSort"],
+              })
+            }
+          >
+            <option value="relevance">関連度順</option>
+            <option value="priority">優先度順</option>
+            <option value="newest">新しい順</option>
+          </select>
+          <button
+            className="ghost-button"
+            onClick={toggleExpandedHeight}
+            title="拡大/標準"
+            type="button"
+          >
+            {draftHeight >= expandedDrawerHeight() - 12 ? (
+              <Minimize2 size={14} aria-hidden="true" />
+            ) : (
+              <Maximize2 size={14} aria-hidden="true" />
+            )}
+          </button>
+        </div>
+      </div>
+      {drawerOpen ? (
+        <div className="drawer-content">
+          <section className="drawer-column">
+            <div className="drawer-column-heading">
+              <span>AIコメント</span>
+              <button
+                className="ghost-button"
+                onClick={onGenerateSuggestions}
+                type="button"
+              >
+                <Sparkles size={14} aria-hidden="true" />
+                {mapViewMode === "business_impact"
+                  ? "インパクト評価生成"
+                  : "新しいコメントを生成"}
+              </button>
+            </div>
+            {shouldReviewDraft ? (
+              <div className="draft-review-banner">
+                <TriangleAlert size={15} aria-hidden="true" />
+                <div>
+                  <strong>初回生成ドラフトです</strong>
+                  <span>
+                    推定や要確認を含みます。施策判断の前に抽出カードの確度を確認してください。
+                  </span>
+                </div>
+                <button
+                  className="ghost-button"
+                  onClick={onOpenExtractReview}
+                  type="button"
+                >
+                  抽出カードを確認
+                </button>
+              </div>
+            ) : null}
+            <MapInsightActions
+              busy={mapInsightBusy}
+              error={null}
+              onAsk={onAskWholeMap}
+              targetLabel="マップ全体"
+            />
+            <AiCommentList
+              comments={workspace.aiComments}
+              expandedCommentIds={expandedCommentIds}
+              onToggleComment={(commentId) =>
+                setExpandedCommentIds((current) => {
+                  const next = new Set(current);
+                  if (next.has(commentId)) next.delete(commentId);
+                  else next.add(commentId);
+                  return next;
+                })
+              }
+            />
+          </section>
+          <section className="drawer-column">
+            <div className="drawer-column-heading">
+              <span>確認質問</span>
+              <StatusChip>
+                {aiQuestions.filter((item) => item.status === "open").length}件 未確認
+              </StatusChip>
+            </div>
+            <AiQuestionList
+              actionItems={aiQuestions}
+              onUpdateActionItem={onUpdateActionItem}
+            />
+          </section>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AiCommentList({
+  comments,
+  expandedCommentIds,
+  onToggleComment,
+}: {
+  comments: AiCommentRow[];
+  expandedCommentIds: Set<string>;
+  onToggleComment: (commentId: string) => void;
+}) {
+  if (comments.length === 0) {
+    return <div className="empty-panel">AIコメントはまだありません。</div>;
+  }
+
+  return (
+    <div className="drawer-list">
+      {comments.map((comment) => {
+        const expanded = expandedCommentIds.has(comment.id);
+        return (
+          <article className="drawer-comment-card" key={comment.id}>
+            <div>
+              <strong>{comment.title}</strong>
+              <small>
+                {comment.commentType} / {formatTime(comment.createdAt)}
+              </small>
+            </div>
+            <p>{expanded ? comment.body : shortText(comment.body, 150)}</p>
+            <button
+              className="ghost-button"
+              onClick={() => onToggleComment(comment.id)}
+              type="button"
+            >
+              {expanded ? "閉じる" : "詳細を開く"}
+            </button>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function AiQuestionList({
+  actionItems,
+  onUpdateActionItem,
+}: {
+  actionItems: ActionItemRow[];
+  onUpdateActionItem: (actionItem: ActionItemRow, draft: ActionItemUpdateDraft) => void;
+}) {
+  if (actionItems.length === 0) {
+    return <div className="empty-panel">確認質問はまだありません。</div>;
+  }
+
+  function updateStatus(actionItem: ActionItemRow, status: ActionItemRow["status"]) {
+    onUpdateActionItem(actionItem, {
+      title: actionItem.title,
+      body: actionItem.body,
+      priority: actionItem.priority,
+      memo: actionItem.memo ?? "",
+      status,
+    });
+  }
+
+  return (
+    <div className="drawer-question-list">
+      {actionItems.map((actionItem) => (
+        <article
+          className={`drawer-question-row drawer-question-${actionItem.status}`}
+          key={actionItem.id}
+        >
+          <button
+            aria-label={`${actionItem.title}を完了`}
+            className="question-check"
+            onClick={() =>
+              updateStatus(actionItem, actionItem.status === "done" ? "open" : "done")
+            }
+            type="button"
+          >
+            {actionItem.status === "done" ? (
+              <Check size={14} aria-hidden="true" />
+            ) : null}
+          </button>
+          <div className="drawer-question-main">
+            <strong>{actionItem.body}</strong>
+            <small>{actionItem.title}</small>
+          </div>
+          <span className={`priority-pill priority-${actionItem.priority}`}>
+            {labelFor(priorityOptions, actionItem.priority)}
+          </span>
+          <span className="status-chip">
+            {labelFor(actionStatusOptions, actionItem.status)}
+          </span>
+          <small>{formatTime(actionItem.createdAt)}</small>
+          <button
+            className="ghost-button"
+            onClick={() =>
+              updateStatus(
+                actionItem,
+                actionItem.status === "dismissed" ? "open" : "dismissed",
+              )
+            }
+            type="button"
+          >
+            {actionItem.status === "dismissed" ? "戻す" : "見送り"}
+          </button>
+        </article>
+      ))}
+    </div>
+  );
+}
+
 function TodayView({
   busy,
   canEdit,
@@ -5220,6 +5660,7 @@ function InspectorPanel({
   item,
   node,
   onClose,
+  onSetCenterNode,
   onWorkspaceChange,
   projectId,
   suggestion,
@@ -5230,6 +5671,7 @@ function InspectorPanel({
   item: ExtractedItemRow | null;
   node: MapNodeRow | null;
   onClose: () => void;
+  onSetCenterNode: (nodeId: string | null) => void;
   onWorkspaceChange: (workspace: ProjectWorkspace) => void;
   projectId: string | null;
   suggestion: SuggestionRow | null;
@@ -5239,6 +5681,8 @@ function InspectorPanel({
   const [askError, setAskError] = useState<string | null>(null);
   const insightTargetKind = node ? "node" : edge ? "edge" : "map";
   const insightTargetId = node?.id ?? edge?.id ?? null;
+  const resolvedCenterNodeId = resolveCenterNodeId(workspace);
+  const selectedNodeIsCenter = Boolean(node && resolvedCenterNodeId === node.id);
 
   async function askMapInsight(questionType: string) {
     if (!projectId) return;
@@ -5425,6 +5869,26 @@ function InspectorPanel({
           onAsk={askMapInsight}
           targetLabel={node ? node.label : edge ? "選択中の導線" : "マップ全体"}
         />
+      ) : null}
+      {node ? (
+        <div className="inspector-center-actions">
+          <div>
+            <strong>売上の核</strong>
+            <span>
+              {selectedNodeIsCenter
+                ? "このノードが現在の中心です。"
+                : "このノードをマップの中心として強調できます。"}
+            </span>
+          </div>
+          <button
+            className={selectedNodeIsCenter ? "ghost-button" : "primary-button"}
+            onClick={() => onSetCenterNode(selectedNodeIsCenter ? null : node.id)}
+            type="button"
+          >
+            <Star size={14} aria-hidden="true" />
+            {selectedNodeIsCenter ? "核指定を解除" : "売上の核にする"}
+          </button>
+        </div>
       ) : null}
       {item ? <ItemForm item={item} onSubmit={submitItem} /> : null}
       {node ? <NodeForm node={node} onSubmit={submitNode} /> : null}
