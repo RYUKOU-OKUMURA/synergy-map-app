@@ -59,7 +59,12 @@ import {
 } from "@/features/map/flowAnimationConfig";
 import { usePrefersReducedMotion } from "@/features/map/usePrefersReducedMotion";
 import { categoryLabels, confidenceLabels } from "@/lib/mvp1Labels";
-import type { MapEdgeRow, MapNodeRow, SelectedMapElement } from "@/lib/mvp1Types";
+import type {
+  AiLensItem,
+  MapEdgeRow,
+  MapNodeRow,
+  SelectedMapElement,
+} from "@/lib/mvp1Types";
 
 import "@xyflow/react/dist/style.css";
 
@@ -92,6 +97,9 @@ export type NodeImpactStats = Record<
 >;
 
 type SynergyNodeData = {
+  aiLensActive: boolean;
+  aiLensMarker: number | null;
+  aiLensMuted: boolean;
   editable: boolean;
   isCenterNode: boolean;
   label: string;
@@ -108,6 +116,9 @@ type SynergyNodeData = {
 };
 
 type SynergyEdgeData = {
+  aiLensActive: boolean;
+  aiLensMarker: number | null;
+  aiLensMuted: boolean;
   label: string;
   edgeType: string;
   strength: string;
@@ -134,6 +145,8 @@ type FlowEdge = Edge<SynergyEdgeData, "synergy">;
 const SelectedEdgeContext = createContext<string | null>(null);
 
 type SynergyMapCanvasProps = {
+  aiLensItems?: AiLensItem[];
+  aiLensOpen?: boolean;
   edges: MapEdgeRow[];
   editable: boolean;
   flowAnimationSuppressed?: boolean;
@@ -283,6 +296,8 @@ function toFlowNodes(
   editable: boolean,
   centerNodeId: string | null,
   showInfluence: boolean,
+  aiLensOpen: boolean,
+  aiLensMarkerByNodeId: Map<string, number>,
   onLayoutChange: (layout: MapNodeLayout) => void,
 ): FlowNode[] {
   return nodes
@@ -301,6 +316,12 @@ function toFlowNodes(
           height: layout.height ?? defaultNodeHeight(viewMode),
         },
         data: {
+          aiLensActive: aiLensOpen && aiLensMarkerByNodeId.has(node.id),
+          aiLensMarker: aiLensMarkerByNodeId.get(node.id) ?? null,
+          aiLensMuted:
+            aiLensOpen &&
+            aiLensMarkerByNodeId.size > 0 &&
+            !aiLensMarkerByNodeId.has(node.id),
           editable,
           isCenterNode: node.id === centerNodeId,
           label: node.label,
@@ -330,6 +351,8 @@ function toFlowEdges(
   globalFlowAnimationEnabled: boolean,
   centerNodeId: string | null,
   showInfluence: boolean,
+  aiLensOpen: boolean,
+  aiLensMarkerByEdgeId: Map<string, number>,
 ): FlowEdge[] {
   const nodeLabelById = new Map(nodes.map((node) => [node.id, node.label]));
 
@@ -345,6 +368,12 @@ function toFlowEdges(
         type: "synergy",
         markerEnd: { type: MarkerType.ArrowClosed },
         data: {
+          aiLensActive: aiLensOpen && aiLensMarkerByEdgeId.has(edge.id),
+          aiLensMarker: aiLensMarkerByEdgeId.get(edge.id) ?? null,
+          aiLensMuted:
+            aiLensOpen &&
+            aiLensMarkerByEdgeId.size > 0 &&
+            !aiLensMarkerByEdgeId.has(edge.id),
           label: edge.label ?? "導線",
           edgeType,
           strength,
@@ -382,6 +411,8 @@ function SynergyNode({ data, id, selected }: NodeProps<FlowNode>) {
         selected ? "map-node-selected" : ""
       } map-node-impact-${data.impactScore} map-node-view-${data.viewMode} ${
         data.businessImpact ? "map-node-has-business-impact" : ""
+      } ${data.aiLensActive ? "map-node-ai-lens-active" : ""} ${
+        data.aiLensMuted ? "map-node-ai-lens-muted" : ""
       } ${data.isCenterNode ? "map-node-center" : ""} ${
         data.isCenterNode && selected ? "map-node-center-selected" : ""
       } ${data.editable ? "map-node-editable" : "map-node-readonly map-node-arrangeable"} ${
@@ -416,6 +447,11 @@ function SynergyNode({ data, id, selected }: NodeProps<FlowNode>) {
       {data.isCenterNode ? (
         <div className="map-node-center-badge">
           <span>中心</span>
+        </div>
+      ) : null}
+      {data.aiLensMarker ? (
+        <div className="map-ai-lens-marker map-ai-lens-node-marker">
+          {data.aiLensMarker}
         </div>
       ) : null}
       <div className="map-node-main">
@@ -563,6 +599,8 @@ function SynergyEdge(props: EdgeProps<FlowEdge>) {
             : props.data?.showInfluence
               ? "map-edge-influence-muted"
               : ""
+        } ${props.data?.aiLensActive ? "map-edge-ai-lens-active" : ""} ${
+          props.data?.aiLensMuted ? "map-edge-ai-lens-muted" : ""
         } ${animatedTrackClass} ${selectedClass}`}
       />
       {flowAnimation ? (
@@ -606,7 +644,7 @@ function SynergyEdge(props: EdgeProps<FlowEdge>) {
           <div
             className={`map-edge-label nodrag nopan ${showWarning ? "map-edge-label-warning" : ""} ${
               props.selected ? "map-edge-label-selected" : ""
-            }`}
+            } ${props.data?.aiLensActive ? "map-edge-label-ai-lens-active" : ""}`}
             onClick={(event) => {
               event.stopPropagation();
               props.data?.onOpenEdgePreview(props.id);
@@ -633,6 +671,11 @@ function SynergyEdge(props: EdgeProps<FlowEdge>) {
               <ArrowRight size={11} aria-hidden="true" />
             )}
             {props.data?.label ?? "導線"}
+            {props.data?.aiLensMarker ? (
+              <span className="map-ai-lens-marker map-ai-lens-edge-marker">
+                {props.data.aiLensMarker}
+              </span>
+            ) : null}
           </div>
           {props.data?.previewOpen ? (
             <EdgeReasonPopover
@@ -816,6 +859,8 @@ const POSITION_SAVE_DEBOUNCE_MS = 400;
 const DRAG_POSITION_GUARD_MS = 1000;
 
 export function SynergyMapCanvas({
+  aiLensItems = [],
+  aiLensOpen = false,
   edges,
   editable,
   flowAnimationSuppressed = false,
@@ -843,6 +888,28 @@ export function SynergyMapCanvas({
     captureSuppressed: flowAnimationSuppressed,
   });
   const [edgePreviewId, setEdgePreviewId] = useState<string | null>(null);
+  const aiLensMarkerByNodeId = useMemo(() => {
+    const markers = new Map<string, number>();
+    if (!aiLensOpen) return markers;
+    aiLensItems.forEach((item, index) => {
+      if (item.targetKind === "node" && item.targetId) {
+        markers.set(item.targetId, index + 1);
+      }
+    });
+    return markers;
+  }, [aiLensItems, aiLensOpen]);
+  const aiLensMarkerByEdgeId = useMemo(() => {
+    const markers = new Map<string, number>();
+    if (!aiLensOpen) return markers;
+    aiLensItems.forEach((item, index) => {
+      if (item.targetKind === "edge" && item.targetId) {
+        markers.set(item.targetId, index + 1);
+      }
+    });
+    return markers;
+  }, [aiLensItems, aiLensOpen]);
+  const hasMapAiLensItem =
+    aiLensOpen && aiLensItems.some((item) => item.targetKind === "map");
   const handleNodeLayoutChange = useCallback(
     (layout: MapNodeLayout) => onPositionsChange([layout]),
     [onPositionsChange],
@@ -895,6 +962,8 @@ export function SynergyMapCanvas({
         mapInteractionsEnabled,
         centerNodeId,
         showInfluence,
+        aiLensOpen,
+        aiLensMarkerByNodeId,
         handleNodeLayoutChange,
       ),
     [
@@ -904,6 +973,8 @@ export function SynergyMapCanvas({
       resolvedImpactStats,
       resolvedPositionOverrides,
       centerNodeId,
+      aiLensMarkerByNodeId,
+      aiLensOpen,
       viewMode,
       showInfluence,
     ],
@@ -921,6 +992,8 @@ export function SynergyMapCanvas({
         globalFlowAnimationEnabled,
         centerNodeId,
         showInfluence,
+        aiLensOpen,
+        aiLensMarkerByEdgeId,
       ),
     [
       edges,
@@ -931,6 +1004,8 @@ export function SynergyMapCanvas({
       handleSelectEdge,
       nodes,
       centerNodeId,
+      aiLensMarkerByEdgeId,
+      aiLensOpen,
       showInfluence,
       viewMode,
     ],
@@ -960,10 +1035,12 @@ export function SynergyMapCanvas({
         initialNodes.length,
         initialEdges.length,
         globalFlowAnimationEnabled ? "flow" : "static",
+        aiLensOpen ? "ai-lens" : "normal",
       ].join(":"),
     [
       mapInteractionsEnabled,
       globalFlowAnimationEnabled,
+      aiLensOpen,
       initialEdges.length,
       initialNodes.length,
       viewMode,
@@ -1137,7 +1214,9 @@ export function SynergyMapCanvas({
         value={selected?.kind === "edge" ? selected.id : null}
       >
         <ReactFlow
-          className={`map-canvas ${mapInteractionsEnabled ? "map-canvas-editable" : "map-canvas-readonly"}`}
+          className={`map-canvas ${mapInteractionsEnabled ? "map-canvas-editable" : "map-canvas-readonly"} ${
+            aiLensOpen ? "map-canvas-ai-lens" : ""
+          } ${hasMapAiLensItem ? "map-canvas-ai-lens-map-target" : ""}`}
           edges={displayEdges}
           edgeTypes={edgeTypes}
           maxZoom={1.45}

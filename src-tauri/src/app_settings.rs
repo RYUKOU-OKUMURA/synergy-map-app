@@ -35,6 +35,12 @@ pub struct MapUiPreferences {
     pub drawer_sort: String,
     #[serde(default)]
     pub show_open_questions_only: bool,
+    #[serde(default = "default_context_panel_open")]
+    pub context_panel_open: bool,
+    #[serde(default = "default_context_panel_tab")]
+    pub context_panel_tab: String,
+    #[serde(default)]
+    pub ai_lens_open: bool,
 }
 
 fn default_primary_provider() -> AiProviderKind {
@@ -65,6 +71,14 @@ fn default_drawer_sort() -> String {
     "relevance".to_string()
 }
 
+fn default_context_panel_open() -> bool {
+    false
+}
+
+fn default_context_panel_tab() -> String {
+    "materials".to_string()
+}
+
 impl Default for MapUiPreferences {
     fn default() -> Self {
         Self {
@@ -74,6 +88,9 @@ impl Default for MapUiPreferences {
             layout_locked: false,
             drawer_sort: default_drawer_sort(),
             show_open_questions_only: false,
+            context_panel_open: default_context_panel_open(),
+            context_panel_tab: default_context_panel_tab(),
+            ai_lens_open: false,
         }
     }
 }

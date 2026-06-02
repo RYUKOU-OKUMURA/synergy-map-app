@@ -253,6 +253,26 @@ export type MapUiPreferences = {
   layoutLocked: boolean;
   drawerSort: "relevance" | "priority" | "newest";
   showOpenQuestionsOnly: boolean;
+  contextPanelOpen: boolean;
+  contextPanelTab: "materials" | "checks" | "actions" | "records";
+  aiLensOpen: boolean;
+};
+
+export type AiLensCategory =
+  | "sales_flow_defect"
+  | "dormant_revenue_asset"
+  | "profit_blind_spot";
+
+export type AiLensTargetKind = "node" | "edge" | "map";
+
+export type AiLensItem = {
+  id: string;
+  category: AiLensCategory;
+  targetKind: AiLensTargetKind;
+  targetId: string | null;
+  title: string;
+  body: string;
+  confidenceStatus: string;
 };
 
 export type CursorSdkStatus = {

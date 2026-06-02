@@ -4,9 +4,6 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   Archive,
   BarChart3,
-  Check,
-  ChevronDown,
-  ChevronUp,
   Clock3,
   Database,
   Download,
@@ -23,9 +20,7 @@ import {
   Link as LinkIcon,
   ListChecks,
   Map as MapIcon,
-  Maximize2,
   MessageSquareText,
-  Minimize2,
   MousePointer2,
   PencilRuler,
   Plus,
@@ -42,7 +37,7 @@ import {
   X,
 } from "lucide-react";
 import type * as React from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import "./App.css";
 import {
@@ -54,7 +49,6 @@ import {
   applyLocalMapLayouts,
   buildImpactPositionOverrides,
   buildNodeImpactStats,
-  levelRank,
   parseRelatedNodeIds,
   readableCustomerJourneyLayouts,
   resolveCenterNodeId,
@@ -75,7 +69,7 @@ import {
 } from "@/lib/mvp1Labels";
 import type {
   ActionItemRow,
-  AiCommentRow,
+  AiLensItem,
   AiProviderKind,
   AiRunRow,
   AiSettings,
@@ -151,6 +145,22 @@ type ActionItemUpdateDraft = ActionItemDraft & {
   status: ActionItemRow["status"];
 };
 
+const aiLensCategoryLabels: Record<AiLensItem["category"], string> = {
+  sales_flow_defect: "売上導線の欠陥",
+  dormant_revenue_asset: "眠っている売上資産",
+  profit_blind_spot: "利益化の盲点",
+};
+
+const contextPanelTabs: Array<{
+  id: MapUiPreferences["contextPanelTab"];
+  label: string;
+}> = [
+  { id: "materials", label: "材料" },
+  { id: "checks", label: "確認" },
+  { id: "actions", label: "一手" },
+  { id: "records", label: "記録" },
+];
+
 type MapNoteDraft = {
   title: string;
   body: string;
@@ -172,6 +182,9 @@ const defaultAiSettings = (): AiSettings => ({
     layoutLocked: false,
     drawerSort: "relevance",
     showOpenQuestionsOnly: false,
+    contextPanelOpen: false,
+    contextPanelTab: "materials",
+    aiLensOpen: false,
   },
 });
 
@@ -332,8 +345,6 @@ function App() {
     useState<SelectedMapElement>(null);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
-  const [isTrayOpen, setIsTrayOpen] = useState(false);
-  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isMapEditMode, setIsMapEditMode] = useState(false);
   const [flowAnimationUserEnabled, setFlowAnimationUserEnabled] = useState(true);
   const [layoutSaveStatus, setLayoutSaveStatus] = useState<
@@ -520,7 +531,6 @@ function App() {
     setSelectedSuggestionId(null);
     setExcludedChunkIds([]);
     setApprovedChunkSignature(null);
-    setIsDrawerOpen(false);
     setIsMapEditMode(false);
   }
 
@@ -567,7 +577,6 @@ function App() {
     if (shouldClearInspectorForView(nextView)) {
       clearInspectorSelection();
     }
-    setIsDrawerOpen(false);
     setView(nextView);
   }
 
@@ -643,7 +652,6 @@ function App() {
           setNotice(result.message);
           setSelectedMapElement(null);
           setSelectedSuggestionId(null);
-          setIsDrawerOpen(false);
           setView("extract");
         },
       );
@@ -660,7 +668,6 @@ function App() {
           setNotice(result.message);
           setSelectedMapElement(null);
           setSelectedSuggestionId(null);
-          setIsDrawerOpen(false);
           setView("map");
         },
       );
@@ -675,7 +682,7 @@ function App() {
         (result) => {
           setWorkspace(result.workspace);
           setNotice(result.message);
-          void handleMapUiPreferencesChange({ bottomDrawerOpen: true });
+          void handleMapUiPreferencesChange({ aiLensOpen: true });
         },
       );
       return;
@@ -702,7 +709,6 @@ function App() {
         setSelectedItemId(result.workspace.extractedItems[0]?.id ?? null);
         setSelectedMapElement(null);
         setSelectedSuggestionId(null);
-        setIsDrawerOpen(false);
       },
     );
   }
@@ -719,7 +725,6 @@ function App() {
         setNotice(result.message);
         setSelectedMapElement(null);
         setSelectedSuggestionId(null);
-        setIsDrawerOpen(false);
         setView("map");
       },
     );
@@ -753,7 +758,11 @@ function App() {
       (result) => {
         setWorkspace(result.workspace);
         setNotice(result.message);
-        void handleMapUiPreferencesChange({ bottomDrawerOpen: true });
+        void handleMapUiPreferencesChange({
+          aiLensOpen: true,
+          contextPanelOpen: true,
+          contextPanelTab: "actions",
+        });
       },
     );
   }
@@ -865,9 +874,6 @@ function App() {
       },
     };
     setAiSettings(nextSettings);
-    if (patch.bottomDrawerOpen !== undefined) {
-      setIsDrawerOpen(patch.bottomDrawerOpen);
-    }
     if (!isTauriRuntime) return;
     try {
       const saved = await invoke<AiSettings>("save_ai_settings_command", {
@@ -878,10 +884,6 @@ function App() {
     } catch (caughtError) {
       setError(String(caughtError));
     }
-  }
-
-  function handleDrawerOpenChange(open: boolean) {
-    void handleMapUiPreferencesChange({ bottomDrawerOpen: open });
   }
 
   async function handleSelectDefaultExportDir() {
@@ -1060,7 +1062,11 @@ function App() {
             ? mapResult.workspace
             : extractResult.workspace,
       );
-      void handleMapUiPreferencesChange({ bottomDrawerOpen: true });
+      void handleMapUiPreferencesChange({
+        aiLensOpen: true,
+        contextPanelOpen: true,
+        contextPanelTab: "materials",
+      });
       setNotice(
         `${
           suggestionsResult.message || mapResult.message || extractResult.message
@@ -1459,7 +1465,7 @@ function App() {
             ...workspace.aiComments,
           ],
         });
-        void handleMapUiPreferencesChange({ bottomDrawerOpen: true });
+        void handleMapUiPreferencesChange({ aiLensOpen: true });
         return;
       }
       const result = await invoke<MvpRunResult>("ask_map_insight", {
@@ -1470,7 +1476,7 @@ function App() {
       });
       setWorkspace(result.workspace);
       setNotice(result.message);
-      void handleMapUiPreferencesChange({ bottomDrawerOpen: true });
+      void handleMapUiPreferencesChange({ aiLensOpen: true });
     } catch (caughtError) {
       setError(String(caughtError));
     } finally {
@@ -1490,7 +1496,6 @@ function App() {
         ]);
         if (cancelled) return;
         setAiSettings(settings);
-        setIsDrawerOpen(settings.mapUiPreferences.bottomDrawerOpen);
         setCursorSdkStatus(status);
       } catch (caughtError) {
         if (!cancelled) {
@@ -1650,7 +1655,6 @@ function App() {
               cursorSdkSmokeResult={cursorSdkSmokeResult}
               cursorSdkStatus={cursorSdkStatus}
               deviceCodeResult={deviceCodeResult}
-              drawerOpen={isDrawerOpen}
               editMode={isMapEditMode}
               flowAnimationUserEnabled={flowAnimationUserEnabled}
               generationBusy={isBusy}
@@ -1664,7 +1668,6 @@ function App() {
               onAskWholeMap={handleAskWholeMap}
               onCreateMapEdge={handleCreateMapEdge}
               onCreateOnboardingMap={handleCreateOnboardingMap}
-              onDrawerOpenChange={handleDrawerOpenChange}
               onEditModeChange={setIsMapEditMode}
               onFlowAnimationUserEnabledChange={setFlowAnimationUserEnabled}
               onGenerateMap={handleRegenerateMap}
@@ -1672,7 +1675,6 @@ function App() {
               onMapUiPreferencesChange={handleMapUiPreferencesChange}
               onOpenExtractReview={() => {
                 setSelectedItemId(workspace.extractedItems[0]?.id ?? null);
-                setIsDrawerOpen(false);
                 setView("extract");
               }}
               reflectionSummary={reflectionSummary}
@@ -1702,9 +1704,6 @@ function App() {
                 setSelectedMapElement(null);
               }}
               selectedMapElement={selectedMapElement}
-              selectedSuggestionId={selectedSuggestionId}
-              trayOpen={isTrayOpen}
-              onTrayOpenChange={setIsTrayOpen}
               onUpdateActionItem={handleUpdateActionItem}
               workspace={workspace}
             />
@@ -1842,7 +1841,12 @@ function App() {
           ) : null}
         </div>
 
-        {activeProject ? (
+        {activeProject &&
+        !(
+          view === "map" &&
+          aiSettings.mapUiPreferences.aiLensOpen &&
+          workspace.nodes.length > 0
+        ) ? (
           <InspectorPanel
             edge={selectedEdge}
             isTauriRuntime={isTauriRuntime}
@@ -1863,6 +1867,66 @@ function App() {
 
 function StatusChip({ children }: { children: React.ReactNode }) {
   return <span className="status-chip">{children}</span>;
+}
+
+function buildDraftAiLensItems(workspace: ProjectWorkspace): AiLensItem[] {
+  if (workspace.nodes.length === 0) return [];
+  const items: AiLensItem[] = [];
+  const activeEdges = workspace.edges.filter(
+    (edge) => edge.adoptionStatus !== "rejected",
+  );
+  const activeNodes = workspace.nodes.filter(
+    (node) => node.adoptionStatus !== "rejected",
+  );
+  const weakEdge = activeEdges.find(
+    (edge) => edge.edgeType === "bottleneck" || edge.strength === "weak",
+  );
+  const assetNode =
+    activeNodes.find((node) =>
+      ["channel", "touchpoint", "service"].includes(node.nodeType),
+    ) ?? activeNodes[0];
+  const profitEdge =
+    activeEdges.find(
+      (edge) => edge.flowType === "purchase" || edge.strength !== "strong",
+    ) ?? activeEdges[0];
+
+  items.push({
+    id: "draft-ai-lens-map",
+    category: "sales_flow_defect",
+    targetKind: "map",
+    targetId: null,
+    title: "流れ全体の弱さ",
+    body: weakEdge
+      ? "現在の材料では、顧客が次の接点へ進む流れに弱い箇所がありそうです。"
+      : "現在の材料では、売上までの導線全体にまだ確認余地があります。",
+    confidenceStatus: "estimated",
+  });
+
+  if (assetNode) {
+    items.push({
+      id: `draft-ai-lens-node-${assetNode.id}`,
+      category: "dormant_revenue_asset",
+      targetKind: "node",
+      targetId: assetNode.id,
+      title: assetNode.label,
+      body: `${assetNode.label}は、売上導線へさらに接続できる資産として見直す余地があります。`,
+      confidenceStatus: assetNode.confidenceStatus ?? "estimated",
+    });
+  }
+
+  if (profitEdge) {
+    items.push({
+      id: `draft-ai-lens-edge-${profitEdge.id}`,
+      category: "profit_blind_spot",
+      targetKind: "edge",
+      targetId: profitEdge.id,
+      title: profitEdge.label ?? "利益化の接続",
+      body: "反応や接点が、単価・継続・高単価提案へ十分つながっているか確認したい導線です。",
+      confidenceStatus: profitEdge.confidenceStatus ?? "estimated",
+    });
+  }
+
+  return items.slice(0, 3);
 }
 
 function AppSidebar({
@@ -2197,7 +2261,6 @@ function MapWorkspace({
   cursorSdkSmokeResult,
   cursorSdkStatus,
   deviceCodeResult,
-  drawerOpen,
   editMode,
   flowAnimationUserEnabled,
   generationBusy,
@@ -2211,7 +2274,6 @@ function MapWorkspace({
   onAskWholeMap,
   onCreateMapEdge,
   onCreateOnboardingMap,
-  onDrawerOpenChange,
   onEditModeChange,
   onFlowAnimationUserEnabledChange,
   onGenerateSuggestions,
@@ -2232,9 +2294,6 @@ function MapWorkspace({
   onSelectMapElement,
   onSelectSuggestion,
   selectedMapElement,
-  selectedSuggestionId,
-  trayOpen,
-  onTrayOpenChange,
   onUpdateActionItem,
   workspace,
 }: {
@@ -2248,7 +2307,6 @@ function MapWorkspace({
   cursorSdkSmokeResult: CursorSdkSmokeResult | null;
   cursorSdkStatus: CursorSdkStatus | null;
   deviceCodeResult: DeviceCodeLoginResult | null;
-  drawerOpen: boolean;
   editMode: boolean;
   flowAnimationUserEnabled: boolean;
   generationBusy: boolean;
@@ -2262,7 +2320,6 @@ function MapWorkspace({
   onAskWholeMap: (questionType?: string) => void;
   onCreateMapEdge: (sourceNodeId: string, targetNodeId: string) => void;
   onCreateOnboardingMap: (draft: OnboardingDraft) => void;
-  onDrawerOpenChange: (open: boolean) => void;
   onEditModeChange: (enabled: boolean) => void;
   onFlowAnimationUserEnabledChange: (enabled: boolean) => void;
   onGenerateSuggestions: () => void;
@@ -2286,9 +2343,6 @@ function MapWorkspace({
   onSelectMapElement: (selection: SelectedMapElement) => void;
   onSelectSuggestion: (suggestionId: string) => void;
   selectedMapElement: SelectedMapElement;
-  selectedSuggestionId: string | null;
-  trayOpen: boolean;
-  onTrayOpenChange: (open: boolean) => void;
   onUpdateActionItem: (actionItem: ActionItemRow, draft: ActionItemUpdateDraft) => void;
   workspace: ProjectWorkspace;
 }) {
@@ -2300,22 +2354,29 @@ function MapWorkspace({
   );
   const hasGeneratedMap = workspace.nodes.length > 0;
   const canGenerateFromItems = !hasGeneratedMap && workspace.extractedItems.length > 0;
-  const shouldReviewDraft =
-    hasOnboardingBrief(workspace) && hasUnconfirmedGeneratedItems(workspace);
   const mapRegenerationLabel =
     reflectionSummary.pendingExtractionCount > 0
       ? "追加ソースあり"
       : reflectionSummary.mapRefreshNeeded
         ? "未反映を再生成"
         : "再生成";
-  const reflectionAttention = needsReflectionAttention(reflectionSummary);
+  const shouldReviewDraft =
+    hasOnboardingBrief(workspace) && hasUnconfirmedGeneratedItems(workspace);
+  const aiLensItems = useMemo(() => buildDraftAiLensItems(workspace), [workspace]);
+  const aiLensOpen = mapUiPreferences.aiLensOpen && aiLensItems.length > 0;
   const handleCanvasPositionsChange = useCallback(
     (positions: MapNodeLayout[]) => onSavePositions(mapViewMode, positions),
     [mapViewMode, onSavePositions],
   );
 
   return (
-    <div className="map-workbench">
+    <div
+      className={`map-workbench ${
+        hasGeneratedMap && mapUiPreferences.contextPanelOpen
+          ? "map-workbench-context-open"
+          : ""
+      } ${aiLensOpen ? "map-workbench-ai-lens-open" : ""}`}
+    >
       {hasGeneratedMap ? (
         <>
           <div className="map-view-switch" role="tablist" aria-label="マップ表示">
@@ -2467,100 +2528,37 @@ function MapWorkspace({
         </>
       ) : null}
 
-      {hasGeneratedMap && mapViewMode === "customer_journey" ? (
-        <button
-          className={`tray-tab ${trayOpen ? "tray-tab-open" : ""} ${
-            !trayOpen && reflectionAttention ? "tray-tab-warning" : ""
-          }`}
-          aria-expanded={trayOpen}
-          aria-label={
-            trayOpen
-              ? "マップ材料を閉じる"
-              : reflectionAttention
-                ? "マップ材料を開く（未反映あり）"
-                : "マップ材料を開く"
+      {hasGeneratedMap ? (
+        <MapContextPanel
+          onGenerateSuggestions={onGenerateSuggestions}
+          onMapUiPreferencesChange={onMapUiPreferencesChange}
+          onOpenExtractReview={onOpenExtractReview}
+          onSelectItem={onSelectItem}
+          onSelectSuggestion={onSelectSuggestion}
+          onUpdateActionItem={onUpdateActionItem}
+          preferences={mapUiPreferences}
+          shouldReviewDraft={shouldReviewDraft}
+          workspace={workspace}
+        />
+      ) : null}
+
+      {hasGeneratedMap ? (
+        <AiLensToggle
+          count={aiLensItems.length}
+          open={aiLensOpen}
+          onToggle={() =>
+            onMapUiPreferencesChange({
+              aiLensOpen: !mapUiPreferences.aiLensOpen,
+            })
           }
-          onClick={() => onTrayOpenChange(!trayOpen)}
-          type="button"
-        >
-          材料候補 {workspace.extractedItems.length}
-        </button>
-      ) : null}
-
-      {hasGeneratedMap && mapViewMode === "customer_journey" ? (
-        <aside
-          className={`extraction-tray ${
-            trayOpen ? "extraction-tray-open" : "extraction-tray-closed"
-          }`}
-          aria-hidden={!trayOpen}
-        >
-          <div className="panel-heading">
-            <div>
-              <span>マップ材料</span>
-              <small>AIが情報ソースから見つけた候補</small>
-            </div>
-            <button
-              aria-label="マップ材料を閉じる"
-              className="panel-close-button"
-              onClick={() => onTrayOpenChange(false)}
-              type="button"
-            >
-              <X size={15} aria-hidden="true" />
-            </button>
-          </div>
-          <div className="tray-list">
-            {workspace.extractedItems.map((item) => (
-              <button
-                className="extract-card"
-                key={item.id}
-                onClick={() => onSelectItem(item.id)}
-                type="button"
-              >
-                <div className="card-row">
-                  <span className={`category-dot category-${item.itemType}`} />
-                  <strong>{item.name}</strong>
-                </div>
-                <div className="card-meta">
-                  {labelFor(categoryOptions, item.itemType)}
-                  <span>{labelFor(confidenceOptions, item.confidenceStatus)}</span>
-                </div>
-              </button>
-            ))}
-            {workspace.extractedItems.length === 0 ? (
-              <div className="empty-panel">
-                マップの材料を追加した後にAI抽出を実行してください。
-              </div>
-            ) : null}
-          </div>
-        </aside>
-      ) : null}
-
-      {mapViewMode === "business_impact" && hasGeneratedMap ? (
-        <>
-          <button
-            className={`tray-tab impact-panel-tab ${
-              trayOpen ? "impact-panel-tab-open" : ""
-            }`}
-            aria-expanded={trayOpen}
-            aria-label={trayOpen ? "次の一手を閉じる" : "次の一手を開く"}
-            onClick={() => onTrayOpenChange(!trayOpen)}
-            type="button"
-          >
-            次の一手 {workspace.suggestions.length}
-          </button>
-          <BusinessImpactPanel
-            open={trayOpen}
-            onGenerate={onGenerateSuggestions}
-            onSelectSuggestion={onSelectSuggestion}
-            selectedSuggestionId={selectedSuggestionId}
-            workspace={workspace}
-          />
-        </>
+        />
       ) : null}
 
       <section className="map-stage">
         {workspace.nodes.length > 0 ? (
           <SynergyMapCanvas
+            aiLensItems={aiLensItems}
+            aiLensOpen={aiLensOpen}
             centerNodeId={centerNodeId}
             editable={editMode}
             edges={workspace.edges}
@@ -2614,22 +2612,8 @@ function MapWorkspace({
         )}
       </section>
 
-      {hasGeneratedMap ? (
-        <MapAiDrawer
-          drawerOpen={drawerOpen}
-          key={mapUiPreferences.bottomDrawerHeight}
-          mapInsightBusy={mapInsightBusy}
-          mapUiPreferences={mapUiPreferences}
-          mapViewMode={mapViewMode}
-          onAskWholeMap={onAskWholeMap}
-          onDrawerOpenChange={onDrawerOpenChange}
-          onGenerateSuggestions={onGenerateSuggestions}
-          onMapUiPreferencesChange={onMapUiPreferencesChange}
-          onOpenExtractReview={onOpenExtractReview}
-          onUpdateActionItem={onUpdateActionItem}
-          shouldReviewDraft={shouldReviewDraft}
-          workspace={workspace}
-        />
+      {hasGeneratedMap && aiLensOpen ? (
+        <AiLensPanel items={aiLensItems} onAsk={() => onAskWholeMap("explain")} />
       ) : null}
     </div>
   );
@@ -2682,6 +2666,339 @@ function MapReflectionBanner({
         </button>
       )}
     </div>
+  );
+}
+
+function MapContextPanel({
+  onGenerateSuggestions,
+  onMapUiPreferencesChange,
+  onOpenExtractReview,
+  onSelectItem,
+  onSelectSuggestion,
+  onUpdateActionItem,
+  preferences,
+  shouldReviewDraft,
+  workspace,
+}: {
+  onGenerateSuggestions: () => void;
+  onMapUiPreferencesChange: (
+    patch: Partial<MapUiPreferences>,
+    options?: { notify?: boolean },
+  ) => void;
+  onOpenExtractReview: () => void;
+  onSelectItem: (itemId: string) => void;
+  onSelectSuggestion: (suggestionId: string) => void;
+  onUpdateActionItem: (actionItem: ActionItemRow, draft: ActionItemUpdateDraft) => void;
+  preferences: MapUiPreferences;
+  shouldReviewDraft: boolean;
+  workspace: ProjectWorkspace;
+}) {
+  const openActionItems = workspace.actionItems
+    .filter((actionItem) => actionItem.status === "open")
+    .sort(
+      (left, right) =>
+        priorityRank(left.priority) - priorityRank(right.priority) ||
+        sortByDateDesc(left.createdAt, right.createdAt),
+    );
+  const suggestions = activeSuggestions(workspace);
+  const open = preferences.contextPanelOpen;
+  const activeTab = preferences.contextPanelTab;
+
+  function setOpen(nextOpen: boolean) {
+    onMapUiPreferencesChange({ contextPanelOpen: nextOpen });
+  }
+
+  function setTab(tab: MapUiPreferences["contextPanelTab"]) {
+    onMapUiPreferencesChange({ contextPanelOpen: true, contextPanelTab: tab });
+  }
+
+  function completeActionItem(actionItem: ActionItemRow) {
+    onUpdateActionItem(actionItem, {
+      title: actionItem.title,
+      body: actionItem.body,
+      priority: actionItem.priority,
+      memo: actionItem.memo ?? "",
+      status: "done",
+    });
+  }
+
+  return (
+    <>
+      <button
+        aria-expanded={open}
+        className={`context-panel-tab ${open ? "context-panel-tab-open" : ""}`}
+        onClick={() => setOpen(!open)}
+        type="button"
+      >
+        作業箱
+      </button>
+      <aside
+        aria-hidden={!open}
+        className={`map-context-panel ${
+          open ? "map-context-panel-open" : "map-context-panel-closed"
+        }`}
+      >
+        <div className="panel-heading">
+          <div>
+            <span>マップ内コンテキスト</span>
+            <small>材料・確認・一手・記録</small>
+          </div>
+          <button
+            aria-label="マップ内コンテキストを閉じる"
+            className="panel-close-button"
+            onClick={() => setOpen(false)}
+            type="button"
+          >
+            <X size={15} aria-hidden="true" />
+          </button>
+        </div>
+        <div className="context-panel-tabs" role="tablist" aria-label="作業箱">
+          {contextPanelTabs.map((tab) => (
+            <button
+              className={activeTab === tab.id ? "active" : ""}
+              key={tab.id}
+              onClick={() => setTab(tab.id)}
+              type="button"
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+        <div className="context-panel-body">
+          {activeTab === "materials" ? (
+            <ContextMaterialsTab
+              onOpenExtractReview={onOpenExtractReview}
+              onSelectItem={onSelectItem}
+              shouldReviewDraft={shouldReviewDraft}
+              workspace={workspace}
+            />
+          ) : null}
+          {activeTab === "checks" ? (
+            <ContextChecksTab
+              actionItems={openActionItems}
+              onComplete={completeActionItem}
+            />
+          ) : null}
+          {activeTab === "actions" ? (
+            <ContextActionsTab
+              onGenerateSuggestions={onGenerateSuggestions}
+              onSelectSuggestion={onSelectSuggestion}
+              suggestions={suggestions}
+            />
+          ) : null}
+          {activeTab === "records" ? (
+            <ContextRecordsTab mapNotes={workspace.mapNotes} />
+          ) : null}
+        </div>
+      </aside>
+    </>
+  );
+}
+
+function ContextMaterialsTab({
+  onOpenExtractReview,
+  onSelectItem,
+  shouldReviewDraft,
+  workspace,
+}: {
+  onOpenExtractReview: () => void;
+  onSelectItem: (itemId: string) => void;
+  shouldReviewDraft: boolean;
+  workspace: ProjectWorkspace;
+}) {
+  return (
+    <div className="context-panel-list">
+      {shouldReviewDraft ? (
+        <div className="context-panel-alert">
+          <TriangleAlert size={15} aria-hidden="true" />
+          <span>推定を含む初回生成です。抽出カードの確度を確認してください。</span>
+        </div>
+      ) : null}
+      <div className="context-panel-summary">
+        <StatusChip>{workspace.sourceFiles.length}ソース</StatusChip>
+        <StatusChip>{workspace.extractedItems.length}カード</StatusChip>
+      </div>
+      {workspace.extractedItems.slice(0, 8).map((item) => (
+        <button
+          className="context-item-button"
+          key={item.id}
+          onClick={() => onSelectItem(item.id)}
+          type="button"
+        >
+          <span className={`category-dot category-${item.itemType}`} />
+          <strong>{item.name}</strong>
+          <small>
+            {labelFor(categoryOptions, item.itemType)} /{" "}
+            {labelFor(confidenceOptions, item.confidenceStatus)}
+          </small>
+        </button>
+      ))}
+      {workspace.extractedItems.length === 0 ? (
+        <div className="empty-panel">AI抽出後に材料カードが表示されます。</div>
+      ) : null}
+      <button className="ghost-button" onClick={onOpenExtractReview} type="button">
+        <ListChecks size={14} aria-hidden="true" />
+        抽出カードを確認
+      </button>
+    </div>
+  );
+}
+
+function ContextChecksTab({
+  actionItems,
+  onComplete,
+}: {
+  actionItems: ActionItemRow[];
+  onComplete: (actionItem: ActionItemRow) => void;
+}) {
+  return (
+    <div className="context-panel-list">
+      <div className="context-panel-summary">
+        <StatusChip>{actionItems.length}件 未確認</StatusChip>
+      </div>
+      {actionItems.slice(0, 8).map((actionItem) => (
+        <article className="context-task-row" key={actionItem.id}>
+          <button
+            aria-label={`${actionItem.title}を完了`}
+            className="question-check"
+            onClick={() => onComplete(actionItem)}
+            type="button"
+          />
+          <div>
+            <strong>{actionItem.body}</strong>
+            <small>
+              優先度 {labelFor(priorityOptions, actionItem.priority)} /{" "}
+              {formatTime(actionItem.createdAt)}
+            </small>
+          </div>
+        </article>
+      ))}
+      {actionItems.length === 0 ? (
+        <div className="empty-panel">未確認の項目はありません。</div>
+      ) : null}
+    </div>
+  );
+}
+
+function ContextActionsTab({
+  onGenerateSuggestions,
+  onSelectSuggestion,
+  suggestions,
+}: {
+  onGenerateSuggestions: () => void;
+  onSelectSuggestion: (suggestionId: string) => void;
+  suggestions: SuggestionRow[];
+}) {
+  return (
+    <div className="context-panel-list">
+      <div className="context-panel-summary">
+        <StatusChip>{suggestions.length}件 一手</StatusChip>
+      </div>
+      {suggestions.slice(0, 8).map((suggestion) => (
+        <button
+          className="context-item-button"
+          key={suggestion.id}
+          onClick={() => onSelectSuggestion(suggestion.id)}
+          type="button"
+        >
+          <strong>{suggestion.title}</strong>
+          <small>
+            売上 {labelFor(impactLevelOptions, suggestion.expectedRevenueImpact)} / 工数{" "}
+            {labelFor(costLevelOptions, suggestion.effortLevel)}
+          </small>
+        </button>
+      ))}
+      {suggestions.length === 0 ? (
+        <div className="empty-panel">次の一手はまだありません。</div>
+      ) : null}
+      <button className="ghost-button" onClick={onGenerateSuggestions} type="button">
+        <Sparkles size={14} aria-hidden="true" />
+        一手を生成
+      </button>
+    </div>
+  );
+}
+
+function ContextRecordsTab({ mapNotes }: { mapNotes: MapNoteRow[] }) {
+  return (
+    <div className="context-panel-list">
+      <div className="context-panel-summary">
+        <StatusChip>{mapNotes.length}件 記録</StatusChip>
+      </div>
+      {mapNotes.slice(0, 8).map((note) => (
+        <article className="context-note-row" key={note.id}>
+          <strong>{note.title}</strong>
+          <p>{shortText(note.body, 110)}</p>
+          <small>
+            {labelFor(noteTypeOptions, note.noteType)} / {formatTime(note.updatedAt)}
+          </small>
+        </article>
+      ))}
+      {mapNotes.length === 0 ? (
+        <div className="empty-panel">記録はまだありません。</div>
+      ) : null}
+    </div>
+  );
+}
+
+function AiLensToggle({
+  count,
+  onToggle,
+  open,
+}: {
+  count: number;
+  onToggle: () => void;
+  open: boolean;
+}) {
+  return (
+    <button
+      aria-pressed={open}
+      className={`ai-lens-toggle ${open ? "ai-lens-toggle-open" : ""}`}
+      disabled={count === 0}
+      onClick={onToggle}
+      type="button"
+    >
+      <Sparkles size={15} aria-hidden="true" />
+      AI視点 {open ? "ON" : ""}
+      <span>{count}</span>
+    </button>
+  );
+}
+
+function AiLensPanel({ items, onAsk }: { items: AiLensItem[]; onAsk: () => void }) {
+  return (
+    <aside className="ai-lens-panel">
+      <div className="panel-heading">
+        <div>
+          <span>AIが見ている点</span>
+          <small>現在の材料から見える注目点</small>
+        </div>
+      </div>
+      <div className="ai-lens-card-list">
+        {items.map((item, index) => (
+          <article className="ai-lens-card" key={item.id}>
+            <div className="ai-lens-card-heading">
+              <span className="ai-lens-card-marker">
+                {item.targetKind === "map" ? "全体" : index + 1}
+              </span>
+              <strong>{aiLensCategoryLabels[item.category]}</strong>
+            </div>
+            <h3>{item.title}</h3>
+            <p>{item.body}</p>
+            <small>
+              {item.targetKind === "map"
+                ? "マップ全体への指摘"
+                : "マップ上の番号に対応"}{" "}
+              / {labelFor(confidenceOptions, item.confidenceStatus)}
+            </small>
+          </article>
+        ))}
+      </div>
+      <button className="primary-button" onClick={onAsk} type="button">
+        <MessageSquareText size={15} aria-hidden="true" />
+        詳しく聞く
+      </button>
+    </aside>
   );
 }
 
@@ -3289,153 +3606,6 @@ function ConnectionStatus({
       <span>{label}</span>
       <strong>{state}</strong>
     </div>
-  );
-}
-
-function BusinessImpactPanel({
-  open,
-  onGenerate,
-  onSelectSuggestion,
-  selectedSuggestionId,
-  workspace,
-}: {
-  open: boolean;
-  onGenerate: () => void;
-  onSelectSuggestion: (suggestionId: string) => void;
-  selectedSuggestionId: string | null;
-  workspace: ProjectWorkspace;
-}) {
-  const suggestions = useMemo(
-    () =>
-      workspace.suggestions
-        .filter((suggestion) => suggestion.adoptionStatus !== "rejected")
-        .sort((left, right) => right.impactScore - left.impactScore),
-    [workspace.suggestions],
-  );
-  const quickWins = suggestions.filter(
-    (suggestion) =>
-      levelRank(suggestion.expectedRevenueImpact) >= 2 &&
-      levelRank(suggestion.effortLevel) <= 1,
-  );
-  const highImpact = suggestions.filter(
-    (suggestion) => levelRank(suggestion.expectedRevenueImpact) >= 2,
-  );
-  const highConfidence = suggestions.filter(
-    (suggestion) => suggestion.confidenceStatus === "confirmed",
-  );
-
-  return (
-    <aside
-      className={`impact-panel ${open ? "impact-panel-open" : "impact-panel-closed"}`}
-      aria-hidden={!open}
-    >
-      <div className="panel-heading">
-        <span>次の一手</span>
-        <small>{suggestions.length}施策</small>
-      </div>
-      <div className="impact-summary">
-        <div>
-          <TrendingUp size={16} aria-hidden="true" />
-          <strong>{highImpact.length}</strong>
-          <span>売上影響大</span>
-        </div>
-        <div>
-          <Gauge size={16} aria-hidden="true" />
-          <strong>{quickWins.length}</strong>
-          <span>効果大・工数小</span>
-        </div>
-        <div>
-          <Target size={16} aria-hidden="true" />
-          <strong>{highConfidence.length}</strong>
-          <span>根拠強め</span>
-        </div>
-      </div>
-      <div className="impact-panel-actions">
-        <button className="primary-button" onClick={onGenerate} type="button">
-          <Sparkles size={15} aria-hidden="true" />
-          評価生成
-        </button>
-      </div>
-      <div className="impact-matrix">
-        {[
-          ["quick", "効果大・工数小", quickWins],
-          [
-            "invest",
-            "効果大・工数大",
-            suggestions.filter(
-              (suggestion) =>
-                levelRank(suggestion.expectedRevenueImpact) >= 2 &&
-                levelRank(suggestion.effortLevel) >= 2,
-            ),
-          ],
-          [
-            "small",
-            "効果小・工数小",
-            suggestions.filter(
-              (suggestion) =>
-                levelRank(suggestion.expectedRevenueImpact) <= 1 &&
-                levelRank(suggestion.effortLevel) <= 1,
-            ),
-          ],
-          [
-            "defer",
-            "効果小・工数大",
-            suggestions.filter(
-              (suggestion) =>
-                levelRank(suggestion.expectedRevenueImpact) <= 1 &&
-                levelRank(suggestion.effortLevel) >= 2,
-            ),
-          ],
-        ].map(([id, label, items]) => (
-          <div className={`impact-quadrant impact-quadrant-${id}`} key={String(id)}>
-            <strong>{label as string}</strong>
-            {(items as SuggestionRow[]).slice(0, 3).map((suggestion) => (
-              <button
-                className={`impact-pill ${
-                  selectedSuggestionId === suggestion.id ? "impact-pill-active" : ""
-                }`}
-                key={suggestion.id}
-                onClick={() => onSelectSuggestion(suggestion.id)}
-                type="button"
-              >
-                {suggestion.title}
-              </button>
-            ))}
-          </div>
-        ))}
-      </div>
-      <div className="impact-list">
-        {suggestions.map((suggestion) => (
-          <button
-            className={`impact-row ${
-              selectedSuggestionId === suggestion.id ? "impact-row-active" : ""
-            }`}
-            key={suggestion.id}
-            onClick={() => onSelectSuggestion(suggestion.id)}
-            type="button"
-          >
-            <div className="impact-row-head">
-              <strong>{suggestion.title}</strong>
-              <span>{suggestion.impactScore}</span>
-            </div>
-            <div className="impact-metrics">
-              <span>
-                売上 {labelFor(impactLevelOptions, suggestion.expectedRevenueImpact)}
-              </span>
-              <span>
-                利益 {labelFor(impactLevelOptions, suggestion.expectedProfitImpact)}
-              </span>
-              <span>費用 {labelFor(costLevelOptions, suggestion.costLevel)}</span>
-              <span>工数 {labelFor(costLevelOptions, suggestion.effortLevel)}</span>
-            </div>
-            <small>{suggestion.evidence ?? suggestion.rationale ?? "根拠未設定"}</small>
-          </button>
-        ))}
-        {suggestions.length === 0 ? (
-          <div className="empty-panel">マップ生成後に次に試す一手を生成します。</div>
-        ) : null}
-      </div>
-    </aside>
   );
 }
 
@@ -4136,389 +4306,6 @@ function SourceReflectionCard({
         <Trash2 size={15} aria-hidden="true" />
       </button>
     </article>
-  );
-}
-
-const DRAWER_MIN_HEIGHT = 56;
-const DRAWER_STANDARD_HEIGHT = 260;
-
-function expandedDrawerHeight() {
-  return Math.round(window.innerHeight * 0.45);
-}
-
-function clampDrawerHeight(height: number) {
-  return Math.max(DRAWER_MIN_HEIGHT, Math.min(expandedDrawerHeight(), height));
-}
-
-function MapAiDrawer({
-  drawerOpen,
-  mapInsightBusy,
-  mapUiPreferences,
-  mapViewMode,
-  onAskWholeMap,
-  onDrawerOpenChange,
-  onGenerateSuggestions,
-  onMapUiPreferencesChange,
-  onOpenExtractReview,
-  onUpdateActionItem,
-  shouldReviewDraft,
-  workspace,
-}: {
-  drawerOpen: boolean;
-  mapInsightBusy: boolean;
-  mapUiPreferences: MapUiPreferences;
-  mapViewMode: MapViewMode;
-  onAskWholeMap: (questionType?: string) => void;
-  onDrawerOpenChange: (open: boolean) => void;
-  onGenerateSuggestions: () => void;
-  onMapUiPreferencesChange: (
-    patch: Partial<MapUiPreferences>,
-    options?: { notify?: boolean },
-  ) => void;
-  onOpenExtractReview: () => void;
-  onUpdateActionItem: (actionItem: ActionItemRow, draft: ActionItemUpdateDraft) => void;
-  shouldReviewDraft: boolean;
-  workspace: ProjectWorkspace;
-}) {
-  const [draftHeight, setDraftHeight] = useState(
-    clampDrawerHeight(mapUiPreferences.bottomDrawerHeight),
-  );
-  const [expandedCommentIds, setExpandedCommentIds] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const dragRef = useRef<{
-    pointerId: number;
-    startY: number;
-    startHeight: number;
-  } | null>(null);
-
-  const aiQuestions = useMemo(() => {
-    const rows = workspace.actionItems.filter(
-      (actionItem) => actionItem.sourceType === "ai_question",
-    );
-    const filtered = mapUiPreferences.showOpenQuestionsOnly
-      ? rows.filter((actionItem) => actionItem.status === "open")
-      : rows;
-    return [...filtered].sort((left, right) => {
-      if (mapUiPreferences.drawerSort === "priority") {
-        return (
-          priorityRank(left.priority) - priorityRank(right.priority) ||
-          sortByDateDesc(left.createdAt, right.createdAt)
-        );
-      }
-      if (mapUiPreferences.drawerSort === "newest") {
-        return sortByDateDesc(left.createdAt, right.createdAt);
-      }
-      return (
-        (left.status === "open" ? 0 : 1) - (right.status === "open" ? 0 : 1) ||
-        priorityRank(left.priority) - priorityRank(right.priority) ||
-        sortByDateDesc(left.createdAt, right.createdAt)
-      );
-    });
-  }, [
-    mapUiPreferences.drawerSort,
-    mapUiPreferences.showOpenQuestionsOnly,
-    workspace.actionItems,
-  ]);
-
-  const strongEdgeCount = workspace.edges.filter(
-    (edge) => edge.strength === "strong",
-  ).length;
-  const bottleneckCount = workspace.aiComments.filter(
-    (comment) => comment.commentType === "bottleneck",
-  ).length;
-
-  function persistHeight(height: number) {
-    const nextHeight = clampDrawerHeight(height);
-    setDraftHeight(nextHeight);
-    onMapUiPreferencesChange({
-      bottomDrawerHeight: nextHeight,
-      bottomDrawerOpen: true,
-    });
-  }
-
-  function toggleExpandedHeight() {
-    const expanded = expandedDrawerHeight();
-    persistHeight(draftHeight >= expanded - 12 ? DRAWER_STANDARD_HEIGHT : expanded);
-    onDrawerOpenChange(true);
-  }
-
-  function handlePointerDown(event: React.PointerEvent<HTMLButtonElement>) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    dragRef.current = {
-      pointerId: event.pointerId,
-      startY: event.clientY,
-      startHeight: draftHeight,
-    };
-  }
-
-  function handlePointerMove(event: React.PointerEvent<HTMLButtonElement>) {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const nextHeight = clampDrawerHeight(
-      drag.startHeight + drag.startY - event.clientY,
-    );
-    setDraftHeight(nextHeight);
-    if (!drawerOpen) onDrawerOpenChange(true);
-  }
-
-  function handlePointerEnd(event: React.PointerEvent<HTMLButtonElement>) {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    dragRef.current = null;
-    persistHeight(draftHeight);
-  }
-
-  return (
-    <div
-      className={`bottom-drawer ${drawerOpen ? "bottom-drawer-open" : ""}`}
-      style={{ height: drawerOpen ? draftHeight : DRAWER_MIN_HEIGHT }}
-    >
-      <button
-        aria-label="AIコメント領域の高さを調整"
-        className="drawer-resize-handle"
-        onDoubleClick={toggleExpandedHeight}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerEnd}
-        type="button"
-      >
-        <span />
-      </button>
-      <div className="drawer-summary">
-        <button
-          aria-expanded={drawerOpen}
-          className="drawer-summary-main"
-          onClick={() => onDrawerOpenChange(!drawerOpen)}
-          type="button"
-        >
-          <MessageSquareText size={15} aria-hidden="true" />
-          <span>AIコメント・確認質問</span>
-          {drawerOpen ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
-          <StatusChip>{workspace.aiComments.length}件 コメント</StatusChip>
-          <StatusChip>{aiQuestions.length}件 質問</StatusChip>
-          <StatusChip>強い導線 {strongEdgeCount}</StatusChip>
-          <StatusChip>詰まり {bottleneckCount}</StatusChip>
-        </button>
-        <div className="drawer-summary-actions">
-          <label className="compact-toggle">
-            <input
-              checked={mapUiPreferences.showOpenQuestionsOnly}
-              onChange={(event) =>
-                onMapUiPreferencesChange({
-                  showOpenQuestionsOnly: event.target.checked,
-                })
-              }
-              type="checkbox"
-            />
-            未確認のみ
-          </label>
-          <select
-            aria-label="確認質問の並び替え"
-            value={mapUiPreferences.drawerSort}
-            onChange={(event) =>
-              onMapUiPreferencesChange({
-                drawerSort: event.target.value as MapUiPreferences["drawerSort"],
-              })
-            }
-          >
-            <option value="relevance">関連度順</option>
-            <option value="priority">優先度順</option>
-            <option value="newest">新しい順</option>
-          </select>
-          <button
-            className="ghost-button"
-            onClick={toggleExpandedHeight}
-            title="拡大/標準"
-            type="button"
-          >
-            {draftHeight >= expandedDrawerHeight() - 12 ? (
-              <Minimize2 size={14} aria-hidden="true" />
-            ) : (
-              <Maximize2 size={14} aria-hidden="true" />
-            )}
-          </button>
-        </div>
-      </div>
-      {drawerOpen ? (
-        <div className="drawer-content">
-          <section className="drawer-column">
-            <div className="drawer-column-heading">
-              <span>AIコメント</span>
-              <button
-                className="ghost-button"
-                onClick={onGenerateSuggestions}
-                type="button"
-              >
-                <Sparkles size={14} aria-hidden="true" />
-                {mapViewMode === "business_impact"
-                  ? "インパクト評価生成"
-                  : "新しいコメントを生成"}
-              </button>
-            </div>
-            {shouldReviewDraft ? (
-              <div className="draft-review-banner">
-                <TriangleAlert size={15} aria-hidden="true" />
-                <div>
-                  <strong>初回生成ドラフトです</strong>
-                  <span>
-                    推定や要確認を含みます。施策判断の前に抽出カードの確度を確認してください。
-                  </span>
-                </div>
-                <button
-                  className="ghost-button"
-                  onClick={onOpenExtractReview}
-                  type="button"
-                >
-                  抽出カードを確認
-                </button>
-              </div>
-            ) : null}
-            <MapInsightActions
-              busy={mapInsightBusy}
-              error={null}
-              onAsk={onAskWholeMap}
-              targetLabel="マップ全体"
-            />
-            <AiCommentList
-              comments={workspace.aiComments}
-              expandedCommentIds={expandedCommentIds}
-              onToggleComment={(commentId) =>
-                setExpandedCommentIds((current) => {
-                  const next = new Set(current);
-                  if (next.has(commentId)) next.delete(commentId);
-                  else next.add(commentId);
-                  return next;
-                })
-              }
-            />
-          </section>
-          <section className="drawer-column">
-            <div className="drawer-column-heading">
-              <span>確認質問</span>
-              <StatusChip>
-                {aiQuestions.filter((item) => item.status === "open").length}件 未確認
-              </StatusChip>
-            </div>
-            <AiQuestionList
-              actionItems={aiQuestions}
-              onUpdateActionItem={onUpdateActionItem}
-            />
-          </section>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function AiCommentList({
-  comments,
-  expandedCommentIds,
-  onToggleComment,
-}: {
-  comments: AiCommentRow[];
-  expandedCommentIds: Set<string>;
-  onToggleComment: (commentId: string) => void;
-}) {
-  if (comments.length === 0) {
-    return <div className="empty-panel">AIコメントはまだありません。</div>;
-  }
-
-  return (
-    <div className="drawer-list">
-      {comments.map((comment) => {
-        const expanded = expandedCommentIds.has(comment.id);
-        return (
-          <article className="drawer-comment-card" key={comment.id}>
-            <div>
-              <strong>{comment.title}</strong>
-              <small>
-                {comment.commentType} / {formatTime(comment.createdAt)}
-              </small>
-            </div>
-            <p>{expanded ? comment.body : shortText(comment.body, 150)}</p>
-            <button
-              className="ghost-button"
-              onClick={() => onToggleComment(comment.id)}
-              type="button"
-            >
-              {expanded ? "閉じる" : "詳細を開く"}
-            </button>
-          </article>
-        );
-      })}
-    </div>
-  );
-}
-
-function AiQuestionList({
-  actionItems,
-  onUpdateActionItem,
-}: {
-  actionItems: ActionItemRow[];
-  onUpdateActionItem: (actionItem: ActionItemRow, draft: ActionItemUpdateDraft) => void;
-}) {
-  if (actionItems.length === 0) {
-    return <div className="empty-panel">確認質問はまだありません。</div>;
-  }
-
-  function updateStatus(actionItem: ActionItemRow, status: ActionItemRow["status"]) {
-    onUpdateActionItem(actionItem, {
-      title: actionItem.title,
-      body: actionItem.body,
-      priority: actionItem.priority,
-      memo: actionItem.memo ?? "",
-      status,
-    });
-  }
-
-  return (
-    <div className="drawer-question-list">
-      {actionItems.map((actionItem) => (
-        <article
-          className={`drawer-question-row drawer-question-${actionItem.status}`}
-          key={actionItem.id}
-        >
-          <button
-            aria-label={`${actionItem.title}を完了`}
-            className="question-check"
-            onClick={() =>
-              updateStatus(actionItem, actionItem.status === "done" ? "open" : "done")
-            }
-            type="button"
-          >
-            {actionItem.status === "done" ? (
-              <Check size={14} aria-hidden="true" />
-            ) : null}
-          </button>
-          <div className="drawer-question-main">
-            <strong>{actionItem.body}</strong>
-            <small>{actionItem.title}</small>
-          </div>
-          <span className={`priority-pill priority-${actionItem.priority}`}>
-            {labelFor(priorityOptions, actionItem.priority)}
-          </span>
-          <span className="status-chip">
-            {labelFor(actionStatusOptions, actionItem.status)}
-          </span>
-          <small>{formatTime(actionItem.createdAt)}</small>
-          <button
-            className="ghost-button"
-            onClick={() =>
-              updateStatus(
-                actionItem,
-                actionItem.status === "dismissed" ? "open" : "dismissed",
-              )
-            }
-            type="button"
-          >
-            {actionItem.status === "dismissed" ? "戻す" : "見送り"}
-          </button>
-        </article>
-      ))}
-    </div>
   );
 }
 
