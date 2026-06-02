@@ -1305,8 +1305,11 @@ button:disabled {
   font-weight: 750;
 }
 
-.drawer-title-button {
-  display: inline-flex;
+.drawer-summary-main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
   align-items: center;
   gap: 7px;
   border: 0;
@@ -1317,8 +1320,17 @@ button:disabled {
   cursor: pointer;
 }
 
+.drawer-summary-main:hover {
+  color: var(--primary-dark);
+}
+
+.drawer-summary-main .status-chip {
+  flex-shrink: 0;
+}
+
 .drawer-summary-actions {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 8px;
   margin-left: auto;

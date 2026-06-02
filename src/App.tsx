@@ -4289,18 +4289,19 @@ function MapAiDrawer({
       </button>
       <div className="drawer-summary">
         <button
-          className="drawer-title-button"
+          aria-expanded={drawerOpen}
+          className="drawer-summary-main"
           onClick={() => onDrawerOpenChange(!drawerOpen)}
           type="button"
         >
           <MessageSquareText size={15} aria-hidden="true" />
           <span>AIコメント・確認質問</span>
           {drawerOpen ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+          <StatusChip>{workspace.aiComments.length}件 コメント</StatusChip>
+          <StatusChip>{aiQuestions.length}件 質問</StatusChip>
+          <StatusChip>強い導線 {strongEdgeCount}</StatusChip>
+          <StatusChip>詰まり {bottleneckCount}</StatusChip>
         </button>
-        <StatusChip>{workspace.aiComments.length}件 コメント</StatusChip>
-        <StatusChip>{aiQuestions.length}件 質問</StatusChip>
-        <StatusChip>強い導線 {strongEdgeCount}</StatusChip>
-        <StatusChip>詰まり {bottleneckCount}</StatusChip>
         <div className="drawer-summary-actions">
           <label className="compact-toggle">
             <input
