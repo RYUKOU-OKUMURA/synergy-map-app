@@ -41,6 +41,10 @@ pub struct MapUiPreferences {
     pub context_panel_tab: String,
     #[serde(default)]
     pub ai_lens_open: bool,
+    #[serde(default = "default_sidebar_mode")]
+    pub sidebar_mode: String,
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: i64,
 }
 
 fn default_primary_provider() -> AiProviderKind {
@@ -79,6 +83,14 @@ fn default_context_panel_tab() -> String {
     "materials".to_string()
 }
 
+fn default_sidebar_mode() -> String {
+    "auto".to_string()
+}
+
+fn default_sidebar_width() -> i64 {
+    220
+}
+
 impl Default for MapUiPreferences {
     fn default() -> Self {
         Self {
@@ -91,6 +103,8 @@ impl Default for MapUiPreferences {
             context_panel_open: default_context_panel_open(),
             context_panel_tab: default_context_panel_tab(),
             ai_lens_open: false,
+            sidebar_mode: default_sidebar_mode(),
+            sidebar_width: default_sidebar_width(),
         }
     }
 }
@@ -150,6 +164,8 @@ mod tests {
         assert_eq!(settings.map_ui_preferences.bottom_drawer_height, 260);
         assert!(settings.map_ui_preferences.bottom_drawer_open);
         assert!(settings.map_ui_preferences.show_influence);
+        assert_eq!(settings.map_ui_preferences.sidebar_mode, "auto");
+        assert_eq!(settings.map_ui_preferences.sidebar_width, 220);
     }
 
     #[test]

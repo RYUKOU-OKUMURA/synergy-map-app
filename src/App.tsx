@@ -22,6 +22,8 @@ import {
   Map as MapIcon,
   MessageSquareText,
   MousePointer2,
+  PanelLeftClose,
+  PanelLeftOpen,
   PencilRuler,
   Plus,
   Save,
@@ -151,6 +153,11 @@ const aiLensCategoryLabels: Record<AiLensItem["category"], string> = {
   profit_blind_spot: "利益化の盲点",
 };
 
+const SIDEBAR_COLLAPSED_WIDTH = 68;
+const SIDEBAR_DEFAULT_WIDTH = 220;
+const SIDEBAR_MIN_WIDTH = 200;
+const SIDEBAR_MAX_WIDTH = 300;
+
 const contextPanelTabs: Array<{
   id: MapUiPreferences["contextPanelTab"];
   label: string;
@@ -160,6 +167,14 @@ const contextPanelTabs: Array<{
   { id: "actions", label: "一手" },
   { id: "records", label: "記録" },
 ];
+
+function clampSidebarWidth(width: number | null | undefined) {
+  if (!Number.isFinite(width)) return SIDEBAR_DEFAULT_WIDTH;
+  return Math.min(
+    SIDEBAR_MAX_WIDTH,
+    Math.max(SIDEBAR_MIN_WIDTH, Math.round(width ?? SIDEBAR_DEFAULT_WIDTH)),
+  );
+}
 
 type MapNoteDraft = {
   title: string;
@@ -185,6 +200,8 @@ const defaultAiSettings = (): AiSettings => ({
     contextPanelOpen: false,
     contextPanelTab: "materials",
     aiLensOpen: false,
+    sidebarMode: "auto",
+    sidebarWidth: SIDEBAR_DEFAULT_WIDTH,
   },
 });
 
@@ -346,6 +363,7 @@ function App() {
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
   const [isMapEditMode, setIsMapEditMode] = useState(false);
+  const [sidebarWidthDraft, setSidebarWidthDraft] = useState<number | null>(null);
   const [flowAnimationUserEnabled, setFlowAnimationUserEnabled] = useState(true);
   const [layoutSaveStatus, setLayoutSaveStatus] = useState<
     "idle" | "saving" | "saved" | "error"
@@ -440,6 +458,13 @@ function App() {
   const visibleLayoutSaveStatus =
     layoutSaveScope === currentLayoutScope ? layoutSaveStatus : "idle";
   const primaryActionLabel = getPrimaryActionLabel(workspace);
+  const savedSidebarWidth = clampSidebarWidth(aiSettings.mapUiPreferences.sidebarWidth);
+  const sidebarMode = aiSettings.mapUiPreferences.sidebarMode ?? "auto";
+  const sidebarCollapsed =
+    sidebarMode === "collapsed" || (sidebarMode === "auto" && view === "map");
+  const sidebarWidth = sidebarCollapsed
+    ? SIDEBAR_COLLAPSED_WIDTH
+    : (sidebarWidthDraft ?? savedSidebarWidth);
   const handleSelectMapElement = useCallback((selection: SelectedMapElement) => {
     setSelectedMapElement((current) =>
       isSameSelectedMapElement(current, selection) ? current : selection,
@@ -884,6 +909,20 @@ function App() {
     } catch (caughtError) {
       setError(String(caughtError));
     }
+  }
+
+  function handleSidebarModeChange(mode: MapUiPreferences["sidebarMode"]) {
+    setSidebarWidthDraft(null);
+    void handleMapUiPreferencesChange({ sidebarMode: mode });
+  }
+
+  function handleSidebarWidthCommit(width: number) {
+    const nextWidth = clampSidebarWidth(width);
+    setSidebarWidthDraft(null);
+    void handleMapUiPreferencesChange({
+      sidebarMode: "expanded",
+      sidebarWidth: nextWidth,
+    });
   }
 
   async function handleSelectDefaultExportDir() {
@@ -1606,12 +1645,20 @@ function App() {
   }, [activeProjectId, isTauriRuntime]);
 
   return (
-    <main className="app-root">
+    <main
+      className={`app-root ${sidebarCollapsed ? "app-root-sidebar-collapsed" : ""}`}
+      style={{ "--sidebar-width": `${sidebarWidth}px` } as React.CSSProperties}
+    >
       <AppSidebar
         activeProject={activeProject}
+        collapsed={sidebarCollapsed}
         onOpenProjects={() => handleSelectView("projects")}
+        onSidebarModeChange={handleSidebarModeChange}
+        onSidebarWidthCommit={handleSidebarWidthCommit}
+        onSidebarWidthPreview={setSidebarWidthDraft}
         onSelectView={handleSelectView}
         onStartNewMap={handleStartNewMap}
+        width={sidebarWidth}
         view={view}
       />
 
@@ -1931,44 +1978,106 @@ function buildDraftAiLensItems(workspace: ProjectWorkspace): AiLensItem[] {
 
 function AppSidebar({
   activeProject,
+  collapsed,
   onOpenProjects,
+  onSidebarModeChange,
+  onSidebarWidthCommit,
+  onSidebarWidthPreview,
   onSelectView,
   onStartNewMap,
+  width,
   view,
 }: {
   activeProject: Project | null;
+  collapsed: boolean;
   onOpenProjects: () => void;
+  onSidebarModeChange: (mode: MapUiPreferences["sidebarMode"]) => void;
+  onSidebarWidthCommit: (width: number) => void;
+  onSidebarWidthPreview: (width: number | null) => void;
   onSelectView: (view: ViewId) => void;
   onStartNewMap: () => void;
+  width: number;
   view: ViewId;
 }) {
+  const toggleLabel = collapsed ? "サイドバーを開く" : "サイドバーを閉じる";
+  const ToggleIcon = collapsed ? PanelLeftOpen : PanelLeftClose;
+
+  function handleResizePointerDown(event: React.PointerEvent<HTMLButtonElement>) {
+    if (collapsed) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = width;
+
+    function handlePointerMove(pointerEvent: PointerEvent) {
+      onSidebarWidthPreview(
+        clampSidebarWidth(startWidth + pointerEvent.clientX - startX),
+      );
+    }
+
+    function handlePointerUp(pointerEvent: PointerEvent) {
+      const nextWidth = clampSidebarWidth(startWidth + pointerEvent.clientX - startX);
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      onSidebarWidthCommit(nextWidth);
+    }
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+  }
+
   return (
-    <aside className="side-rail" aria-label="主要ナビゲーション">
+    <aside
+      className={`side-rail ${collapsed ? "side-rail-collapsed" : ""}`}
+      aria-label="主要ナビゲーション"
+    >
       <div className="sidebar-brand">
         <div className="brand-mark">
           <Layers3 size={19} aria-hidden="true" />
         </div>
-        <div>
+        <div className="sidebar-brand-copy">
           <strong>Synergy Map</strong>
           <span>売上マップ作成</span>
         </div>
+        <button
+          aria-label={toggleLabel}
+          className="sidebar-toggle-button"
+          onClick={() => onSidebarModeChange(collapsed ? "expanded" : "collapsed")}
+          title={toggleLabel}
+          type="button"
+        >
+          <ToggleIcon size={16} aria-hidden="true" />
+        </button>
       </div>
 
-      <button className="sidebar-create-button" onClick={onStartNewMap} type="button">
+      <button
+        aria-label="新しいマップを作る"
+        className="sidebar-create-button"
+        onClick={onStartNewMap}
+        title="新しいマップを作る"
+        type="button"
+      >
         <Plus size={16} aria-hidden="true" />
-        新しいマップを作る
+        <span className="sidebar-label">新しいマップを作る</span>
       </button>
 
       <section className="project-switcher">
         <span className="sidebar-section-label">現在のマップ</span>
         <div className="project-switcher-card">
-          <strong>{activeProject?.name ?? "マップが選択されていません"}</strong>
-          <small>
+          <strong className="sidebar-label">
+            {activeProject?.name ?? "マップが選択されていません"}
+          </strong>
+          <small className="sidebar-label">
             {activeProject?.clientName ?? "マップを選ぶか、新しく作成してください"}
           </small>
-          <button className="ghost-button" onClick={onOpenProjects} type="button">
+          <button
+            aria-label="マップを切り替え"
+            className="ghost-button"
+            onClick={onOpenProjects}
+            title="マップを切り替え"
+            type="button"
+          >
             <FolderOpen size={14} aria-hidden="true" />
-            マップを切り替え
+            <span className="sidebar-label">マップを切り替え</span>
           </button>
         </div>
       </section>
@@ -1979,15 +2088,17 @@ function AppSidebar({
           const Icon = item.icon;
           return (
             <button
+              aria-label={item.label}
               className={`sidebar-nav-item ${
                 view === item.id ? "sidebar-nav-item-active" : ""
               }`}
               key={item.id}
               onClick={() => onSelectView(item.id)}
+              title={item.label}
               type="button"
             >
               <Icon size={16} aria-hidden="true" />
-              <span>{item.label}</span>
+              <span className="sidebar-label">{item.label}</span>
             </button>
           );
         })}
@@ -2000,15 +2111,17 @@ function AppSidebar({
             const Icon = item.icon;
             return (
               <button
+                aria-label={item.label}
                 className={`sidebar-nav-item ${
                   view === item.id ? "sidebar-nav-item-active" : ""
                 } ${item.id === "today" ? "sidebar-nav-item-primary" : ""}`}
                 key={item.id}
                 onClick={() => onSelectView(item.id)}
+                title={item.label}
                 type="button"
               >
                 <Icon size={16} aria-hidden="true" />
-                <span>{item.label}</span>
+                <span className="sidebar-label">{item.label}</span>
               </button>
             );
           })}
@@ -2021,15 +2134,26 @@ function AppSidebar({
       )}
 
       <button
+        aria-label="設定"
         className={`sidebar-nav-item sidebar-settings ${
           view === "settings" ? "sidebar-nav-item-active" : ""
         }`}
         onClick={() => onSelectView("settings")}
+        title="設定"
         type="button"
       >
         <Settings size={16} aria-hidden="true" />
-        <span>設定</span>
+        <span className="sidebar-label">設定</span>
       </button>
+      {!collapsed ? (
+        <button
+          aria-label="サイドバーの幅を調整"
+          className="sidebar-resize-handle"
+          onPointerDown={handleResizePointerDown}
+          title="ドラッグしてサイドバー幅を調整"
+          type="button"
+        />
+      ) : null}
     </aside>
   );
 }

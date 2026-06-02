@@ -256,6 +256,8 @@ export type MapUiPreferences = {
   contextPanelOpen: boolean;
   contextPanelTab: "materials" | "checks" | "actions" | "records";
   aiLensOpen: boolean;
+  sidebarMode: "auto" | "expanded" | "collapsed";
+  sidebarWidth: number;
 };
 
 export type AiLensCategory =
