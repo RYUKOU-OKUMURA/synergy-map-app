@@ -541,8 +541,10 @@ function App() {
     try {
       const result = await action();
       await success?.(result);
+      return true;
     } catch (caughtError) {
       setError(String(caughtError));
+      return false;
     } finally {
       setIsBusy(false);
     }
@@ -1284,8 +1286,8 @@ function App() {
   }
 
   async function handleCreateInformationSource(draft: InformationSourceDraft) {
-    if (!activeProjectId || !isTauriRuntime) return;
-    await runAction(
+    if (!activeProjectId || !isTauriRuntime) return false;
+    return runAction(
       () =>
         invoke<ProjectWorkspace>("create_text_information_source", {
           projectId: activeProjectId,
@@ -3360,7 +3362,9 @@ function MapCreationFlow({
     snsUrls: [""],
     productInfo: "",
   });
-  const [sendApproved, setSendApproved] = useState(false);
+  const [approvedSendScopeSignature, setApprovedSendScopeSignature] = useState<
+    string | null
+  >(null);
 
   const purposeLabel = mapPurposeLabel(draft.purposeId);
   const sourceCount = workspace.sourceFiles.length;
@@ -3395,6 +3399,22 @@ function MapCreationFlow({
           `${sourceTypeLabel(source.fileType)}: ${source.fileName} (${source.chunkCount} chunks)`,
       ),
   ].filter(Boolean);
+  const sendScopeSignature = JSON.stringify({
+    companyName: draft.companyName.trim(),
+    purposeId: draft.purposeId,
+    purposeLabel: purposeLabel ?? "",
+    industry: draft.industry.trim(),
+    memo: draft.memo.trim(),
+    productInfo: draft.productInfo.trim(),
+    websiteUrls,
+    snsUrls,
+    sourceFiles: workspace.sourceFiles.map((source) => ({
+      id: source.id,
+      fileName: source.fileName,
+      chunkCount: source.chunkCount,
+    })),
+  });
+  const sendScopeApproved = approvedSendScopeSignature === sendScopeSignature;
 
   function updateDraft<K extends keyof OnboardingDraft>(
     key: K,
@@ -3405,7 +3425,6 @@ function MapCreationFlow({
 
   function updateUrlList(key: "websiteUrls" | "snsUrls", values: string[]) {
     setDraft((current) => ({ ...current, [key]: values }));
-    setSendApproved(false);
   }
 
   return (
@@ -3579,8 +3598,12 @@ function MapCreationFlow({
           </div>
           <label className="onboarding-send-confirm">
             <input
-              checked={sendApproved}
-              onChange={(event) => setSendApproved(event.target.checked)}
+              checked={sendScopeApproved}
+              onChange={(event) =>
+                setApprovedSendScopeSignature(
+                  event.target.checked ? sendScopeSignature : null,
+                )
+              }
               type="checkbox"
             />
             <span>
@@ -3598,7 +3621,7 @@ function MapCreationFlow({
           ) : null}
           <button
             className="primary-button creation-generate-button"
-            disabled={!canGenerate || !sendApproved || generationBusy}
+            disabled={!canGenerate || !sendScopeApproved || generationBusy}
             onClick={() => onCreateMap(draft)}
             type="button"
           >
@@ -3619,7 +3642,7 @@ function MapCreationFlow({
           ) : null}
           {!canGenerate ? (
             <small>事業名 / マップ名と目的を入力すると生成できます。</small>
-          ) : !sendApproved ? (
+          ) : !sendScopeApproved ? (
             <small>送信範囲を確認すると生成できます。</small>
           ) : (
             <small>AIが材料整理、マップ生成、施策と確認質問の作成まで進めます。</small>
@@ -4286,7 +4309,7 @@ function SourcesView({
   canSaveTextSource: boolean;
   generationBusy: boolean;
   onGenerateMap: () => void;
-  onCreateInformationSource: (draft: InformationSourceDraft) => void;
+  onCreateInformationSource: (draft: InformationSourceDraft) => Promise<boolean>;
   onDeleteSource: (source: SourceFileRow) => void;
   onOpenExtractReview: () => void;
   onPickFiles: () => void;
@@ -4298,6 +4321,7 @@ function SourcesView({
     body: "",
     url: "",
   });
+  const [isSourceSaving, setIsSourceSaving] = useState(false);
   const selectedOption =
     informationSourceOptions.find((option) => option.id === draft.sourceKind) ??
     informationSourceOptions[0];
@@ -4305,6 +4329,7 @@ function SourcesView({
   const canSave =
     canSaveTextSource &&
     (needsUrl ? draft.url.trim().length > 0 : draft.body.trim().length > 0);
+  const canSubmit = canSave && !isSourceSaving;
 
   function updateDraft<K extends keyof InformationSourceDraft>(
     key: K,
@@ -4313,16 +4338,23 @@ function SourcesView({
     setDraft((current) => ({ ...current, [key]: value }));
   }
 
-  function submitInformationSource(event: React.FormEvent<HTMLFormElement>) {
+  async function submitInformationSource(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canSave) return;
-    onCreateInformationSource(draft);
-    setDraft({
-      sourceKind: draft.sourceKind,
-      title: "",
-      body: "",
-      url: "",
-    });
+    if (!canSubmit) return;
+    setIsSourceSaving(true);
+    try {
+      const saved = await onCreateInformationSource(draft);
+      if (saved) {
+        setDraft({
+          sourceKind: draft.sourceKind,
+          title: "",
+          body: "",
+          url: "",
+        });
+      }
+    } finally {
+      setIsSourceSaving(false);
+    }
   }
 
   return (
@@ -4352,6 +4384,7 @@ function SourcesView({
             return (
               <button
                 className={draft.sourceKind === option.id ? "active" : ""}
+                disabled={isSourceSaving}
                 key={option.id}
                 onClick={() => updateDraft("sourceKind", option.id)}
                 type="button"
@@ -4365,6 +4398,7 @@ function SourcesView({
         <FormGrid>
           <Field label="タイトル">
             <input
+              disabled={isSourceSaving}
               onChange={(event) => updateDraft("title", event.target.value)}
               placeholder={selectedOption.label}
               value={draft.title}
@@ -4373,6 +4407,7 @@ function SourcesView({
           {needsUrl ? (
             <Field label="URL">
               <input
+                disabled={isSourceSaving}
                 onChange={(event) => updateDraft("url", event.target.value)}
                 placeholder={
                   draft.sourceKind === "sns_url"
@@ -4386,6 +4421,7 @@ function SourcesView({
         </FormGrid>
         <Field label={needsUrl ? "補足メモ" : "内容"}>
           <textarea
+            disabled={isSourceSaving}
             onChange={(event) => updateDraft("body", event.target.value)}
             placeholder={
               needsUrl
@@ -4396,9 +4432,9 @@ function SourcesView({
           />
         </Field>
         <div className="source-add-actions">
-          <button className="primary-button" disabled={!canSave} type="submit">
+          <button className="primary-button" disabled={!canSubmit} type="submit">
             <Plus size={15} aria-hidden="true" />
-            情報ソースに追加
+            {isSourceSaving ? "保存中" : "情報ソースに追加"}
           </button>
           <small>
             URLやSNSは本文を自動取得せず、入力内容をローカルの材料として保存します。

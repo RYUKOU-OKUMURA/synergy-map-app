@@ -420,6 +420,29 @@ fn provider_metadata(result: &StructuredAiResult) -> (Option<String>, u64) {
     )
 }
 
+fn ai_lens_insight_request_summary(
+    fallback_used: bool,
+    prompt_hash: &str,
+    ai_lens_item: &AiLensItemRow,
+    question: &str,
+    provider_used: Option<String>,
+    duration_ms: u64,
+) -> Value {
+    json!({
+        "mode": "ai_lens_question",
+        "fallbackUsed": fallback_used,
+        "promptHash": prompt_hash,
+        "aiLensItemId": ai_lens_item.id.as_str(),
+        "targetKind": ai_lens_item.target_kind.as_str(),
+        "targetId": ai_lens_item.target_id.as_deref(),
+        "category": ai_lens_item.category.as_str(),
+        "questionHash": hash_text(question),
+        "questionLength": question.chars().count(),
+        "providerUsed": provider_used,
+        "durationMs": duration_ms,
+    })
+}
+
 fn read_text_preview(path: &str, limit: usize) -> String {
     fs::read_to_string(path)
         .map(|content| truncate_chars(&content.replace('\n', " "), limit))
@@ -2198,18 +2221,14 @@ pub fn ask_ai_lens_insight(
         "MapInsightOutput",
         &model,
         pending_ai_run_status(status),
-        json!({
-            "mode": "ai_lens_question",
-            "fallbackUsed": fallback_used,
-            "promptHash": prompt_hash,
-            "aiLensItemId": ai_lens_item.id.as_str(),
-            "targetKind": ai_lens_item.target_kind.as_str(),
-            "targetId": ai_lens_item.target_id.as_deref(),
-            "category": ai_lens_item.category.as_str(),
-            "questionText": question,
-            "providerUsed": provider_used,
-            "durationMs": duration_ms,
-        }),
+        ai_lens_insight_request_summary(
+            fallback_used,
+            &prompt_hash,
+            ai_lens_item,
+            question,
+            provider_used,
+            duration_ms,
+        ),
         &validated_output_json,
         error,
     )?;
@@ -7319,6 +7338,42 @@ mod tests {
         assert!(comments[0].body.contains("なぜ重要ですか？"));
 
         let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn ai_lens_insight_request_summary_hashes_question_text() {
+        let question = "顧客名と具体的な売上メモを含む質問です。";
+        let item = AiLensItemRow {
+            id: "lens-1".to_string(),
+            project_id: "project-1".to_string(),
+            ai_run_id: Some("run-1".to_string()),
+            category: "sales_flow_defect".to_string(),
+            target_kind: "map".to_string(),
+            target_id: None,
+            title: "流れ全体".to_string(),
+            body: "確認余地があります。".to_string(),
+            confidence_status: "estimated".to_string(),
+            evidence: "マップ全体の確認です。".to_string(),
+            follow_up_question: Some("どこで止まりますか？".to_string()),
+            sort_order: 0,
+            created_at: now_rfc3339().expect("time should format"),
+        };
+
+        let summary = ai_lens_insight_request_summary(
+            false,
+            "prompt-hash",
+            &item,
+            question,
+            Some("codex".to_string()),
+            123,
+        );
+        let summary_text =
+            serde_json::to_string(&summary).expect("request summary should serialize");
+
+        assert!(summary.get("questionText").is_none());
+        assert!(!summary_text.contains(question));
+        assert_eq!(summary["questionHash"], hash_text(question));
+        assert_eq!(summary["questionLength"], question.chars().count());
     }
 
     #[test]
