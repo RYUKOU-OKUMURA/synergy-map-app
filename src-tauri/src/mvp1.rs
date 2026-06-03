@@ -14,10 +14,11 @@ use uuid::Uuid;
 
 use crate::ai_provider::StructuredAiResult;
 use crate::ai_schema::{
-    ai_analysis_json_schema, extracted_items_json_schema, map_draft_json_schema,
-    map_insight_json_schema, suggestion_cards_json_schema, validate_ai_analysis_json,
-    validate_extracted_items_json, validate_map_draft_json, validate_map_insight_json,
-    validate_suggestion_cards_json, SCHEMA_VERSION,
+    ai_analysis_json_schema, ai_lens_json_schema, extracted_items_json_schema,
+    map_draft_json_schema, map_insight_json_schema, suggestion_cards_json_schema,
+    validate_ai_analysis_json, validate_ai_lens_json, validate_extracted_items_json,
+    validate_map_draft_json, validate_map_insight_json, validate_suggestion_cards_json,
+    SCHEMA_VERSION,
 };
 use crate::app_settings::load_ai_settings;
 use crate::DbState;
@@ -178,6 +179,24 @@ pub struct AiCommentRow {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AiLensItemRow {
+    id: String,
+    project_id: String,
+    ai_run_id: Option<String>,
+    category: String,
+    target_kind: String,
+    target_id: Option<String>,
+    title: String,
+    body: String,
+    confidence_status: String,
+    evidence: String,
+    follow_up_question: Option<String>,
+    sort_order: i64,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AiRunRow {
     id: String,
     project_id: String,
@@ -272,6 +291,7 @@ pub struct ProjectWorkspace {
     edges: Vec<MapEdgeRow>,
     suggestions: Vec<SuggestionRow>,
     ai_comments: Vec<AiCommentRow>,
+    ai_lens_items: Vec<AiLensItemRow>,
     ai_runs: Vec<AiRunRow>,
     export_jobs: Vec<ExportJobRow>,
     versions: Vec<VersionRow>,
@@ -1738,14 +1758,19 @@ pub fn generate_suggestions_from_map(
         ai_analysis_json_schema(),
     );
     let suggestions_result = try_structured_ai(
-        app,
+        app.clone(),
         &state.db_path,
         &suggestions_prompt,
         suggestion_cards_json_schema(),
     );
+    let ai_lens_prompt = ai_lens_prompt(&workspace, &purpose_context);
+    let ai_lens_prompt_hash = hash_text(&ai_lens_prompt);
+    let ai_lens_result =
+        try_structured_ai(app, &state.db_path, &ai_lens_prompt, ai_lens_json_schema());
     let (analysis_provider_used, analysis_duration_ms) = provider_metadata(&analysis_result);
     let (suggestions_provider_used, suggestions_duration_ms) =
         provider_metadata(&suggestions_result);
+    let (ai_lens_provider_used, ai_lens_duration_ms) = provider_metadata(&ai_lens_result);
     let (analysis_json, analysis_model, analysis_status, analysis_error, analysis_fallback_used) =
         match analysis_result.response_json {
             Some(value) => (value, analysis_result.model_label, "completed", None, false),
@@ -1779,8 +1804,21 @@ pub fn generate_suggestions_from_map(
             true,
         ),
     };
+    let (ai_lens_json, ai_lens_model, ai_lens_status, ai_lens_error, ai_lens_fallback_used) =
+        match ai_lens_result.response_json {
+            Some(value) => (value, ai_lens_result.model_label, "completed", None, false),
+            None => (
+                build_ai_lens_output(&workspace),
+                LOCAL_MODEL.to_string(),
+                "fallback_completed",
+                Some(ai_lens_result.errors.join("; ")),
+                true,
+            ),
+        };
     let analysis = validate_ai_analysis_json(&analysis_json)?;
     let suggestions = validate_suggestion_cards_json(&suggestions_json)?;
+    let ai_lens = validate_ai_lens_json(&ai_lens_json)?;
+    validate_ai_lens_targets(&workspace, &ai_lens)?;
     let analysis_run_id = save_ai_run(
         &connection,
         &app_data_dir,
@@ -1826,6 +1864,28 @@ pub fn generate_suggestions_from_map(
         &suggestions_json,
         suggestions_error,
     )?;
+    let ai_lens_run_id = save_ai_run(
+        &connection,
+        &app_data_dir,
+        &project_id,
+        "generate_ai_lens",
+        "AiLensOutput",
+        &ai_lens_model,
+        pending_ai_run_status(ai_lens_status),
+        json!({
+            "mode": "map_ai_lens",
+            "fallbackUsed": ai_lens_fallback_used,
+            "promptHash": ai_lens_prompt_hash,
+            "nodeCount": active_nodes.len(),
+            "edgeCount": active_edges.len(),
+            "purpose": purpose_context.request_summary(),
+            "generationMode": purpose_context.generation_mode(),
+            "providerUsed": ai_lens_provider_used,
+            "durationMs": ai_lens_duration_ms,
+        }),
+        &ai_lens_json,
+        ai_lens_error,
+    )?;
 
     let transaction = connection
         .transaction()
@@ -1853,20 +1913,115 @@ pub fn generate_suggestions_from_map(
         &suggestions,
         &workspace,
     )?;
+    transaction
+        .execute(
+            "DELETE FROM ai_lens_items WHERE project_id = ?1",
+            [project_id.as_str()],
+        )
+        .map_err(|error| error.to_string())?;
+    insert_ai_lens_items(&transaction, &project_id, &ai_lens_run_id, &ai_lens)?;
     finalize_ai_run_in_transaction(&transaction, &analysis_run_id, analysis_status)?;
     finalize_ai_run_in_transaction(&transaction, &suggestions_run_id, suggestions_status)?;
+    finalize_ai_run_in_transaction(&transaction, &ai_lens_run_id, ai_lens_status)?;
     record_snapshot_in_transaction(&transaction, &project_id, "ai_generate_suggestions")?;
     transaction.commit().map_err(|error| error.to_string())?;
 
-    let message = if analysis_fallback_used || suggestions_fallback_used {
+    let message = if analysis_fallback_used || suggestions_fallback_used || ai_lens_fallback_used {
         "AI実行に失敗した一部出力をローカルドラフトで補完しました。".to_string()
     } else {
-        "AIコメントと次に試す一手を生成しました。".to_string()
+        "AIコメント、次に試す一手、AI視点を生成しました。".to_string()
     };
 
     Ok(MvpRunResult {
         ok: true,
         ai_run_id: Some(suggestions_run_id),
+        message,
+        workspace: load_workspace(&connection, &project_id)?,
+    })
+}
+
+#[tauri::command]
+pub fn generate_ai_lens_from_map(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    project_id: String,
+) -> Result<MvpRunResult, String> {
+    let app_data_dir = app_data_dir_from_db(&state.db_path)?.to_path_buf();
+    let mut connection = open_connection(&state.db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+    let workspace = load_workspace(&connection, &project_id)?;
+    let (active_nodes, active_edges) = active_map_scope(&workspace);
+
+    if active_nodes.is_empty() {
+        return Err("売上マップがありません。先にマップを生成してください。".to_string());
+    }
+
+    let purpose_context = prompt_purpose_context_from_workspace(&workspace);
+    let prompt = ai_lens_prompt(&workspace, &purpose_context);
+    let prompt_hash = hash_text(&prompt);
+    let ai_result = try_structured_ai(app, &state.db_path, &prompt, ai_lens_json_schema());
+    let (provider_used, duration_ms) = provider_metadata(&ai_result);
+    let (output_json, model, status, error, fallback_used, message) = match ai_result.response_json
+    {
+        Some(value) => (
+            value,
+            ai_result.model_label,
+            "completed",
+            None,
+            false,
+            "AI視点を生成しました。".to_string(),
+        ),
+        None => (
+            build_ai_lens_output(&workspace),
+            LOCAL_MODEL.to_string(),
+            "fallback_completed",
+            Some(ai_result.errors.join("; ")),
+            true,
+            "AI実行に失敗したため、ローカルドラフトでAI視点を生成しました。".to_string(),
+        ),
+    };
+    let output = validate_ai_lens_json(&output_json)?;
+    validate_ai_lens_targets(&workspace, &output)?;
+    let ai_run_id = save_ai_run(
+        &connection,
+        &app_data_dir,
+        &project_id,
+        "generate_ai_lens",
+        "AiLensOutput",
+        &model,
+        pending_ai_run_status(status),
+        json!({
+            "mode": "map_ai_lens",
+            "fallbackUsed": fallback_used,
+            "promptHash": prompt_hash,
+            "nodeCount": active_nodes.len(),
+            "edgeCount": active_edges.len(),
+            "purpose": purpose_context.request_summary(),
+            "generationMode": purpose_context.generation_mode(),
+            "providerUsed": provider_used,
+            "durationMs": duration_ms,
+        }),
+        &output_json,
+        error,
+    )?;
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM ai_lens_items WHERE project_id = ?1",
+            [project_id.as_str()],
+        )
+        .map_err(|error| error.to_string())?;
+    insert_ai_lens_items(&transaction, &project_id, &ai_run_id, &output)?;
+    finalize_ai_run_in_transaction(&transaction, &ai_run_id, status)?;
+    record_snapshot_in_transaction(&transaction, &project_id, "ai_generate_lens")?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    Ok(MvpRunResult {
+        ok: true,
+        ai_run_id: Some(ai_run_id),
         message,
         workspace: load_workspace(&connection, &project_id)?,
     })
@@ -1977,6 +2132,101 @@ pub fn ask_map_insight(
     )?;
     finalize_ai_run_in_transaction(&transaction, &ai_run_id, status)?;
     record_snapshot_in_transaction(&transaction, &project_id, "ai_map_insight")?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    Ok(MvpRunResult {
+        ok: true,
+        ai_run_id: Some(ai_run_id),
+        message,
+        workspace: load_workspace(&connection, &project_id)?,
+    })
+}
+
+#[tauri::command]
+pub fn ask_ai_lens_insight(
+    app: AppHandle,
+    state: State<'_, DbState>,
+    project_id: String,
+    ai_lens_item_id: String,
+    question_text: String,
+) -> Result<MvpRunResult, String> {
+    let app_data_dir = app_data_dir_from_db(&state.db_path)?.to_path_buf();
+    let mut connection = open_connection(&state.db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+    let question = question_text.trim();
+    ensure_non_empty_input("question_text", question)?;
+    if question.chars().count() > 500 {
+        return Err("question_text must be 500 characters or fewer.".to_string());
+    }
+
+    let workspace = load_workspace(&connection, &project_id)?;
+    let ai_lens_item = workspace
+        .ai_lens_items
+        .iter()
+        .find(|item| item.id == ai_lens_item_id)
+        .ok_or_else(|| "AI視点カードが見つかりません。".to_string())?;
+    let prompt = ai_lens_insight_prompt(&workspace, ai_lens_item, question)?;
+    let prompt_hash = hash_text(&prompt);
+    let ai_result = try_structured_ai(app, &state.db_path, &prompt, map_insight_json_schema());
+    let (provider_used, duration_ms) = provider_metadata(&ai_result);
+    let (output_json, model, status, error, fallback_used, message) = match ai_result.response_json
+    {
+        Some(value) => (
+            value,
+            ai_result.model_label,
+            "completed",
+            None,
+            false,
+            "AI視点への理解メモを生成しました。".to_string(),
+        ),
+        None => (
+            build_ai_lens_insight_output(ai_lens_item, question),
+            LOCAL_MODEL.to_string(),
+            "fallback_completed",
+            Some(ai_result.errors.join("; ")),
+            true,
+            "AI実行に失敗したため、ローカルドラフトで理解メモを生成しました。".to_string(),
+        ),
+    };
+    let output = validate_map_insight_json(&output_json)?;
+    let validated_output_json = serde_json::to_value(&output).map_err(|error| error.to_string())?;
+    let ai_run_id = save_ai_run(
+        &connection,
+        &app_data_dir,
+        &project_id,
+        "ask_ai_lens_insight",
+        "MapInsightOutput",
+        &model,
+        pending_ai_run_status(status),
+        json!({
+            "mode": "ai_lens_question",
+            "fallbackUsed": fallback_used,
+            "promptHash": prompt_hash,
+            "aiLensItemId": ai_lens_item.id.as_str(),
+            "targetKind": ai_lens_item.target_kind.as_str(),
+            "targetId": ai_lens_item.target_id.as_deref(),
+            "category": ai_lens_item.category.as_str(),
+            "questionText": question,
+            "providerUsed": provider_used,
+            "durationMs": duration_ms,
+        }),
+        &validated_output_json,
+        error,
+    )?;
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    insert_ai_lens_insight_comment(
+        &transaction,
+        &project_id,
+        &ai_run_id,
+        &output,
+        ai_lens_item,
+        question,
+    )?;
+    finalize_ai_run_in_transaction(&transaction, &ai_run_id, status)?;
+    record_snapshot_in_transaction(&transaction, &project_id, "ai_lens_insight")?;
     transaction.commit().map_err(|error| error.to_string())?;
 
     Ok(MvpRunResult {
@@ -2623,6 +2873,7 @@ fn write_csv_bundle(dir: &Path, workspace: &ProjectWorkspace) -> Result<(), Stri
     write_nodes_csv(&dir.join("nodes.csv"), &nodes)?;
     write_edges_csv(&dir.join("edges.csv"), &edges)?;
     write_suggestions_csv(&dir.join("suggestions.csv"), &suggestions)?;
+    write_ai_lens_items_csv(&dir.join("ai_lens_items.csv"), &workspace.ai_lens_items)?;
     write_sources_csv(&dir.join("sources.csv"), &workspace.source_files)?;
     write_action_items_csv(&dir.join("action_items.csv"), &workspace.action_items)?;
     write_map_notes_csv(&dir.join("map_notes.csv"), &workspace.map_notes)
@@ -2689,6 +2940,7 @@ fn load_workspace(connection: &Connection, project_id: &str) -> Result<ProjectWo
         edges: load_edges(connection, project_id)?,
         suggestions: load_suggestions(connection, project_id)?,
         ai_comments: load_ai_comments(connection, project_id)?,
+        ai_lens_items: load_ai_lens_items(connection, project_id)?,
         ai_runs: load_ai_runs(connection, project_id)?,
         export_jobs: load_export_jobs(connection, project_id)?,
         versions: load_versions(connection, project_id)?,
@@ -3063,6 +3315,44 @@ fn load_ai_comments(
                 body: row.get(5)?,
                 confidence_status: row.get(6)?,
                 created_at: row.get(7)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn load_ai_lens_items(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Vec<AiLensItemRow>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, project_id, ai_run_id, category, target_kind, target_id,
+                    title, body, confidence_status, evidence, follow_up_question,
+                    sort_order, created_at
+             FROM ai_lens_items
+             WHERE project_id = ?1
+             ORDER BY sort_order ASC, created_at DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([project_id], |row| {
+            Ok(AiLensItemRow {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                ai_run_id: row.get(2)?,
+                category: row.get(3)?,
+                target_kind: row.get(4)?,
+                target_id: row.get(5)?,
+                title: row.get(6)?,
+                body: row.get(7)?,
+                confidence_status: row.get(8)?,
+                evidence: row.get(9)?,
+                follow_up_question: row.get(10)?,
+                sort_order: row.get(11)?,
+                created_at: row.get(12)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -4337,6 +4627,12 @@ fn clear_map_analysis_in_transaction(
             [project_id],
         )
         .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM ai_lens_items WHERE project_id = ?1",
+            [project_id],
+        )
+        .map_err(|error| error.to_string())?;
 
     Ok(())
 }
@@ -4349,6 +4645,12 @@ fn clear_map_outputs_in_transaction(
     transaction
         .execute(
             "DELETE FROM ai_comments WHERE project_id = ?1",
+            [project_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM ai_lens_items WHERE project_id = ?1",
             [project_id],
         )
         .map_err(|error| error.to_string())?;
@@ -4493,6 +4795,120 @@ fn business_impact_prompt(
         nodes,
         edges
     )
+}
+
+fn ai_lens_prompt(workspace: &ProjectWorkspace, purpose_context: &PromptPurposeContext) -> String {
+    let (active_nodes, active_edges) = active_map_scope(workspace);
+    let nodes = active_nodes
+        .iter()
+        .map(|node| {
+            format!(
+                "- id: {}\n  label: {}\n  type: {}\n  confidence: {}\n  influence: {}\n  summary: {}\n  sourceTrace: {}",
+                node.id,
+                node.label,
+                node.node_type,
+                node.confidence_status.as_deref().unwrap_or("estimated"),
+                node.influence_level.as_deref().unwrap_or("2"),
+                node.description.as_deref().unwrap_or("説明なし"),
+                source_trace_for_node(node, workspace)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let edges = active_edges
+        .iter()
+        .map(|edge| {
+            format!(
+                "- id: {}\n  source: {} ({})\n  target: {} ({})\n  label: {}\n  flow: {}\n  strength: {}\n  confidence: {}\n  evidence: {}",
+                edge.id,
+                node_label(workspace, &edge.source_node_id),
+                edge.source_node_id,
+                node_label(workspace, &edge.target_node_id),
+                edge.target_node_id,
+                edge.label.as_deref().unwrap_or("導線"),
+                edge.flow_type.as_deref().unwrap_or("unknown"),
+                edge.strength.as_deref().unwrap_or("normal"),
+                edge.confidence_status.as_deref().unwrap_or("estimated"),
+                edge.evidence
+                    .as_deref()
+                    .unwrap_or("情報ソース要約からの推定")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "売上マップの上に重ねるAI視点を日本語で最大3件生成してください。\
+         目的は、ユーザーが売上導線の詰まり、眠っている売上資産、利益化の盲点を見つけ、次に考えることを判断できる状態にすることです。\
+         categoryはsales_flow_defect、dormant_revenue_asset、profit_blind_spotのいずれかにしてください。同じcategoryが複数あっても構いません。\
+         targetKindはmap、node、edgeのいずれかです。node/edgeを対象にする場合は、必ず下のNodes/Edgesに存在するidをtargetIdに入れてください。mapの場合targetIdはnullです。\
+         evidenceには、根拠にしたノード、導線、sourceTrace、または情報不足による推定であることを短く書いてください。followUpQuestionには次に確認すべき質問を1つ入れてください。\
+         断定できないものはconfidenceStatusをestimatedまたはneeds_reviewにしてください。schemaVersionは{}です。\n\n{}\n\nNodes:\n{}\n\nEdges:\n{}",
+        SCHEMA_VERSION,
+        purpose_context.prompt_block(),
+        nodes,
+        edges
+    )
+}
+
+fn ai_lens_insight_prompt(
+    workspace: &ProjectWorkspace,
+    item: &AiLensItemRow,
+    question: &str,
+) -> Result<String, String> {
+    let purpose_context = prompt_purpose_context_from_workspace(workspace);
+    let target_context =
+        map_insight_target_context(workspace, &item.target_kind, item.target_id.as_deref())?;
+    let (active_nodes, active_edges) = active_map_scope(workspace);
+    let nodes = active_nodes
+        .iter()
+        .map(|node| {
+            format!(
+                "- {} ({}) / confidence={} / influence={} / sourceTrace={}",
+                node.label,
+                node.node_type,
+                node.confidence_status.as_deref().unwrap_or("estimated"),
+                node.influence_level.as_deref().unwrap_or("2"),
+                source_trace_for_node(node, workspace)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let edges = active_edges
+        .iter()
+        .map(|edge| {
+            format!(
+                "- {} -> {} / label={} / flow={} / strength={} / evidence={}",
+                node_label(workspace, &edge.source_node_id),
+                node_label(workspace, &edge.target_node_id),
+                edge.label.as_deref().unwrap_or("導線"),
+                edge.flow_type.as_deref().unwrap_or("unknown"),
+                edge.strength.as_deref().unwrap_or("normal"),
+                edge.evidence
+                    .as_deref()
+                    .unwrap_or("情報ソース要約からの推定")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(format!(
+        "以下のAI視点カードについて、ユーザーの自由質問に日本語で短く答えてください。\
+         本格チャットではなく、1回分の理解メモとして、次に何を確認し、どう判断すればよいかを返してください。\
+         answerは2-4文、keyPointsは1-5件、followUpQuestionsは最大5件、confidenceStatusはconfirmed/estimated/needs_reviewです。\
+         schemaVersionは{}です。\n\n{}\n\nAI Lens:\ncategory: {}\ntitle: {}\nbody: {}\nevidence: {}\nfollowUpQuestion: {}\nTarget:\n{}\n\nUser question:\n{}\n\nMap nodes:\n{}\n\nMap edges:\n{}",
+        SCHEMA_VERSION,
+        purpose_context.prompt_block(),
+        ai_lens_category_label(&item.category),
+        item.title,
+        item.body,
+        item.evidence,
+        item.follow_up_question.as_deref().unwrap_or("-"),
+        target_context,
+        question,
+        nodes,
+        edges
+    ))
 }
 
 fn map_insight_prompt(
@@ -4661,6 +5077,128 @@ fn build_map_insight_output(
     })
 }
 
+fn build_ai_lens_output(workspace: &ProjectWorkspace) -> Value {
+    let (nodes, edges) = active_map_scope(workspace);
+    let weak_edge = edges
+        .iter()
+        .find(|edge| edge.edge_type == "bottleneck" || edge.strength.as_deref() == Some("weak"));
+    let asset_node = nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.node_type.as_str(),
+                "channel" | "touchpoint" | "service"
+            )
+        })
+        .or_else(|| nodes.first());
+    let profit_edge = edges
+        .iter()
+        .find(|edge| {
+            edge.flow_type.as_deref() == Some("purchase")
+                || edge.strength.as_deref() != Some("strong")
+        })
+        .or_else(|| edges.first());
+    let mut items = Vec::new();
+
+    items.push(json!({
+        "category": "sales_flow_defect",
+        "targetKind": "map",
+        "targetId": null,
+        "title": "流れ全体の弱さ",
+        "body": if weak_edge.is_some() {
+            "現在の材料では、顧客が次の接点へ進む流れに弱い箇所がありそうです。"
+        } else {
+            "現在の材料では、売上までの導線全体にまだ確認余地があります。"
+        },
+        "confidenceStatus": "estimated",
+        "evidence": weak_edge
+            .map(|edge| format!("{} -> {} の導線が弱い、または詰まり候補として見えています。", node_label(workspace, &edge.source_node_id), node_label(workspace, &edge.target_node_id)))
+            .unwrap_or_else(|| "マップ全体の接続数と根拠情報がまだ限定的です。".to_string()),
+        "followUpQuestion": "売上までの導線で、実際に一番止まりやすい接点はどこですか？"
+    }));
+
+    if let Some(node) = asset_node {
+        items.push(json!({
+            "category": "dormant_revenue_asset",
+            "targetKind": "node",
+            "targetId": node.id,
+            "title": node.label,
+            "body": format!("{}は、売上導線へさらに接続できる資産として見直す余地があります。", node.label),
+            "confidenceStatus": node.confidence_status.as_deref().unwrap_or("estimated"),
+            "evidence": format!("{} / sourceTrace: {}", node.description.as_deref().unwrap_or("説明なし"), source_trace_for_node(node, workspace)),
+            "followUpQuestion": format!("{}を次の予約、継続、購入へつなげる接点はありますか？", node.label)
+        }));
+    }
+
+    if let Some(edge) = profit_edge {
+        items.push(json!({
+            "category": "profit_blind_spot",
+            "targetKind": "edge",
+            "targetId": edge.id,
+            "title": edge.label.as_deref().unwrap_or("利益化の接続"),
+            "body": "反応や接点が、単価・継続・高単価提案へ十分つながっているか確認したい導線です。",
+            "confidenceStatus": edge.confidence_status.as_deref().unwrap_or("estimated"),
+            "evidence": edge.evidence.as_deref().unwrap_or("情報ソース要約からの推定"),
+            "followUpQuestion": "この導線の先で、単価・継続・利益率を確認できる数字はありますか？"
+        }));
+    }
+
+    json!({
+        "schemaVersion": SCHEMA_VERSION,
+        "items": items.into_iter().take(3).collect::<Vec<_>>()
+    })
+}
+
+fn build_ai_lens_insight_output(item: &AiLensItemRow, question: &str) -> Value {
+    json!({
+        "schemaVersion": SCHEMA_VERSION,
+        "answer": format!("「{}」についての質問「{}」への下書きです。このAI視点は{}を根拠にした確認候補なので、実際の数字や顧客行動で確かめると判断しやすくなります。", item.title, question, item.evidence),
+        "keyPoints": [
+            format!("対象: {}", item.title),
+            format!("カテゴリ: {}", ai_lens_category_label(&item.category)),
+            "AI視点カードからの壁打ちメモです。"
+        ],
+        "followUpQuestions": [
+            item.follow_up_question.clone().unwrap_or_else(|| "この指摘を確かめるために、次に見る情報は何ですか？".to_string()),
+            "この導線の成果指標は何ですか？"
+        ],
+        "confidenceStatus": item.confidence_status
+    })
+}
+
+fn ai_lens_category_label(category: &str) -> &'static str {
+    match category {
+        "sales_flow_defect" => "売上導線の欠陥",
+        "dormant_revenue_asset" => "眠っている売上資産",
+        "profit_blind_spot" => "利益化の盲点",
+        _ => "AI視点",
+    }
+}
+
+fn ai_lens_target_label(workspace: &ProjectWorkspace, item: &AiLensItemRow) -> String {
+    match item.target_kind.as_str() {
+        "node" => item
+            .target_id
+            .as_deref()
+            .and_then(|id| workspace.nodes.iter().find(|node| node.id == id))
+            .map(|node| format!("ノード: {}", node.label))
+            .unwrap_or_else(|| "ノード".to_string()),
+        "edge" => item
+            .target_id
+            .as_deref()
+            .and_then(|id| workspace.edges.iter().find(|edge| edge.id == id))
+            .map(|edge| {
+                format!(
+                    "導線: {} -> {}",
+                    node_label(workspace, &edge.source_node_id),
+                    node_label(workspace, &edge.target_node_id)
+                )
+            })
+            .unwrap_or_else(|| "導線".to_string()),
+        _ => "マップ全体".to_string(),
+    }
+}
+
 fn map_insight_target_title(
     workspace: &ProjectWorkspace,
     target_kind: &str,
@@ -4743,6 +5281,57 @@ fn active_map_scope(workspace: &ProjectWorkspace) -> (Vec<&MapNodeRow>, Vec<&Map
     let edges = exportable_edges(&workspace.edges, &node_ids);
 
     (nodes, edges)
+}
+
+fn validate_ai_lens_targets(
+    workspace: &ProjectWorkspace,
+    output: &crate::ai_schema::AiLensOutput,
+) -> Result<(), String> {
+    let (active_nodes, active_edges) = active_map_scope(workspace);
+    let node_ids = active_nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<HashSet<_>>();
+    let edge_ids = active_edges
+        .iter()
+        .map(|edge| edge.id.as_str())
+        .collect::<HashSet<_>>();
+
+    for item in &output.items {
+        match item.target_kind.as_str() {
+            "map" => {
+                if item.target_id.is_some() {
+                    return Err("map target_id must be null.".to_string());
+                }
+            }
+            "node" => {
+                let target_id = item
+                    .target_id
+                    .as_deref()
+                    .ok_or_else(|| "node target_id is required.".to_string())?;
+                if !node_ids.contains(target_id) {
+                    return Err(format!("AI視点の対象ノードが見つかりません: {target_id}"));
+                }
+            }
+            "edge" => {
+                let target_id = item
+                    .target_id
+                    .as_deref()
+                    .ok_or_else(|| "edge target_id is required.".to_string())?;
+                if !edge_ids.contains(target_id) {
+                    return Err(format!("AI視点の対象導線が見つかりません: {target_id}"));
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "Unsupported AI lens target kind: {}",
+                    item.target_kind
+                ))
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn build_suggestions_output(workspace: &ProjectWorkspace) -> Value {
@@ -4977,6 +5566,44 @@ fn insert_suggestions(
     Ok(())
 }
 
+fn insert_ai_lens_items(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+    ai_run_id: &str,
+    output: &crate::ai_schema::AiLensOutput,
+) -> Result<(), String> {
+    let now = now_rfc3339()?;
+
+    for (index, item) in output.items.iter().enumerate() {
+        transaction
+            .execute(
+                "INSERT INTO ai_lens_items (
+                    id, project_id, ai_run_id, category, target_kind, target_id,
+                    title, body, confidence_status, evidence, follow_up_question,
+                    sort_order, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    project_id,
+                    ai_run_id,
+                    item.category,
+                    item.target_kind,
+                    item.target_id,
+                    item.title,
+                    item.body,
+                    item.confidence_status,
+                    item.evidence,
+                    item.follow_up_question,
+                    index as i64,
+                    now
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
 fn insert_map_insight_comment(
     transaction: &rusqlite::Transaction<'_>,
     project_id: &str,
@@ -5024,6 +5651,45 @@ fn insert_map_insight_comment(
                         .map(|value| format!(":{value}"))
                         .unwrap_or_default()
                 ),
+                body,
+                output.confidence_status,
+                now
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+fn insert_ai_lens_insight_comment(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+    ai_run_id: &str,
+    output: &crate::ai_schema::MapInsightOutput,
+    item: &AiLensItemRow,
+    question: &str,
+) -> Result<(), String> {
+    let now = now_rfc3339()?;
+    let mut body = format!("質問: {question}\n{}", output.answer);
+    if !output.key_points.is_empty() {
+        body.push_str("\n要点: ");
+        body.push_str(&output.key_points.join(" / "));
+    }
+    if !output.follow_up_questions.is_empty() {
+        body.push_str("\n次に聞くこと: ");
+        body.push_str(&output.follow_up_questions.join(" / "));
+    }
+
+    transaction
+        .execute(
+            "INSERT INTO ai_comments (
+                id, project_id, ai_run_id, comment_type, title, body, confidence_status, created_at
+             ) VALUES (?1, ?2, ?3, 'ai_lens_insight', ?4, ?5, ?6, ?7)",
+            params![
+                Uuid::new_v4().to_string(),
+                project_id,
+                ai_run_id,
+                format!("AI視点: {}", item.title),
                 body,
                 output.confidence_status,
                 now
@@ -5283,6 +5949,25 @@ fn record_snapshot_with_metadata_in_transaction(
             ],
             project_id,
         )?,
+        "aiLensItems": snapshot_table(
+            transaction,
+            "ai_lens_items",
+            &[
+                "id",
+                "ai_run_id",
+                "category",
+                "target_kind",
+                "target_id",
+                "title",
+                "body",
+                "confidence_status",
+                "evidence",
+                "follow_up_question",
+                "sort_order",
+                "created_at",
+            ],
+            project_id,
+        )?,
         "actionItems": snapshot_table(
             transaction,
             "action_items",
@@ -5314,6 +5999,7 @@ fn record_snapshot_with_metadata_in_transaction(
             "edges": count_table(transaction, "edges", project_id)?,
             "suggestions": count_table(transaction, "suggestions", project_id)?,
             "aiComments": count_table(transaction, "ai_comments", project_id)?,
+            "aiLensItems": count_table(transaction, "ai_lens_items", project_id)?,
             "viewLayouts": count_table(transaction, "view_layouts", project_id)?,
             "actionItems": count_table(transaction, "action_items", project_id)?,
             "mapNotes": count_table(transaction, "map_notes", project_id)?,
@@ -5471,6 +6157,26 @@ fn render_markdown(project_name: &str, workspace: &ProjectWorkspace) -> String {
     body.push_str("\n## AIコメント\n\n");
     for comment in &workspace.ai_comments {
         body.push_str(&format!("- **{}**: {}\n", comment.title, comment.body));
+    }
+
+    body.push_str("\n## AI視点\n\n");
+    if workspace.ai_lens_items.is_empty() {
+        body.push_str("AI視点は未生成です。\n");
+    } else {
+        for item in &workspace.ai_lens_items {
+            body.push_str(&format!(
+                "- **{}** / {} / {} / {}\n",
+                item.title,
+                ai_lens_category_label(&item.category),
+                ai_lens_target_label(workspace, item),
+                item.confidence_status
+            ));
+            body.push_str(&format!("  - {}\n", item.body));
+            body.push_str(&format!("  - 根拠: {}\n", item.evidence));
+            if let Some(question) = item.follow_up_question.as_deref() {
+                body.push_str(&format!("  - 次に確認: {}\n", question));
+            }
+        }
     }
 
     body.push_str("\n## 次に試す一手\n\n");
@@ -5772,6 +6478,43 @@ fn write_suggestions_csv(path: &Path, suggestions: &[&SuggestionRow]) -> Result<
     writer.flush().map_err(|error| error.to_string())
 }
 
+fn write_ai_lens_items_csv(path: &Path, items: &[AiLensItemRow]) -> Result<(), String> {
+    let mut writer = csv_writer(path)?;
+    writer
+        .write_record([
+            "id",
+            "category",
+            "target_kind",
+            "target_id",
+            "title",
+            "body",
+            "confidence_status",
+            "evidence",
+            "follow_up_question",
+            "sort_order",
+            "created_at",
+        ])
+        .map_err(|error| error.to_string())?;
+    for item in items {
+        writer
+            .write_record([
+                item.id.as_str(),
+                item.category.as_str(),
+                item.target_kind.as_str(),
+                item.target_id.as_deref().unwrap_or(""),
+                item.title.as_str(),
+                item.body.as_str(),
+                item.confidence_status.as_str(),
+                item.evidence.as_str(),
+                item.follow_up_question.as_deref().unwrap_or(""),
+                &item.sort_order.to_string(),
+                item.created_at.as_str(),
+            ])
+            .map_err(|error| error.to_string())?;
+    }
+    writer.flush().map_err(|error| error.to_string())
+}
+
 fn write_sources_csv(path: &Path, sources: &[SourceFileRow]) -> Result<(), String> {
     let mut writer = csv_writer(path)?;
     writer
@@ -5909,6 +6652,35 @@ mod tests {
                 params![node_id, project_id, now.as_str(), now.as_str()],
             )
             .expect("node should insert");
+    }
+
+    fn insert_test_edge(connection: &Connection, project_id: &str, edge_id: &str) {
+        let now = now_rfc3339().expect("time should format");
+        connection
+            .execute(
+                "INSERT INTO edges (
+                    id, project_id, source_node_id, target_node_id, edge_type, flow_type,
+                    strength, direction, confidence_status, evidence, label, adoption_status,
+                    created_at, updated_at
+                 ) VALUES (?1, ?2, 'node-1', 'node-2', 'weak', 'purchase',
+                    'weak', 'forward', 'estimated', 'テスト導線です。', '購入導線',
+                    'accepted', ?3, ?4)",
+                params![edge_id, project_id, now.as_str(), now.as_str()],
+            )
+            .expect("edge should insert");
+    }
+
+    fn insert_test_ai_run(connection: &Connection, project_id: &str, run_id: &str) {
+        let now = now_rfc3339().expect("time should format");
+        connection
+            .execute(
+                "INSERT INTO ai_runs (
+                    id, project_id, run_type, schema_name, schema_version, model,
+                    status, created_at
+                 ) VALUES (?1, ?2, 'test', 'TestOutput', ?3, 'test-model', 'completed', ?4)",
+                params![run_id, project_id, SCHEMA_VERSION, now.as_str()],
+            )
+            .expect("ai_run should insert");
     }
 
     #[test]
@@ -6359,6 +7131,192 @@ mod tests {
         assert_eq!(versions[0].name.as_deref(), Some("5月試験運用前"));
         assert_eq!(versions[0].memo.as_deref(), Some("実事業メモ投入前"));
         assert!(versions[0].snapshot_json.contains("5月試験運用前"));
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn ai_lens_targets_must_exist_in_active_map() {
+        let app_data_dir = temp_app_data_dir("ai-lens-targets");
+        fs::create_dir_all(&app_data_dir).expect("app data dir should exist");
+        let db_path = app_data_dir.join("synergy-map.db");
+        crate::init_database(&db_path).expect("db should initialize");
+        let connection = open_connection(&db_path).expect("connection should open");
+        let project_id = "project-1";
+        insert_test_project(&connection, project_id);
+        insert_test_node(&connection, project_id, "node-1");
+        insert_test_node(&connection, project_id, "node-2");
+        insert_test_edge(&connection, project_id, "edge-1");
+        let workspace = load_workspace(&connection, project_id).expect("workspace should load");
+        let valid = validate_ai_lens_json(&json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "items": [{
+                "category": "profit_blind_spot",
+                "targetKind": "edge",
+                "targetId": "edge-1",
+                "title": "購入導線",
+                "body": "利益化の確認候補です。",
+                "confidenceStatus": "estimated",
+                "evidence": "購入導線が弱い状態です。",
+                "followUpQuestion": "利益率は確認できますか？"
+            }]
+        }))
+        .expect("AI lens should validate");
+        let invalid = validate_ai_lens_json(&json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "items": [{
+                "category": "dormant_revenue_asset",
+                "targetKind": "node",
+                "targetId": "missing-node",
+                "title": "存在しないノード",
+                "body": "対象が存在しません。",
+                "confidenceStatus": "estimated",
+                "evidence": "テストです。",
+                "followUpQuestion": "確認できますか？"
+            }]
+        }))
+        .expect("structural validation should pass");
+
+        validate_ai_lens_targets(&workspace, &valid).expect("existing target should pass");
+        let error =
+            validate_ai_lens_targets(&workspace, &invalid).expect_err("missing target should fail");
+        assert!(error.contains("対象ノード"));
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn ai_lens_items_are_saved_and_snapshotted() {
+        let app_data_dir = temp_app_data_dir("ai-lens-snapshot");
+        fs::create_dir_all(&app_data_dir).expect("app data dir should exist");
+        let db_path = app_data_dir.join("synergy-map.db");
+        crate::init_database(&db_path).expect("db should initialize");
+        let mut connection = open_connection(&db_path).expect("connection should open");
+        let project_id = "project-1";
+        insert_test_project(&connection, project_id);
+        insert_test_node(&connection, project_id, "node-1");
+        insert_test_ai_run(&connection, project_id, "run-1");
+        let output = validate_ai_lens_json(&json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "items": [{
+                "category": "dormant_revenue_asset",
+                "targetKind": "node",
+                "targetId": "node-1",
+                "title": "売上資産",
+                "body": "活用余地があります。",
+                "confidenceStatus": "estimated",
+                "evidence": "ノードが存在します。",
+                "followUpQuestion": "予約導線につながりますか？"
+            }]
+        }))
+        .expect("AI lens should validate");
+
+        let transaction = connection.transaction().expect("transaction should start");
+        insert_ai_lens_items(&transaction, project_id, "run-1", &output)
+            .expect("AI lens items should insert");
+        record_snapshot_in_transaction(&transaction, project_id, "ai_lens_test")
+            .expect("snapshot should record");
+        transaction.commit().expect("transaction should commit");
+
+        let workspace = load_workspace(&connection, project_id).expect("workspace should load");
+        assert_eq!(workspace.ai_lens_items.len(), 1);
+        assert_eq!(workspace.ai_lens_items[0].title, "売上資産");
+        let versions = load_versions(&connection, project_id).expect("versions should load");
+        assert!(versions[0].snapshot_json.contains("aiLensItems"));
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn csv_bundle_includes_ai_lens_items() {
+        let app_data_dir = temp_app_data_dir("ai-lens-export");
+        fs::create_dir_all(&app_data_dir).expect("app data dir should exist");
+        let db_path = app_data_dir.join("synergy-map.db");
+        crate::init_database(&db_path).expect("db should initialize");
+        let mut connection = open_connection(&db_path).expect("connection should open");
+        let project_id = "project-1";
+        insert_test_project(&connection, project_id);
+        insert_test_ai_run(&connection, project_id, "run-1");
+        let output = validate_ai_lens_json(&json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "items": [{
+                "category": "sales_flow_defect",
+                "targetKind": "map",
+                "targetId": null,
+                "title": "流れ全体",
+                "body": "確認余地があります。",
+                "confidenceStatus": "estimated",
+                "evidence": "マップ全体の確認です。",
+                "followUpQuestion": "どこで止まりますか？"
+            }]
+        }))
+        .expect("AI lens should validate");
+        let transaction = connection.transaction().expect("transaction should start");
+        insert_ai_lens_items(&transaction, project_id, "run-1", &output)
+            .expect("AI lens items should insert");
+        transaction.commit().expect("transaction should commit");
+
+        let workspace = load_workspace(&connection, project_id).expect("workspace should load");
+        let export_dir = app_data_dir.join("exports");
+        write_csv_bundle(&export_dir, &workspace).expect("CSV bundle should write");
+        let csv = fs::read_to_string(export_dir.join("ai_lens_items.csv"))
+            .expect("AI lens CSV should exist");
+
+        assert!(csv.contains("sales_flow_defect"));
+        assert!(csv.contains("流れ全体"));
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn ai_lens_insight_comment_is_saved() {
+        let app_data_dir = temp_app_data_dir("ai-lens-insight-comment");
+        fs::create_dir_all(&app_data_dir).expect("app data dir should exist");
+        let db_path = app_data_dir.join("synergy-map.db");
+        crate::init_database(&db_path).expect("db should initialize");
+        let mut connection = open_connection(&db_path).expect("connection should open");
+        let project_id = "project-1";
+        insert_test_project(&connection, project_id);
+        insert_test_ai_run(&connection, project_id, "run-1");
+        insert_test_ai_run(&connection, project_id, "run-2");
+        let item = AiLensItemRow {
+            id: "lens-1".to_string(),
+            project_id: project_id.to_string(),
+            ai_run_id: Some("run-1".to_string()),
+            category: "sales_flow_defect".to_string(),
+            target_kind: "map".to_string(),
+            target_id: None,
+            title: "流れ全体".to_string(),
+            body: "確認余地があります。".to_string(),
+            confidence_status: "estimated".to_string(),
+            evidence: "マップ全体の確認です。".to_string(),
+            follow_up_question: Some("どこで止まりますか？".to_string()),
+            sort_order: 0,
+            created_at: now_rfc3339().expect("time should format"),
+        };
+        let output = crate::ai_schema::MapInsightOutput {
+            schema_version: SCHEMA_VERSION.to_string(),
+            answer: "確認する価値があります。".to_string(),
+            key_points: vec!["導線が弱い可能性があります。".to_string()],
+            follow_up_questions: vec!["数字で確認できますか？".to_string()],
+            confidence_status: "estimated".to_string(),
+        };
+        let transaction = connection.transaction().expect("transaction should start");
+        insert_ai_lens_insight_comment(
+            &transaction,
+            project_id,
+            "run-2",
+            &output,
+            &item,
+            "なぜ重要ですか？",
+        )
+        .expect("comment should insert");
+        transaction.commit().expect("transaction should commit");
+
+        let comments = load_ai_comments(&connection, project_id).expect("comments should load");
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].comment_type, "ai_lens_insight");
+        assert!(comments[0].body.contains("なぜ重要ですか？"));
 
         let _ = fs::remove_dir_all(app_data_dir);
     }

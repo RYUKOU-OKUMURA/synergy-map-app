@@ -117,6 +117,28 @@ pub struct SuggestionCard {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
+pub struct AiLensOutput {
+    pub schema_version: String,
+    pub items: Vec<AiLensItem>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct AiLensItem {
+    pub category: String,
+    pub target_kind: String,
+    pub target_id: Option<String>,
+    pub title: String,
+    pub body: String,
+    pub confidence_status: String,
+    pub evidence: String,
+    pub follow_up_question: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct MapInsightOutput {
     pub schema_version: String,
     pub answer: String,
@@ -402,6 +424,54 @@ pub fn suggestion_cards_json_schema() -> Value {
     })
 }
 
+pub fn ai_lens_json_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "items"],
+        "properties": {
+            "schemaVersion": { "type": "string", "const": SCHEMA_VERSION },
+            "items": {
+                "type": "array",
+                "maxItems": 3,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "category",
+                        "targetKind",
+                        "targetId",
+                        "title",
+                        "body",
+                        "confidenceStatus",
+                        "evidence",
+                        "followUpQuestion"
+                    ],
+                    "properties": {
+                        "category": {
+                            "type": "string",
+                            "enum": ["sales_flow_defect", "dormant_revenue_asset", "profit_blind_spot"]
+                        },
+                        "targetKind": {
+                            "type": "string",
+                            "enum": ["map", "node", "edge"]
+                        },
+                        "targetId": { "type": ["string", "null"] },
+                        "title": { "type": "string", "minLength": 1 },
+                        "body": { "type": "string", "minLength": 1 },
+                        "confidenceStatus": {
+                            "type": "string",
+                            "enum": ["confirmed", "estimated", "needs_review"]
+                        },
+                        "evidence": { "type": "string", "minLength": 1 },
+                        "followUpQuestion": { "type": ["string", "null"] }
+                    }
+                }
+            }
+        }
+    })
+}
+
 pub fn map_insight_json_schema() -> Value {
     json!({
         "type": "object",
@@ -587,6 +657,60 @@ pub fn validate_suggestion_cards_json(value: &Value) -> Result<SuggestionCardsOu
     Ok(output)
 }
 
+pub fn validate_ai_lens_json(value: &Value) -> Result<AiLensOutput, String> {
+    let output: AiLensOutput =
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+
+    ensure_schema_version(&output.schema_version)?;
+
+    if output.items.len() > 3 {
+        return Err("items must include at most 3 items.".to_string());
+    }
+
+    for item in &output.items {
+        ensure_allowed(
+            "item.category",
+            &item.category,
+            &[
+                "sales_flow_defect",
+                "dormant_revenue_asset",
+                "profit_blind_spot",
+            ],
+        )?;
+        ensure_allowed(
+            "item.target_kind",
+            &item.target_kind,
+            &["map", "node", "edge"],
+        )?;
+        match item.target_kind.as_str() {
+            "map" => {
+                if item.target_id.is_some() {
+                    return Err("map target_id must be null.".to_string());
+                }
+            }
+            "node" | "edge" => {
+                if item.target_id.as_deref().unwrap_or("").trim().is_empty() {
+                    return Err("node and edge target_id is required.".to_string());
+                }
+            }
+            _ => {}
+        }
+        ensure_non_empty("item.title", &item.title)?;
+        ensure_non_empty("item.body", &item.body)?;
+        ensure_allowed(
+            "item.confidence_status",
+            &item.confidence_status,
+            &["confirmed", "estimated", "needs_review"],
+        )?;
+        ensure_non_empty("item.evidence", &item.evidence)?;
+        if let Some(question) = item.follow_up_question.as_deref() {
+            ensure_non_empty("item.follow_up_question", question)?;
+        }
+    }
+
+    Ok(output)
+}
+
 pub fn validate_map_insight_json(value: &Value) -> Result<MapInsightOutput, String> {
     let output: MapInsightOutput =
         serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
@@ -695,6 +819,114 @@ mod tests {
         let error = validate_ai_analysis_json(&value).expect_err("version should fail");
 
         assert!(error.contains("Unsupported schema_version"));
+    }
+
+    #[test]
+    fn valid_ai_lens_output_deserializes() {
+        let value = json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "items": [
+                {
+                    "category": "sales_flow_defect",
+                    "targetKind": "map",
+                    "targetId": null,
+                    "title": "流れ全体の弱さ",
+                    "body": "問い合わせ後の流れが弱い可能性があります。",
+                    "confidenceStatus": "estimated",
+                    "evidence": "弱い導線が含まれています。",
+                    "followUpQuestion": "どこで止まりやすいですか？"
+                },
+                {
+                    "category": "dormant_revenue_asset",
+                    "targetKind": "node",
+                    "targetId": "node-1",
+                    "title": "LINE配信",
+                    "body": "再来院導線へ接続できる資産です。",
+                    "confidenceStatus": "needs_review",
+                    "evidence": "接点ノードとして存在します。",
+                    "followUpQuestion": "予約への接続はありますか？"
+                },
+                {
+                    "category": "profit_blind_spot",
+                    "targetKind": "edge",
+                    "targetId": "edge-1",
+                    "title": "購入導線",
+                    "body": "利益化の数字を確認したい導線です。",
+                    "confidenceStatus": "estimated",
+                    "evidence": "購買フローとして推定されています。",
+                    "followUpQuestion": "利益率は確認できますか？"
+                }
+            ]
+        });
+
+        let output = validate_ai_lens_json(&value).expect("AI lens should validate");
+
+        assert_eq!(output.items.len(), 3);
+        assert_eq!(output.items[0].target_kind, "map");
+    }
+
+    #[test]
+    fn ai_lens_rejects_too_many_items() {
+        let item = json!({
+            "category": "sales_flow_defect",
+            "targetKind": "map",
+            "targetId": null,
+            "title": "流れ",
+            "body": "確認候補です。",
+            "confidenceStatus": "estimated",
+            "evidence": "根拠です。",
+            "followUpQuestion": "質問ですか？"
+        });
+        let value = json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "items": [item.clone(), item.clone(), item.clone(), item]
+        });
+
+        let error = validate_ai_lens_json(&value).expect_err("too many items should fail");
+
+        assert!(error.contains("at most 3"));
+    }
+
+    #[test]
+    fn ai_lens_rejects_missing_node_target_id() {
+        let value = json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "items": [{
+                "category": "dormant_revenue_asset",
+                "targetKind": "node",
+                "targetId": null,
+                "title": "LINE配信",
+                "body": "再来院導線へ接続できる資産です。",
+                "confidenceStatus": "estimated",
+                "evidence": "接点ノードとして存在します。",
+                "followUpQuestion": "予約への接続はありますか？"
+            }]
+        });
+
+        let error = validate_ai_lens_json(&value).expect_err("node target should be required");
+
+        assert!(error.contains("target_id is required"));
+    }
+
+    #[test]
+    fn ai_lens_rejects_empty_title() {
+        let value = json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "items": [{
+                "category": "profit_blind_spot",
+                "targetKind": "edge",
+                "targetId": "edge-1",
+                "title": "",
+                "body": "利益化の数字を確認したい導線です。",
+                "confidenceStatus": "estimated",
+                "evidence": "購買フローとして推定されています。",
+                "followUpQuestion": "利益率は確認できますか？"
+            }]
+        });
+
+        let error = validate_ai_lens_json(&value).expect_err("empty title should fail");
+
+        assert!(error.contains("item.title is required"));
     }
 
     #[test]

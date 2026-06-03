@@ -137,6 +137,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "center_node",
         sql: include_str!("../migrations/0005_center_node.sql"),
     },
+    Migration {
+        version: 6,
+        name: "ai_lens_items",
+        sql: include_str!("../migrations/0006_ai_lens_items.sql"),
+    },
 ];
 
 const LEGACY_INITIAL_MIGRATION_CHECKSUM: &str = "0001_initial_v1";
@@ -1233,7 +1238,9 @@ pub fn run() {
             mvp1::save_map_layout,
             mvp1::save_view_layout,
             mvp1::generate_suggestions_from_map,
+            mvp1::generate_ai_lens_from_map,
             mvp1::ask_map_insight,
+            mvp1::ask_ai_lens_insight,
             mvp1::update_suggestion,
             mvp1::create_action_item,
             mvp1::create_action_item_from_suggestion,

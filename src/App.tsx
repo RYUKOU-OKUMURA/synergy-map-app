@@ -71,6 +71,7 @@ import {
 } from "@/lib/mvp1Labels";
 import type {
   ActionItemRow,
+  AiCommentRow,
   AiLensItem,
   AiProviderKind,
   AiRunRow,
@@ -191,12 +192,8 @@ const defaultAiSettings = (): AiSettings => ({
   cursorModelId: "composer-2.5",
   defaultExportDir: null,
   mapUiPreferences: {
-    bottomDrawerOpen: true,
-    bottomDrawerHeight: 260,
     showInfluence: true,
     layoutLocked: false,
-    drawerSort: "relevance",
-    showOpenQuestionsOnly: false,
     contextPanelOpen: false,
     contextPanelTab: "materials",
     aiLensOpen: false,
@@ -370,6 +367,7 @@ function App() {
   >("idle");
   const [layoutSaveScope, setLayoutSaveScope] = useState<string | null>(null);
   const [mapInsightBusy, setMapInsightBusy] = useState(false);
+  const [aiLensInsightBusyId, setAiLensInsightBusyId] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [codexRuntimeInfo, setCodexRuntimeInfo] = useState<CodexRuntimeInfo | null>(
     null,
@@ -712,6 +710,21 @@ function App() {
       );
       return;
     }
+    if (workspace.aiLensItems.length === 0) {
+      await runAction(
+        () =>
+          invoke<MvpRunResult>("generate_ai_lens_from_map", {
+            projectId: activeProjectId,
+          }),
+        (result) => {
+          setWorkspace(result.workspace);
+          setNotice(result.message);
+          setView("map");
+          void handleMapUiPreferencesChange({ aiLensOpen: true });
+        },
+      );
+      return;
+    }
     if (workspace.actionItems.some((actionItem) => actionItem.status === "open")) {
       setView("today");
       return;
@@ -788,6 +801,21 @@ function App() {
           contextPanelOpen: true,
           contextPanelTab: "actions",
         });
+      },
+    );
+  }
+
+  async function handleGenerateAiLens() {
+    if (!activeProjectId) return;
+    await runAction(
+      () =>
+        invoke<MvpRunResult>("generate_ai_lens_from_map", {
+          projectId: activeProjectId,
+        }),
+      (result) => {
+        setWorkspace(result.workspace);
+        setNotice(result.message);
+        void handleMapUiPreferencesChange({ aiLensOpen: true });
       },
     );
   }
@@ -1523,6 +1551,55 @@ function App() {
     }
   }
 
+  async function handleAskAiLens(aiLensItemId: string, questionText: string) {
+    if (!activeProjectId) return;
+    const question = questionText.trim();
+    if (!question) {
+      setError("質問を入力してください。");
+      return;
+    }
+    setAiLensInsightBusyId(aiLensItemId);
+    setError(null);
+    try {
+      if (!isTauriRuntime) {
+        const item = workspace.aiLensItems.find(
+          (candidate) => candidate.id === aiLensItemId,
+        );
+        if (!item) throw new Error("AI視点カードが見つかりません。");
+        const now = new Date().toISOString();
+        setWorkspace({
+          ...workspace,
+          aiComments: [
+            {
+              id: `local-ai-lens-insight-${Date.now()}`,
+              projectId: activeProjectId,
+              aiRunId: null,
+              commentType: "ai_lens_insight",
+              title: `AI視点: ${item.title}`,
+              body: `質問: ${question}\n${item.title}について、根拠「${item.evidence}」を確認しながら次の判断材料を整理してください。`,
+              confidenceStatus: item.confidenceStatus,
+              createdAt: now,
+            },
+            ...workspace.aiComments,
+          ],
+        });
+        setNotice("AI視点への理解メモを生成しました。");
+        return;
+      }
+      const result = await invoke<MvpRunResult>("ask_ai_lens_insight", {
+        projectId: activeProjectId,
+        aiLensItemId,
+        questionText: question,
+      });
+      setWorkspace(result.workspace);
+      setNotice(result.message);
+    } catch (caughtError) {
+      setError(String(caughtError));
+    } finally {
+      setAiLensInsightBusyId(null);
+    }
+  }
+
   useEffect(() => {
     if (!isTauriRuntime) return;
     let cancelled = false;
@@ -1708,16 +1785,19 @@ function App() {
               generationStage={onboardingGenerationStage}
               layoutSaveStatus={visibleLayoutSaveStatus}
               latestAiRun={latestAiRun}
+              aiLensInsightBusyId={aiLensInsightBusyId}
               mapInsightBusy={mapInsightBusy}
               mapUiPreferences={aiSettings.mapUiPreferences}
               mapViewMode={mapViewMode}
               onArrangeMap={handleArrangeMap}
+              onAskAiLens={handleAskAiLens}
               onAskWholeMap={handleAskWholeMap}
               onCreateMapEdge={handleCreateMapEdge}
               onCreateOnboardingMap={handleCreateOnboardingMap}
               onEditModeChange={setIsMapEditMode}
               onFlowAnimationUserEnabledChange={setFlowAnimationUserEnabled}
               onGenerateMap={handleRegenerateMap}
+              onGenerateAiLens={handleGenerateAiLens}
               onGenerateSuggestions={handleGenerateSuggestions}
               onMapUiPreferencesChange={handleMapUiPreferencesChange}
               onOpenExtractReview={() => {
@@ -1914,66 +1994,6 @@ function App() {
 
 function StatusChip({ children }: { children: React.ReactNode }) {
   return <span className="status-chip">{children}</span>;
-}
-
-function buildDraftAiLensItems(workspace: ProjectWorkspace): AiLensItem[] {
-  if (workspace.nodes.length === 0) return [];
-  const items: AiLensItem[] = [];
-  const activeEdges = workspace.edges.filter(
-    (edge) => edge.adoptionStatus !== "rejected",
-  );
-  const activeNodes = workspace.nodes.filter(
-    (node) => node.adoptionStatus !== "rejected",
-  );
-  const weakEdge = activeEdges.find(
-    (edge) => edge.edgeType === "bottleneck" || edge.strength === "weak",
-  );
-  const assetNode =
-    activeNodes.find((node) =>
-      ["channel", "touchpoint", "service"].includes(node.nodeType),
-    ) ?? activeNodes[0];
-  const profitEdge =
-    activeEdges.find(
-      (edge) => edge.flowType === "purchase" || edge.strength !== "strong",
-    ) ?? activeEdges[0];
-
-  items.push({
-    id: "draft-ai-lens-map",
-    category: "sales_flow_defect",
-    targetKind: "map",
-    targetId: null,
-    title: "流れ全体の弱さ",
-    body: weakEdge
-      ? "現在の材料では、顧客が次の接点へ進む流れに弱い箇所がありそうです。"
-      : "現在の材料では、売上までの導線全体にまだ確認余地があります。",
-    confidenceStatus: "estimated",
-  });
-
-  if (assetNode) {
-    items.push({
-      id: `draft-ai-lens-node-${assetNode.id}`,
-      category: "dormant_revenue_asset",
-      targetKind: "node",
-      targetId: assetNode.id,
-      title: assetNode.label,
-      body: `${assetNode.label}は、売上導線へさらに接続できる資産として見直す余地があります。`,
-      confidenceStatus: assetNode.confidenceStatus ?? "estimated",
-    });
-  }
-
-  if (profitEdge) {
-    items.push({
-      id: `draft-ai-lens-edge-${profitEdge.id}`,
-      category: "profit_blind_spot",
-      targetKind: "edge",
-      targetId: profitEdge.id,
-      title: profitEdge.label ?? "利益化の接続",
-      body: "反応や接点が、単価・継続・高単価提案へ十分つながっているか確認したい導線です。",
-      confidenceStatus: profitEdge.confidenceStatus ?? "estimated",
-    });
-  }
-
-  return items.slice(0, 3);
 }
 
 function AppSidebar({
@@ -2391,15 +2411,18 @@ function MapWorkspace({
   generationStage,
   layoutSaveStatus,
   latestAiRun,
+  aiLensInsightBusyId,
   mapInsightBusy,
   mapUiPreferences,
   mapViewMode,
   onArrangeMap,
+  onAskAiLens,
   onAskWholeMap,
   onCreateMapEdge,
   onCreateOnboardingMap,
   onEditModeChange,
   onFlowAnimationUserEnabledChange,
+  onGenerateAiLens,
   onGenerateSuggestions,
   onGenerateMap,
   onMapUiPreferencesChange,
@@ -2437,15 +2460,18 @@ function MapWorkspace({
   generationStage: OnboardingGenerationStage | null;
   layoutSaveStatus: "idle" | "saving" | "saved" | "error";
   latestAiRun: AiRunRow | null;
+  aiLensInsightBusyId: string | null;
   mapInsightBusy: boolean;
   mapUiPreferences: MapUiPreferences;
   mapViewMode: MapViewMode;
   onArrangeMap: () => void;
+  onAskAiLens: (aiLensItemId: string, questionText: string) => void;
   onAskWholeMap: (questionType?: string) => void;
   onCreateMapEdge: (sourceNodeId: string, targetNodeId: string) => void;
   onCreateOnboardingMap: (draft: OnboardingDraft) => void;
   onEditModeChange: (enabled: boolean) => void;
   onFlowAnimationUserEnabledChange: (enabled: boolean) => void;
+  onGenerateAiLens: () => void;
   onGenerateSuggestions: () => void;
   onGenerateMap: () => void;
   onMapUiPreferencesChange: (
@@ -2486,7 +2512,7 @@ function MapWorkspace({
         : "再生成";
   const shouldReviewDraft =
     hasOnboardingBrief(workspace) && hasUnconfirmedGeneratedItems(workspace);
-  const aiLensItems = useMemo(() => buildDraftAiLensItems(workspace), [workspace]);
+  const aiLensItems = workspace.aiLensItems.slice(0, 3);
   const aiLensOpen = mapUiPreferences.aiLensOpen && aiLensItems.length > 0;
   const handleCanvasPositionsChange = useCallback(
     (positions: MapNodeLayout[]) => onSavePositions(mapViewMode, positions),
@@ -2668,8 +2694,10 @@ function MapWorkspace({
 
       {hasGeneratedMap ? (
         <AiLensToggle
+          busy={generationBusy}
           count={aiLensItems.length}
           open={aiLensOpen}
+          onGenerate={onGenerateAiLens}
           onToggle={() =>
             onMapUiPreferencesChange({
               aiLensOpen: !mapUiPreferences.aiLensOpen,
@@ -2737,7 +2765,12 @@ function MapWorkspace({
       </section>
 
       {hasGeneratedMap && aiLensOpen ? (
-        <AiLensPanel items={aiLensItems} onAsk={() => onAskWholeMap("explain")} />
+        <AiLensPanel
+          aiComments={workspace.aiComments}
+          busyItemId={aiLensInsightBusyId}
+          items={aiLensItems}
+          onAsk={onAskAiLens}
+        />
       ) : null}
     </div>
   );
@@ -3066,30 +3099,63 @@ function ContextRecordsTab({ mapNotes }: { mapNotes: MapNoteRow[] }) {
 }
 
 function AiLensToggle({
+  busy,
   count,
+  onGenerate,
   onToggle,
   open,
 }: {
+  busy: boolean;
   count: number;
+  onGenerate: () => void;
   onToggle: () => void;
   open: boolean;
 }) {
+  const hasItems = count > 0;
   return (
     <button
       aria-pressed={open}
       className={`ai-lens-toggle ${open ? "ai-lens-toggle-open" : ""}`}
-      disabled={count === 0}
-      onClick={onToggle}
+      disabled={busy}
+      onClick={hasItems ? onToggle : onGenerate}
       type="button"
     >
       <Sparkles size={15} aria-hidden="true" />
-      AI視点 {open ? "ON" : ""}
+      {hasItems ? `AI視点 ${open ? "ON" : ""}` : "AI視点生成"}
       <span>{count}</span>
     </button>
   );
 }
 
-function AiLensPanel({ items, onAsk }: { items: AiLensItem[]; onAsk: () => void }) {
+function AiLensPanel({
+  aiComments,
+  busyItemId,
+  items,
+  onAsk,
+}: {
+  aiComments: AiCommentRow[];
+  busyItemId: string | null;
+  items: AiLensItem[];
+  onAsk: (aiLensItemId: string, questionText: string) => void;
+}) {
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(
+    items[0]?.id ?? null,
+  );
+  const [questionText, setQuestionText] = useState("");
+  const selectedItem =
+    items.find((item) => item.id === selectedItemId) ?? items[0] ?? null;
+  const insightComments = aiComments
+    .filter((comment) => comment.commentType === "ai_lens_insight")
+    .slice(0, 3);
+
+  function submitQuestion(question: string) {
+    if (!selectedItem) return;
+    const trimmed = question.trim();
+    if (!trimmed) return;
+    onAsk(selectedItem.id, trimmed);
+    setQuestionText("");
+  }
+
   return (
     <aside className="ai-lens-panel">
       <div className="panel-heading">
@@ -3100,7 +3166,12 @@ function AiLensPanel({ items, onAsk }: { items: AiLensItem[]; onAsk: () => void 
       </div>
       <div className="ai-lens-card-list">
         {items.map((item, index) => (
-          <article className="ai-lens-card" key={item.id}>
+          <article
+            className={`ai-lens-card ${
+              selectedItem?.id === item.id ? "ai-lens-card-selected" : ""
+            }`}
+            key={item.id}
+          >
             <div className="ai-lens-card-heading">
               <span className="ai-lens-card-marker">
                 {item.targetKind === "map" ? "全体" : index + 1}
@@ -3115,13 +3186,73 @@ function AiLensPanel({ items, onAsk }: { items: AiLensItem[]; onAsk: () => void 
                 : "マップ上の番号に対応"}{" "}
               / {labelFor(confidenceOptions, item.confidenceStatus)}
             </small>
+            <p className="ai-lens-evidence">根拠: {item.evidence}</p>
+            {item.followUpQuestion ? (
+              <p className="ai-lens-question">次に確認: {item.followUpQuestion}</p>
+            ) : null}
+            <button
+              className="ghost-button"
+              disabled={busyItemId === item.id}
+              onClick={() => {
+                setSelectedItemId(item.id);
+                onAsk(
+                  item.id,
+                  item.followUpQuestion ?? "このAI視点について詳しく教えてください。",
+                );
+              }}
+              type="button"
+            >
+              <MessageSquareText size={14} aria-hidden="true" />
+              {busyItemId === item.id ? "質問中" : "詳しく聞く"}
+            </button>
+            <button
+              className="subtle-select-button"
+              onClick={() => setSelectedItemId(item.id)}
+              type="button"
+            >
+              このカードを質問対象にする
+            </button>
           </article>
         ))}
       </div>
-      <button className="primary-button" onClick={onAsk} type="button">
-        <MessageSquareText size={15} aria-hidden="true" />
-        詳しく聞く
-      </button>
+      <form
+        className="ai-lens-question-box"
+        onSubmit={(event) => {
+          event.preventDefault();
+          submitQuestion(questionText);
+        }}
+      >
+        <textarea
+          maxLength={500}
+          onChange={(event) => setQuestionText(event.target.value)}
+          placeholder={
+            selectedItem ? `${selectedItem.title}について聞く` : "AI視点について聞く"
+          }
+          value={questionText}
+        />
+        <button
+          className="primary-button"
+          disabled={!selectedItem || !questionText.trim() || Boolean(busyItemId)}
+          type="submit"
+        >
+          <MessageSquareText size={15} aria-hidden="true" />
+          送信
+        </button>
+      </form>
+      <div className="ai-lens-insight-list">
+        <strong>最近の理解メモ</strong>
+        {insightComments.length > 0 ? (
+          insightComments.map((comment) => (
+            <article className="ai-lens-insight-card" key={comment.id}>
+              <small>{formatTime(comment.createdAt)}</small>
+              <h4>{comment.title}</h4>
+              <p>{shortText(comment.body, 180)}</p>
+            </article>
+          ))
+        ) : (
+          <p>カードに質問すると、ここに理解メモが残ります。</p>
+        )}
+      </div>
     </aside>
   );
 }

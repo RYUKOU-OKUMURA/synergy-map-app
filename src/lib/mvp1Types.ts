@@ -228,6 +228,7 @@ export type ProjectWorkspace = {
   edges: MapEdgeRow[];
   suggestions: SuggestionRow[];
   aiComments: AiCommentRow[];
+  aiLensItems: AiLensItem[];
   aiRuns: AiRunRow[];
   exportJobs: ExportJobRow[];
   versions: VersionRow[];
@@ -247,12 +248,8 @@ export type AiSettings = {
 };
 
 export type MapUiPreferences = {
-  bottomDrawerOpen: boolean;
-  bottomDrawerHeight: number;
   showInfluence: boolean;
   layoutLocked: boolean;
-  drawerSort: "relevance" | "priority" | "newest";
-  showOpenQuestionsOnly: boolean;
   contextPanelOpen: boolean;
   contextPanelTab: "materials" | "checks" | "actions" | "records";
   aiLensOpen: boolean;
@@ -269,12 +266,18 @@ export type AiLensTargetKind = "node" | "edge" | "map";
 
 export type AiLensItem = {
   id: string;
+  projectId: string;
+  aiRunId: string | null;
   category: AiLensCategory;
   targetKind: AiLensTargetKind;
   targetId: string | null;
   title: string;
   body: string;
   confidenceStatus: string;
+  evidence: string;
+  followUpQuestion: string | null;
+  sortOrder: number;
+  createdAt: string;
 };
 
 export type CursorSdkStatus = {

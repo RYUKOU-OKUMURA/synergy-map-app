@@ -23,18 +23,10 @@ pub struct AiSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MapUiPreferences {
-    #[serde(default = "default_bottom_drawer_open")]
-    pub bottom_drawer_open: bool,
-    #[serde(default = "default_bottom_drawer_height")]
-    pub bottom_drawer_height: i64,
     #[serde(default = "default_show_influence")]
     pub show_influence: bool,
     #[serde(default)]
     pub layout_locked: bool,
-    #[serde(default = "default_drawer_sort")]
-    pub drawer_sort: String,
-    #[serde(default)]
-    pub show_open_questions_only: bool,
     #[serde(default = "default_context_panel_open")]
     pub context_panel_open: bool,
     #[serde(default = "default_context_panel_tab")]
@@ -59,20 +51,8 @@ fn default_cursor_model_id() -> String {
     "composer-2.5".to_string()
 }
 
-fn default_bottom_drawer_open() -> bool {
-    true
-}
-
-fn default_bottom_drawer_height() -> i64 {
-    260
-}
-
 fn default_show_influence() -> bool {
     true
-}
-
-fn default_drawer_sort() -> String {
-    "relevance".to_string()
 }
 
 fn default_context_panel_open() -> bool {
@@ -94,12 +74,8 @@ fn default_sidebar_width() -> i64 {
 impl Default for MapUiPreferences {
     fn default() -> Self {
         Self {
-            bottom_drawer_open: default_bottom_drawer_open(),
-            bottom_drawer_height: default_bottom_drawer_height(),
             show_influence: default_show_influence(),
             layout_locked: false,
-            drawer_sort: default_drawer_sort(),
-            show_open_questions_only: false,
             context_panel_open: default_context_panel_open(),
             context_panel_tab: default_context_panel_tab(),
             ai_lens_open: false,
@@ -161,8 +137,6 @@ mod tests {
         assert!(settings.fallback_enabled);
         assert_eq!(settings.cursor_model_id, "composer-2.5");
         assert_eq!(settings.default_export_dir, None);
-        assert_eq!(settings.map_ui_preferences.bottom_drawer_height, 260);
-        assert!(settings.map_ui_preferences.bottom_drawer_open);
         assert!(settings.map_ui_preferences.show_influence);
         assert_eq!(settings.map_ui_preferences.sidebar_mode, "auto");
         assert_eq!(settings.map_ui_preferences.sidebar_width, 220);
@@ -176,9 +150,7 @@ mod tests {
         let settings = AiSettings {
             default_export_dir: Some(export_dir.display().to_string()),
             map_ui_preferences: MapUiPreferences {
-                bottom_drawer_height: 420,
                 layout_locked: true,
-                drawer_sort: "priority".to_string(),
                 ..MapUiPreferences::default()
             },
             ..AiSettings::default()
