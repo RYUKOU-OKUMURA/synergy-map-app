@@ -4,6 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   Archive,
   BarChart3,
+  Check,
   Clock3,
   Database,
   Download,
@@ -21,9 +22,11 @@ import {
   ListChecks,
   Map as MapIcon,
   MessageSquareText,
+  MoreHorizontal,
   MousePointer2,
   PanelLeftClose,
   PanelLeftOpen,
+  Pencil,
   PencilRuler,
   Plus,
   Save,
@@ -562,6 +565,9 @@ function App() {
     () => buildWorkspaceReflectionSummary(workspace),
     [workspace],
   );
+  const aiLensItems = useMemo(() => workspace.aiLensItems.slice(0, 3), [workspace]);
+  const aiLensOpen =
+    aiSettings.mapUiPreferences.aiLensOpen && aiLensItems.length > 0;
   const currentLayoutScope = `${activeProjectId ?? "none"}:${mapViewMode}`;
   const visibleLayoutSaveStatus =
     layoutSaveScope === currentLayoutScope ? layoutSaveStatus : "idle";
@@ -716,7 +722,7 @@ function App() {
   }
 
   async function handleUpdateProject(projectId: string, values: ProjectFormValues) {
-    await runAction(
+    return runAction(
       async () => {
         const nextWorkspace = await invoke<ProjectWorkspace>("update_project", {
           projectId,
@@ -731,24 +737,19 @@ function App() {
       },
       ({ nextProjects, nextWorkspace }) => {
         setProjects(nextProjects);
-        setWorkspace(nextWorkspace);
-        setSelectedProjectId(projectId);
-        setSelectedSuggestionId(null);
-        setApprovedChunkSignature(null);
+        if (projectId === activeProjectId) {
+          setWorkspace(nextWorkspace);
+          setSelectedProjectId(projectId);
+          setSelectedSuggestionId(null);
+          setApprovedChunkSignature(null);
+        }
         setNotice("マップ情報を保存しました。");
       },
     );
   }
 
   async function handleDeleteProject(projectId: string) {
-    if (
-      !window.confirm(
-        "このマップ、DBレコード、元情報ソース、source chunks、AI実行ファイル、exportsを削除します。続行しますか？",
-      )
-    ) {
-      return;
-    }
-    await runAction(
+    return runAction(
       async () => {
         await invoke("delete_project", { projectId });
         const nextProjects = await invoke<Project[]>("list_projects");
@@ -756,7 +757,9 @@ function App() {
       },
       ({ nextProjects }) => {
         setProjects(nextProjects);
-        handleClearProjectSelection("projects");
+        if (projectId === activeProjectId) {
+          handleClearProjectSelection("projects");
+        }
         setView("projects");
         setNotice("マップと関連データを削除しました。");
       },
@@ -1887,12 +1890,27 @@ function App() {
       <section className="app-shell">
         <WorkspaceTopBar
           activeProject={activeProject}
+          aiLensCount={aiLensItems.length}
+          aiLensOpen={aiLensOpen}
+          generationBusy={isBusy}
           isBusy={isBusy}
           latestAiRun={latestAiRun}
           onAiUpdate={handleAiUpdate}
+          onGenerateAiLens={handleGenerateAiLens}
+          onGenerateMap={handleRegenerateMap}
           onOpenHistory={() => handleSelectView("history")}
+          onOpenExtractReview={() => {
+            setSelectedItemId(workspace.extractedItems[0]?.id ?? null);
+            setView("extract");
+          }}
           onRefreshCodexRuntime={handleRefreshCodexRuntime}
+          onToggleAiLens={() =>
+            handleMapUiPreferencesChange({
+              aiLensOpen: !aiSettings.mapUiPreferences.aiLensOpen,
+            })
+          }
           primaryActionLabel={primaryActionLabel}
+          reflectionSummary={reflectionSummary}
           saveStatus={saveStatus}
           view={view}
           workspace={workspace}
@@ -1935,6 +1953,8 @@ function App() {
               mapInsightBusy={mapInsightBusy}
               mapUiPreferences={aiSettings.mapUiPreferences}
               mapViewMode={mapViewMode}
+              aiLensItems={aiLensItems}
+              aiLensOpen={aiLensOpen}
               onArrangeMap={handleArrangeMap}
               onAskAiLens={handleAskAiLens}
               onAskWholeMap={handleAskWholeMap}
@@ -1944,7 +1964,6 @@ function App() {
               onDeleteAiLensMemo={handleDeleteAiLensMemo}
               onFlowAnimationUserEnabledChange={setFlowAnimationUserEnabled}
               onGenerateMap={handleRegenerateMap}
-              onGenerateAiLens={handleGenerateAiLens}
               onGenerateSuggestions={handleGenerateSuggestions}
               onMapUiPreferencesChange={handleMapUiPreferencesChange}
               onOpenExtractReview={() => {
@@ -1998,6 +2017,7 @@ function App() {
             <ProjectsView
               activeProject={activeProject}
               activeProjectId={activeProject?.id ?? null}
+              busy={isBusy}
               onCreateProject={handleStartNewMap}
               onDeleteProject={handleDeleteProject}
               onSelectProject={(projectId) => {
@@ -2139,8 +2159,14 @@ function App() {
   );
 }
 
-function StatusChip({ children }: { children: React.ReactNode }) {
-  return <span className="status-chip">{children}</span>;
+function StatusChip({
+  children,
+  className = "",
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return <span className={`status-chip ${className}`.trim()}>{children}</span>;
 }
 
 function AppSidebar({
@@ -2327,23 +2353,39 @@ function AppSidebar({
 
 function WorkspaceTopBar({
   activeProject,
+  aiLensCount,
+  aiLensOpen,
+  generationBusy,
   isBusy,
   latestAiRun,
   onAiUpdate,
+  onGenerateAiLens,
+  onGenerateMap,
+  onOpenExtractReview,
   onOpenHistory,
   onRefreshCodexRuntime,
+  onToggleAiLens,
   primaryActionLabel,
+  reflectionSummary,
   saveStatus,
   view,
   workspace,
 }: {
   activeProject: Project | null;
+  aiLensCount: number;
+  aiLensOpen: boolean;
+  generationBusy: boolean;
   isBusy: boolean;
   latestAiRun: AiRunRow | null;
   onAiUpdate: () => void;
+  onGenerateAiLens: () => void;
+  onGenerateMap: () => void;
+  onOpenExtractReview: () => void;
   onOpenHistory: () => void;
   onRefreshCodexRuntime: () => void;
+  onToggleAiLens: () => void;
   primaryActionLabel: string;
+  reflectionSummary: WorkspaceReflectionSummary;
   saveStatus: string;
   view: ViewId;
   workspace: ProjectWorkspace;
@@ -2362,6 +2404,8 @@ function WorkspaceTopBar({
     : view === "map"
       ? "事業名と目的を入力してマップ作成を開始"
       : "マップを選ぶか、新しいマップを作成してください";
+  const showMapHeaderTools = Boolean(activeProject && view === "map");
+  const hasGeneratedMap = workspace.nodes.length > 0;
 
   return (
     <header className="top-bar">
@@ -2369,15 +2413,31 @@ function WorkspaceTopBar({
         <div className="project-title">{title}</div>
         <div className="project-meta">{meta}</div>
       </div>
+      {showMapHeaderTools && reflectionSummary.sourceCount > 0 ? (
+        <div className="top-reflection-slot">
+          <MapReflectionBanner
+            generationBusy={generationBusy}
+            onGenerateMap={onGenerateMap}
+            onOpenExtractReview={onOpenExtractReview}
+            summary={reflectionSummary}
+          />
+        </div>
+      ) : null}
       {activeProject ? (
         <div className="top-status">
           <span className="save-status">
             <Save size={13} aria-hidden="true" />
             {saveStatus}
           </span>
-          <StatusChip>{workspace.extractedItems.length}カード</StatusChip>
-          <StatusChip>{workspace.nodes.length}ノード</StatusChip>
-          <StatusChip>{workspace.edges.length}導線</StatusChip>
+          <StatusChip className="top-count-chip">
+            {workspace.extractedItems.length}カード
+          </StatusChip>
+          <StatusChip className="top-count-chip">
+            {workspace.nodes.length}ノード
+          </StatusChip>
+          <StatusChip className="top-count-chip">
+            {workspace.edges.length}導線
+          </StatusChip>
           <span
             className={`ai-source-chip ${
               isFallbackRun(latestAiRun) ? "ai-source-chip-fallback" : ""
@@ -2386,6 +2446,15 @@ function WorkspaceTopBar({
           >
             {aiRunSourceLabel(latestAiRun)}
           </span>
+          {showMapHeaderTools && hasGeneratedMap ? (
+            <AiLensToggle
+              busy={generationBusy}
+              count={aiLensCount}
+              open={aiLensOpen}
+              onGenerate={onGenerateAiLens}
+              onToggle={onToggleAiLens}
+            />
+          ) : null}
           <button className="ghost-button" onClick={onOpenHistory} type="button">
             <Clock3 size={15} aria-hidden="true" />
             履歴
@@ -2563,6 +2632,8 @@ function MapWorkspace({
   mapInsightBusy,
   mapUiPreferences,
   mapViewMode,
+  aiLensItems,
+  aiLensOpen,
   onArrangeMap,
   onAskAiLens,
   onAskWholeMap,
@@ -2571,7 +2642,6 @@ function MapWorkspace({
   onDeleteAiLensMemo,
   onEditModeChange,
   onFlowAnimationUserEnabledChange,
-  onGenerateAiLens,
   onGenerateSuggestions,
   onGenerateMap,
   onMapUiPreferencesChange,
@@ -2614,6 +2684,8 @@ function MapWorkspace({
   mapInsightBusy: boolean;
   mapUiPreferences: MapUiPreferences;
   mapViewMode: MapViewMode;
+  aiLensItems: AiLensItem[];
+  aiLensOpen: boolean;
   onArrangeMap: () => void;
   onAskAiLens: (aiLensItemId: string, questionText: string) => void;
   onAskWholeMap: (questionType?: string) => void;
@@ -2622,7 +2694,6 @@ function MapWorkspace({
   onDeleteAiLensMemo: (commentId: string) => void;
   onEditModeChange: (enabled: boolean) => void;
   onFlowAnimationUserEnabledChange: (enabled: boolean) => void;
-  onGenerateAiLens: () => void;
   onGenerateSuggestions: () => void;
   onGenerateMap: () => void;
   onMapUiPreferencesChange: (
@@ -2663,8 +2734,6 @@ function MapWorkspace({
         : "再生成";
   const shouldReviewDraft =
     hasOnboardingBrief(workspace) && hasUnconfirmedGeneratedItems(workspace);
-  const aiLensItems = workspace.aiLensItems.slice(0, 3);
-  const aiLensOpen = mapUiPreferences.aiLensOpen && aiLensItems.length > 0;
   const [aiLensPanelWidth, setAiLensPanelWidth] = useState(() => {
     if (typeof window === "undefined") return AI_LENS_PANEL_DEFAULT_WIDTH;
     return clampAiLensPanelWidth(
@@ -2828,14 +2897,6 @@ function MapWorkspace({
               )}
             </div>
 
-            {reflectionSummary.sourceCount > 0 ? (
-              <MapReflectionBanner
-                generationBusy={generationBusy}
-                onGenerateMap={onGenerateMap}
-                onOpenExtractReview={onOpenExtractReview}
-                summary={reflectionSummary}
-              />
-            ) : null}
           </div>
         </>
       ) : null}
@@ -2851,20 +2912,6 @@ function MapWorkspace({
           preferences={mapUiPreferences}
           shouldReviewDraft={shouldReviewDraft}
           workspace={workspace}
-        />
-      ) : null}
-
-      {hasGeneratedMap ? (
-        <AiLensToggle
-          busy={generationBusy}
-          count={aiLensItems.length}
-          open={aiLensOpen}
-          onGenerate={onGenerateAiLens}
-          onToggle={() =>
-            onMapUiPreferencesChange({
-              aiLensOpen: !mapUiPreferences.aiLensOpen,
-            })
-          }
         />
       ) : null}
 
@@ -2954,13 +3001,15 @@ function MapReflectionBanner({
   summary: WorkspaceReflectionSummary;
 }) {
   const needsExtraction = summary.pendingExtractionCount > 0;
-  const needsMapRefresh = summary.pendingMapCount > 0 || summary.mapRefreshNeeded;
+  const needsMissingSourceReview = summary.missingSourceReferenceCount > 0;
+  const needsAttention = needsReflectionAttention(summary);
+  const summaryText = reflectionSummaryText(summary);
 
-  if (!needsExtraction && !needsMapRefresh) {
+  if (!needsAttention) {
     return (
       <div className="map-reflection-banner map-reflection-banner-ok">
         <Info size={15} aria-hidden="true" />
-        <span>{reflectionSummaryText(summary)}</span>
+        <span title={summaryText}>{summaryText}</span>
         <StatusChip>
           {summary.mappedSourceCount}/{summary.sourceCount}反映済み
         </StatusChip>
@@ -2971,8 +3020,8 @@ function MapReflectionBanner({
   return (
     <div className="map-reflection-banner map-reflection-banner-warning">
       <TriangleAlert size={15} aria-hidden="true" />
-      <span>{reflectionSummaryText(summary)}</span>
-      {needsExtraction ? (
+      <span title={summaryText}>{summaryText}</span>
+      {needsExtraction || needsMissingSourceReview ? (
         <button className="ghost-button" onClick={onOpenExtractReview} type="button">
           <ListChecks size={15} aria-hidden="true" />
           抽出カードを更新
@@ -3348,7 +3397,7 @@ function AiLensToggle({
       type="button"
     >
       <Sparkles size={15} aria-hidden="true" />
-      {hasItems ? `AI視点 ${open ? "ON" : ""}` : "AI視点生成"}
+      AI視点
       <span>{count}</span>
     </button>
   );
@@ -4302,6 +4351,7 @@ function ConnectionStatus({
 function ProjectsView({
   activeProject,
   activeProjectId,
+  busy,
   onCreateProject,
   onDeleteProject,
   onSelectProject,
@@ -4310,12 +4360,29 @@ function ProjectsView({
 }: {
   activeProject: Project | null;
   activeProjectId: string | null;
+  busy: boolean;
   onCreateProject: () => void;
-  onDeleteProject: (projectId: string) => void;
+  onDeleteProject: (projectId: string) => Promise<boolean>;
   onSelectProject: (projectId: string) => void;
-  onUpdateProject: (projectId: string, values: ProjectFormValues) => void;
+  onUpdateProject: (projectId: string, values: ProjectFormValues) => Promise<boolean>;
   projects: Project[];
 }) {
+  const [openActionProjectId, setOpenActionProjectId] = useState<string | null>(null);
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
+
+  useEffect(() => {
+    if (!openActionProjectId && !editingProjectId) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setOpenActionProjectId(null);
+      setEditingProjectId(null);
+      setEditingTitle("");
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [editingProjectId, openActionProjectId]);
+
   function submitProject(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!activeProject) return;
@@ -4329,6 +4396,53 @@ function ProjectsView({
     });
   }
 
+  function startTitleEdit(project: Project) {
+    setEditingProjectId(project.id);
+    setEditingTitle(project.name);
+    setOpenActionProjectId(null);
+  }
+
+  function cancelTitleEdit() {
+    setEditingProjectId(null);
+    setEditingTitle("");
+  }
+
+  async function saveTitleEdit(project: Project) {
+    const nextName = editingTitle.trim();
+    if (!nextName) return;
+    if (nextName === project.name) {
+      cancelTitleEdit();
+      return;
+    }
+    const didSave = await onUpdateProject(project.id, {
+      name: nextName,
+      clientName: project.clientName ?? "",
+      industry: project.industry ?? "",
+      description: project.description ?? "",
+      memo: project.memo ?? "",
+    });
+    if (didSave) {
+      cancelTitleEdit();
+    }
+  }
+
+  async function confirmDeleteProject(project: Project) {
+    if (
+      !window.confirm(
+        `「${project.name}」を削除しますか？この操作は元に戻せません。`,
+      )
+    ) {
+      return;
+    }
+    const didDelete = await onDeleteProject(project.id);
+    if (didDelete) {
+      setOpenActionProjectId(null);
+      if (editingProjectId === project.id) {
+        cancelTitleEdit();
+      }
+    }
+  }
+
   return (
     <section className="page-panel">
       <div className="page-header">
@@ -4336,7 +4450,12 @@ function ProjectsView({
           <h1>マップ一覧</h1>
           <p>新しいマップを作成し、既存マップを再開します。</p>
         </div>
-        <button className="primary-button" onClick={onCreateProject} type="button">
+        <button
+          className="primary-button"
+          disabled={busy}
+          onClick={onCreateProject}
+          type="button"
+        >
           <Plus size={15} aria-hidden="true" />
           新しいマップを作る
         </button>
@@ -4370,35 +4489,120 @@ function ProjectsView({
             <textarea defaultValue={activeProject.memo ?? ""} name="memo" />
           </Field>
           <div className="button-row">
-            <button className="primary-button" type="submit">
+            <button className="primary-button" disabled={busy} type="submit">
               <Save size={15} aria-hidden="true" />
               マップを保存
-            </button>
-            <button
-              className="danger-button"
-              onClick={() => onDeleteProject(activeProject.id)}
-              type="button"
-            >
-              <Trash2 size={15} aria-hidden="true" />
-              マップを削除
             </button>
           </div>
         </form>
       ) : null}
       <div className="data-table">
-        {projects.map((project) => (
-          <button
-            className={`table-row ${project.id === activeProjectId ? "table-row-active" : ""}`}
-            key={project.id}
-            onClick={() => onSelectProject(project.id)}
-            type="button"
-          >
-            <span>{project.name}</span>
-            <span>{project.clientName ?? "未設定"}</span>
-            <span>{project.industry ?? "業種未設定"}</span>
-            <span>{formatTime(project.updatedAt)}</span>
-          </button>
-        ))}
+        {projects.map((project) => {
+          const isActive = project.id === activeProjectId;
+          const isEditingTitle = project.id === editingProjectId;
+          const titleIsSaveable = editingTitle.trim().length > 0;
+          return (
+            <div
+              className={`table-row project-table-row ${
+                isActive ? "table-row-active" : ""
+              }`}
+              key={project.id}
+            >
+              {isEditingTitle ? (
+                <div className="project-row-main project-row-main-editing">
+                  <form
+                    className="project-title-edit-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void saveTitleEdit(project);
+                    }}
+                  >
+                    <input
+                      aria-label={`${project.name}のマップ名`}
+                      autoFocus
+                      disabled={busy}
+                      onChange={(event) => setEditingTitle(event.target.value)}
+                      value={editingTitle}
+                    />
+                    <button
+                      aria-label="マップ名を保存"
+                      className="ghost-button icon-button"
+                      disabled={busy || !titleIsSaveable}
+                      title="マップ名を保存"
+                      type="submit"
+                    >
+                      <Check size={15} aria-hidden="true" />
+                    </button>
+                    <button
+                      aria-label="マップ名の編集をキャンセル"
+                      className="ghost-button icon-button"
+                      disabled={busy}
+                      onClick={cancelTitleEdit}
+                      title="キャンセル"
+                      type="button"
+                    >
+                      <X size={15} aria-hidden="true" />
+                    </button>
+                  </form>
+                  <span>{project.clientName ?? "未設定"}</span>
+                  <span>{project.industry ?? "業種未設定"}</span>
+                  <span>{formatTime(project.updatedAt)}</span>
+                </div>
+              ) : (
+                <button
+                  className="project-row-main"
+                  disabled={busy}
+                  onClick={() => onSelectProject(project.id)}
+                  type="button"
+                >
+                  <span>{project.name}</span>
+                  <span>{project.clientName ?? "未設定"}</span>
+                  <span>{project.industry ?? "業種未設定"}</span>
+                  <span>{formatTime(project.updatedAt)}</span>
+                </button>
+              )}
+              <div className="project-row-actions">
+                <button
+                  aria-expanded={openActionProjectId === project.id}
+                  aria-label={`${project.name}の操作`}
+                  className="ghost-button icon-button"
+                  disabled={busy}
+                  onClick={() =>
+                    setOpenActionProjectId((current) =>
+                      current === project.id ? null : project.id,
+                    )
+                  }
+                  title="マップの操作"
+                  type="button"
+                >
+                  <MoreHorizontal size={16} aria-hidden="true" />
+                </button>
+                {openActionProjectId === project.id ? (
+                  <div className="project-row-menu" role="menu">
+                    <button
+                      aria-label={`${project.name}のタイトルを編集`}
+                      className="ghost-button icon-button"
+                      onClick={() => startTitleEdit(project)}
+                      title="タイトルを編集"
+                      type="button"
+                    >
+                      <Pencil size={15} aria-hidden="true" />
+                    </button>
+                    <button
+                      aria-label={`${project.name}を削除`}
+                      className="ghost-button icon-button danger-button"
+                      onClick={() => void confirmDeleteProject(project)}
+                      title="マップを削除"
+                      type="button"
+                    >
+                      <Trash2 size={15} aria-hidden="true" />
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </section>
   );
