@@ -2051,7 +2051,7 @@ pub fn generate_ai_lens_from_map(
 }
 
 #[tauri::command]
-pub fn ask_map_insight(
+pub async fn ask_map_insight(
     app: AppHandle,
     state: State<'_, DbState>,
     project_id: String,
@@ -2059,8 +2059,31 @@ pub fn ask_map_insight(
     target_id: Option<String>,
     question_type: String,
 ) -> Result<MvpRunResult, String> {
-    let app_data_dir = app_data_dir_from_db(&state.db_path)?.to_path_buf();
-    let mut connection = open_connection(&state.db_path)?;
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        ask_map_insight_blocking(
+            app,
+            db_path,
+            project_id,
+            target_kind,
+            target_id,
+            question_type,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn ask_map_insight_blocking(
+    app: AppHandle,
+    db_path: PathBuf,
+    project_id: String,
+    target_kind: String,
+    target_id: Option<String>,
+    question_type: String,
+) -> Result<MvpRunResult, String> {
+    let app_data_dir = app_data_dir_from_db(&db_path)?.to_path_buf();
+    let mut connection = open_connection(&db_path)?;
     ensure_project_exists(&connection, &project_id)?;
     ensure_allowed_input("target_kind", &target_kind, &["map", "node", "edge"])?;
     ensure_allowed_input(
@@ -2089,7 +2112,7 @@ pub fn ask_map_insight(
         &purpose_context,
     )?;
     let prompt_hash = hash_text(&prompt);
-    let ai_result = try_structured_ai(app, &state.db_path, &prompt, map_insight_json_schema());
+    let ai_result = try_structured_ai(app, &db_path, &prompt, map_insight_json_schema());
     let (provider_used, duration_ms) = provider_metadata(&ai_result);
     let (output_json, model, status, error, fallback_used, message) = match ai_result.response_json
     {
@@ -2166,15 +2189,36 @@ pub fn ask_map_insight(
 }
 
 #[tauri::command]
-pub fn ask_ai_lens_insight(
+pub async fn ask_ai_lens_insight(
     app: AppHandle,
     state: State<'_, DbState>,
     project_id: String,
     ai_lens_item_id: String,
     question_text: String,
 ) -> Result<MvpRunResult, String> {
-    let app_data_dir = app_data_dir_from_db(&state.db_path)?.to_path_buf();
-    let mut connection = open_connection(&state.db_path)?;
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        ask_ai_lens_insight_blocking(
+            app,
+            db_path,
+            project_id,
+            ai_lens_item_id,
+            question_text,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn ask_ai_lens_insight_blocking(
+    app: AppHandle,
+    db_path: PathBuf,
+    project_id: String,
+    ai_lens_item_id: String,
+    question_text: String,
+) -> Result<MvpRunResult, String> {
+    let app_data_dir = app_data_dir_from_db(&db_path)?.to_path_buf();
+    let mut connection = open_connection(&db_path)?;
     ensure_project_exists(&connection, &project_id)?;
     let question = question_text.trim();
     ensure_non_empty_input("question_text", question)?;
@@ -2190,7 +2234,7 @@ pub fn ask_ai_lens_insight(
         .ok_or_else(|| "AI視点カードが見つかりません。".to_string())?;
     let prompt = ai_lens_insight_prompt(&workspace, ai_lens_item, question)?;
     let prompt_hash = hash_text(&prompt);
-    let ai_result = try_structured_ai(app, &state.db_path, &prompt, map_insight_json_schema());
+    let ai_result = try_structured_ai(app, &db_path, &prompt, map_insight_json_schema());
     let (provider_used, duration_ms) = provider_metadata(&ai_result);
     let (output_json, model, status, error, fallback_used, message) = match ai_result.response_json
     {
@@ -5689,15 +5733,31 @@ fn insert_ai_lens_insight_comment(
     question: &str,
 ) -> Result<(), String> {
     let now = now_rfc3339()?;
-    let mut body = format!("質問: {question}\n{}", output.answer);
+    let mut body = format!(
+        "質問: {question}\nAIの見立て: {}\n根拠: {}",
+        output.answer, item.evidence
+    );
     if !output.key_points.is_empty() {
         body.push_str("\n要点: ");
         body.push_str(&output.key_points.join(" / "));
     }
     if !output.follow_up_questions.is_empty() {
-        body.push_str("\n次に聞くこと: ");
+        body.push_str("\n要確認: ");
         body.push_str(&output.follow_up_questions.join(" / "));
     }
+    body.push_str("\n次に試す一手: ");
+    body.push_str(match item.category.as_str() {
+        "sales_flow_defect" => {
+            "問い合わせ後の対応、提案、成約までの流れをマップ上で確認する。"
+        }
+        "dormant_revenue_asset" => {
+            "既にある商品、顧客接点、発信をどの売上導線につなぐか確認する。"
+        }
+        "profit_blind_spot" => {
+            "単価、継続、高単価商品につながるポイントを確認する。"
+        }
+        _ => "この視点をマップ上の確認対象として残す。",
+    });
 
     transaction
         .execute(

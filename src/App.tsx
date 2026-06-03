@@ -158,6 +158,10 @@ const SIDEBAR_COLLAPSED_WIDTH = 68;
 const SIDEBAR_DEFAULT_WIDTH = 220;
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 300;
+const AI_LENS_PANEL_DEFAULT_WIDTH = 360;
+const AI_LENS_PANEL_MIN_WIDTH = 320;
+const AI_LENS_PANEL_MAX_WIDTH = 560;
+const AI_LENS_PANEL_WIDTH_STORAGE_KEY = "synergy-map.aiLensPanelWidth";
 
 const contextPanelTabs: Array<{
   id: MapUiPreferences["contextPanelTab"];
@@ -174,6 +178,14 @@ function clampSidebarWidth(width: number | null | undefined) {
   return Math.min(
     SIDEBAR_MAX_WIDTH,
     Math.max(SIDEBAR_MIN_WIDTH, Math.round(width ?? SIDEBAR_DEFAULT_WIDTH)),
+  );
+}
+
+function clampAiLensPanelWidth(width: number | null | undefined) {
+  if (!Number.isFinite(width)) return AI_LENS_PANEL_DEFAULT_WIDTH;
+  return Math.min(
+    AI_LENS_PANEL_MAX_WIDTH,
+    Math.max(AI_LENS_PANEL_MIN_WIDTH, Math.round(width ?? AI_LENS_PANEL_DEFAULT_WIDTH)),
   );
 }
 
@@ -313,6 +325,101 @@ function formatTime(value: string | null | undefined) {
   } catch {
     return value;
   }
+}
+
+function aiLensTargetLabel(item: AiLensItem, index: number) {
+  if (item.targetKind === "map") return "全体";
+  return `${index + 1}`;
+}
+
+function aiLensTargetDescription(item: AiLensItem) {
+  if (item.targetKind === "map") return "マップ全体";
+  if (item.targetKind === "node") return "該当ノード";
+  return "該当導線";
+}
+
+function aiLensActionHint(category: AiLensItem["category"]) {
+  if (category === "sales_flow_defect") {
+    return "問い合わせ後の対応、提案、成約までの流れをマップ上で確認する。";
+  }
+  if (category === "dormant_revenue_asset") {
+    return "既にある商品、顧客接点、発信をどの売上導線につなぐか確認する。";
+  }
+  return "単価、継続、高単価商品につながるポイントを確認する。";
+}
+
+function aiLensDefaultQuestion(item: AiLensItem) {
+  return item.followUpQuestion ?? `${item.title}について、次に確認すべき点を整理して。`;
+}
+
+function aiLensMemoQuestion(item: AiLensItem) {
+  return `${item.title}を、AIの見立て・根拠・要確認・次に試す一手に分けて理解メモとして残して。`;
+}
+
+function parseAiLensInsightBody(body: string) {
+  const questionMatch = body.match(/^質問:\s*(.+?)(?:\n|$)/);
+  const question = questionMatch?.[1]?.trim() ?? null;
+  const withoutQuestion = body.replace(/^質問:\s*.+?(?:\n|$)/, "").trim();
+  const labels = [
+    "AIの見立て:",
+    "根拠:",
+    "要点:",
+    "要確認:",
+    "次に聞くこと:",
+    "次に試す一手:",
+  ];
+
+  function section(label: string) {
+    const startIndex = withoutQuestion.indexOf(label);
+    if (startIndex < 0) return null;
+    const contentStart = startIndex + label.length;
+    const contentEnd = labels
+      .map((candidate) => withoutQuestion.indexOf(candidate, contentStart))
+      .filter((index) => index >= 0)
+      .sort((a, b) => a - b)[0];
+    return withoutQuestion
+      .slice(contentStart, contentEnd ?? withoutQuestion.length)
+      .trim();
+  }
+
+  const labeledEstimation = section("AIの見立て:");
+  const evidence = section("根拠:");
+  const keyPoints = section("要点:");
+  const followUp = section("要確認:") ?? section("次に聞くこと:");
+  const nextAction = section("次に試す一手:");
+  const sectionStarts = labels
+    .map((label) => withoutQuestion.indexOf(label))
+    .filter((index) => index >= 0);
+  const estimationEnd = sectionStarts.length > 0 ? Math.min(...sectionStarts) : -1;
+  const estimation =
+    labeledEstimation ??
+    (estimationEnd >= 0
+      ? withoutQuestion.slice(0, estimationEnd).trim()
+      : withoutQuestion.trim());
+  return {
+    question,
+    estimation: estimation || withoutQuestion,
+    keyPoints: [evidence, keyPoints].filter(Boolean).join(" / ") || null,
+    followUp,
+    nextAction,
+  };
+}
+
+function mergeAiRunWorkspace(current: ProjectWorkspace, next: ProjectWorkspace) {
+  return {
+    ...current,
+    aiComments: next.aiComments,
+    aiRuns: next.aiRuns,
+    versions: next.versions,
+  };
+}
+
+function aiLensTargetNote(item: AiLensItem, index: number) {
+  if (item.targetKind === "map") {
+    return "マップ全体を対象にした指摘です。";
+  }
+  const target = item.targetKind === "node" ? "ノード" : "導線";
+  return `マップ上の番号${index + 1}の${target}を強調表示しています。`;
 }
 
 function isFallbackRun(run: AiRunRow | null | undefined) {
@@ -1518,8 +1625,8 @@ function App() {
     try {
       if (!isTauriRuntime) {
         const now = new Date().toISOString();
-        setWorkspace({
-          ...workspace,
+        setWorkspace((current) => ({
+          ...current,
           aiComments: [
             {
               id: `local-map-insight-${Date.now()}`,
@@ -1531,9 +1638,9 @@ function App() {
               confidenceStatus: "estimated",
               createdAt: now,
             },
-            ...workspace.aiComments,
+            ...current.aiComments,
           ],
-        });
+        }));
         void handleMapUiPreferencesChange({ aiLensOpen: true });
         return;
       }
@@ -1543,7 +1650,7 @@ function App() {
         targetId: null,
         questionType,
       });
-      setWorkspace(result.workspace);
+      setWorkspace((current) => mergeAiRunWorkspace(current, result.workspace));
       setNotice(result.message);
       void handleMapUiPreferencesChange({ aiLensOpen: true });
     } catch (caughtError) {
@@ -1569,8 +1676,8 @@ function App() {
         );
         if (!item) throw new Error("AI視点カードが見つかりません。");
         const now = new Date().toISOString();
-        setWorkspace({
-          ...workspace,
+        setWorkspace((current) => ({
+          ...current,
           aiComments: [
             {
               id: `local-ai-lens-insight-${Date.now()}`,
@@ -1582,9 +1689,9 @@ function App() {
               confidenceStatus: item.confidenceStatus,
               createdAt: now,
             },
-            ...workspace.aiComments,
+            ...current.aiComments,
           ],
-        });
+        }));
         setNotice("AI視点への理解メモを生成しました。");
         return;
       }
@@ -1593,7 +1700,7 @@ function App() {
         aiLensItemId,
         questionText: question,
       });
-      setWorkspace(result.workspace);
+      setWorkspace((current) => mergeAiRunWorkspace(current, result.workspace));
       setNotice(result.message);
     } catch (caughtError) {
       setError(String(caughtError));
@@ -2516,6 +2623,12 @@ function MapWorkspace({
     hasOnboardingBrief(workspace) && hasUnconfirmedGeneratedItems(workspace);
   const aiLensItems = workspace.aiLensItems.slice(0, 3);
   const aiLensOpen = mapUiPreferences.aiLensOpen && aiLensItems.length > 0;
+  const [aiLensPanelWidth, setAiLensPanelWidth] = useState(() => {
+    if (typeof window === "undefined") return AI_LENS_PANEL_DEFAULT_WIDTH;
+    return clampAiLensPanelWidth(
+      Number(window.localStorage.getItem(AI_LENS_PANEL_WIDTH_STORAGE_KEY)),
+    );
+  });
   const handleCanvasPositionsChange = useCallback(
     (positions: MapNodeLayout[]) => onSavePositions(mapViewMode, positions),
     [mapViewMode, onSavePositions],
@@ -2528,6 +2641,11 @@ function MapWorkspace({
           ? "map-workbench-context-open"
           : ""
       } ${aiLensOpen ? "map-workbench-ai-lens-open" : ""}`}
+      style={
+        {
+          "--ai-lens-panel-width": `${aiLensPanelWidth}px`,
+        } as React.CSSProperties
+      }
     >
       {hasGeneratedMap ? (
         <>
@@ -2772,6 +2890,8 @@ function MapWorkspace({
           busyItemId={aiLensInsightBusyId}
           items={aiLensItems}
           onAsk={onAskAiLens}
+          onPanelWidthChange={setAiLensPanelWidth}
+          panelWidth={aiLensPanelWidth}
         />
       ) : null}
     </div>
@@ -3195,21 +3315,65 @@ function AiLensPanel({
   busyItemId,
   items,
   onAsk,
+  onPanelWidthChange,
+  panelWidth,
 }: {
   aiComments: AiCommentRow[];
   busyItemId: string | null;
   items: AiLensItem[];
   onAsk: (aiLensItemId: string, questionText: string) => void;
+  onPanelWidthChange: (width: number) => void;
+  panelWidth: number;
 }) {
+  const [resizeStart, setResizeStart] = useState<{
+    startWidth: number;
+    startX: number;
+  } | null>(null);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(
     items[0]?.id ?? null,
   );
+  const [expandedItemIds, setExpandedItemIds] = useState<string[]>([]);
+  const [memoDialogOpen, setMemoDialogOpen] = useState(false);
   const [questionText, setQuestionText] = useState("");
   const selectedItem =
     items.find((item) => item.id === selectedItemId) ?? items[0] ?? null;
   const insightComments = aiComments
     .filter((comment) => comment.commentType === "ai_lens_insight")
-    .slice(0, 3);
+    .slice(0, 8);
+  const latestInsightComment = insightComments[0] ?? null;
+
+  useEffect(() => {
+    if (!resizeStart) return;
+    const activeResizeStart = resizeStart;
+
+    function handleMouseMove(event: MouseEvent) {
+      const nextWidth =
+        activeResizeStart.startWidth - (event.clientX - activeResizeStart.startX);
+      onPanelWidthChange(clampAiLensPanelWidth(nextWidth));
+    }
+
+    function handleMouseUp() {
+      setResizeStart(null);
+      window.localStorage.setItem(AI_LENS_PANEL_WIDTH_STORAGE_KEY, String(panelWidth));
+    }
+
+    document.body.classList.add("ai-lens-panel-resizing");
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      document.body.classList.remove("ai-lens-panel-resizing");
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [onPanelWidthChange, panelWidth, resizeStart]);
+
+  function persistPanelWidth(width: number) {
+    const clamped = clampAiLensPanelWidth(width);
+    onPanelWidthChange(clamped);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(AI_LENS_PANEL_WIDTH_STORAGE_KEY, String(clamped));
+    }
+  }
 
   function submitQuestion(question: string) {
     if (!selectedItem) return;
@@ -3219,8 +3383,35 @@ function AiLensPanel({
     setQuestionText("");
   }
 
+  function toggleExpanded(itemId: string) {
+    setExpandedItemIds((current) =>
+      current.includes(itemId)
+        ? current.filter((id) => id !== itemId)
+        : [...current, itemId],
+    );
+  }
+
+  function selectItemForQuestion(item: AiLensItem) {
+    setSelectedItemId(item.id);
+    setQuestionText(aiLensDefaultQuestion(item));
+  }
+
   return (
-    <aside className="ai-lens-panel">
+    <aside
+      className="ai-lens-panel"
+      style={{ "--ai-lens-panel-width": `${panelWidth}px` } as React.CSSProperties}
+    >
+      <div
+        aria-label="AI視点パネルの幅を調整"
+        className="ai-lens-resize-handle"
+        onDoubleClick={() => persistPanelWidth(AI_LENS_PANEL_DEFAULT_WIDTH)}
+        onMouseDown={(event) => {
+          event.preventDefault();
+          setResizeStart({ startWidth: panelWidth, startX: event.clientX });
+        }}
+        role="separator"
+        tabIndex={0}
+      />
       <div className="panel-heading">
         <div>
           <span>AIが見ている点</span>
@@ -3235,46 +3426,71 @@ function AiLensPanel({
             }`}
             key={item.id}
           >
-            <div className="ai-lens-card-heading">
+            <div className="ai-lens-card-meta">
               <span className="ai-lens-card-marker">
-                {item.targetKind === "map" ? "全体" : index + 1}
+                {aiLensTargetLabel(item, index)}
               </span>
-              <strong>{aiLensCategoryLabels[item.category]}</strong>
+              <span>{aiLensCategoryLabels[item.category]}</span>
+              <strong>{index === 0 ? "重要" : "注目"}</strong>
             </div>
-            <h3>{item.title}</h3>
-            <p>{item.body}</p>
-            <small>
-              {item.targetKind === "map"
-                ? "マップ全体への指摘"
-                : "マップ上の番号に対応"}{" "}
-              / {labelFor(confidenceOptions, item.confidenceStatus)}
-            </small>
-            <p className="ai-lens-evidence">根拠: {item.evidence}</p>
-            {item.followUpQuestion ? (
-              <p className="ai-lens-question">次に確認: {item.followUpQuestion}</p>
+            <div className="ai-lens-card-heading">
+              <h3>{item.title}</h3>
+              <small>
+                {aiLensTargetDescription(item)} /{" "}
+                {labelFor(confidenceOptions, item.confidenceStatus)}
+              </small>
+            </div>
+            <p className="ai-lens-summary">{shortText(item.body, 112)}</p>
+            <p className="ai-lens-target-note">{aiLensTargetNote(item, index)}</p>
+            <div className="ai-lens-card-actions">
+              <button onClick={() => selectItemForQuestion(item)} type="button">
+                <MessageSquareText size={14} aria-hidden="true" />
+                この視点で質問
+              </button>
+              <button
+                disabled={Boolean(busyItemId)}
+                onClick={() => {
+                  setSelectedItemId(item.id);
+                  onAsk(item.id, aiLensMemoQuestion(item));
+                }}
+                type="button"
+              >
+                <FileText size={14} aria-hidden="true" />
+                メモに残す
+              </button>
+            </div>
+            <button
+              className="ai-lens-detail-toggle"
+              onClick={() => toggleExpanded(item.id)}
+              type="button"
+            >
+              {expandedItemIds.includes(item.id) ? "詳細を閉じる" : "詳細を開く"}
+            </button>
+            {expandedItemIds.includes(item.id) ? (
+              <div className="ai-lens-detail">
+                <div>
+                  <span>AIの見立て</span>
+                  <p>{item.body}</p>
+                </div>
+                <div>
+                  <span>根拠</span>
+                  <p>{item.evidence}</p>
+                </div>
+                {item.followUpQuestion ? (
+                  <div>
+                    <span>要確認</span>
+                    <p>{item.followUpQuestion}</p>
+                  </div>
+                ) : null}
+                <div>
+                  <span>次に試す一手</span>
+                  <p>{aiLensActionHint(item.category)}</p>
+                </div>
+              </div>
             ) : null}
-            <button
-              className="ghost-button"
-              disabled={busyItemId === item.id}
-              onClick={() => {
-                setSelectedItemId(item.id);
-                onAsk(
-                  item.id,
-                  item.followUpQuestion ?? "このAI視点について詳しく教えてください。",
-                );
-              }}
-              type="button"
-            >
-              <MessageSquareText size={14} aria-hidden="true" />
-              {busyItemId === item.id ? "質問中" : "詳しく聞く"}
-            </button>
-            <button
-              className="subtle-select-button"
-              onClick={() => setSelectedItemId(item.id)}
-              type="button"
-            >
-              このカードを質問対象にする
-            </button>
+            {busyItemId === item.id ? (
+              <small className="ai-lens-card-busy">AIが確認中...</small>
+            ) : null}
           </article>
         ))}
       </div>
@@ -3285,6 +3501,10 @@ function AiLensPanel({
           submitQuestion(questionText);
         }}
       >
+        <div className="ai-lens-question-target">
+          <strong>{selectedItem ? selectedItem.title : "AI視点"}</strong>
+          <span>質問は選択中の視点に紐づいて理解メモへ残ります。</span>
+        </div>
         <textarea
           maxLength={500}
           onChange={(event) => setQuestionText(event.target.value)}
@@ -3302,20 +3522,87 @@ function AiLensPanel({
           送信
         </button>
       </form>
-      <div className="ai-lens-insight-list">
-        <strong>最近の理解メモ</strong>
-        {insightComments.length > 0 ? (
-          insightComments.map((comment) => (
-            <article className="ai-lens-insight-card" key={comment.id}>
-              <small>{formatTime(comment.createdAt)}</small>
-              <h4>{comment.title}</h4>
-              <p>{shortText(comment.body, 180)}</p>
-            </article>
-          ))
-        ) : (
-          <p>カードに質問すると、ここに理解メモが残ります。</p>
-        )}
+      <div className="ai-lens-memo-summary">
+        <div>
+          <strong>理解メモ</strong>
+          <span>
+            {latestInsightComment
+              ? `最新 ${formatTime(latestInsightComment.createdAt)} / ${insightComments.length}件`
+              : "質問するとメモに残ります"}
+          </span>
+        </div>
+        <button
+          disabled={insightComments.length === 0}
+          onClick={() => setMemoDialogOpen(true)}
+          type="button"
+        >
+          <FileText size={14} aria-hidden="true" />
+          理解メモを開く
+        </button>
       </div>
+      {memoDialogOpen ? (
+        <div className="ai-lens-memo-modal-backdrop" role="presentation">
+          <section
+            aria-label="最近の理解メモ"
+            aria-modal="true"
+            className="ai-lens-memo-modal"
+            role="dialog"
+          >
+            <div className="ai-lens-memo-modal-header">
+              <div>
+                <span>最近の理解メモ</span>
+                <small>AI視点への質問と回答を、後から読み返すための記録です。</small>
+              </div>
+              <button
+                aria-label="理解メモを閉じる"
+                onClick={() => setMemoDialogOpen(false)}
+                type="button"
+              >
+                <X size={16} aria-hidden="true" />
+              </button>
+            </div>
+            <div className="ai-lens-memo-modal-list">
+              {insightComments.map((comment) => {
+                const memo = parseAiLensInsightBody(comment.body);
+                return (
+                  <article className="ai-lens-insight-card" key={comment.id}>
+                    <small>{formatTime(comment.createdAt)}</small>
+                    <h4>{comment.title}</h4>
+                    {memo.question ? (
+                      <div className="ai-lens-memo-section">
+                        <span>質問</span>
+                        <p>{memo.question}</p>
+                      </div>
+                    ) : null}
+                    <div className="ai-lens-memo-section">
+                      <span>AIの見立て</span>
+                      <p>{memo.estimation}</p>
+                    </div>
+                    {memo.keyPoints ? (
+                      <div className="ai-lens-memo-section">
+                        <span>根拠 / 要点</span>
+                        <p>{memo.keyPoints}</p>
+                      </div>
+                    ) : null}
+                    {memo.followUp ? (
+                      <div className="ai-lens-memo-section">
+                        <span>要確認</span>
+                        <p>{memo.followUp}</p>
+                      </div>
+                    ) : null}
+                    {memo.nextAction ? (
+                      <div className="ai-lens-memo-section">
+                        <span>次に試す一手</span>
+                        <p>{memo.nextAction}</p>
+                      </div>
+                    ) : null}
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        </div>
+      ) : null}
     </aside>
   );
 }
