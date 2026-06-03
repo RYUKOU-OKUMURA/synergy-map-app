@@ -3010,28 +3010,68 @@ function ContextChecksTab({
   actionItems: ActionItemRow[];
   onComplete: (actionItem: ActionItemRow) => void;
 }) {
+  const [expandedActionItemId, setExpandedActionItemId] = useState<string | null>(
+    null,
+  );
+
+  function toggleActionItem(actionItemId: string) {
+    setExpandedActionItemId((current) =>
+      current === actionItemId ? null : actionItemId,
+    );
+  }
+
+  function handleActionItemKeyDown(
+    event: React.KeyboardEvent<HTMLElement>,
+    actionItemId: string,
+  ) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    toggleActionItem(actionItemId);
+  }
+
   return (
     <div className="context-panel-list">
       <div className="context-panel-summary">
         <StatusChip>{actionItems.length}件 未確認</StatusChip>
       </div>
-      {actionItems.slice(0, 8).map((actionItem) => (
-        <article className="context-task-row" key={actionItem.id}>
-          <button
-            aria-label={`${actionItem.title}を完了`}
-            className="question-check"
-            onClick={() => onComplete(actionItem)}
-            type="button"
-          />
-          <div>
-            <strong>{actionItem.body}</strong>
-            <small>
-              優先度 {labelFor(priorityOptions, actionItem.priority)} /{" "}
-              {formatTime(actionItem.createdAt)}
-            </small>
-          </div>
-        </article>
-      ))}
+      {actionItems.slice(0, 8).map((actionItem) => {
+        const expanded = expandedActionItemId === actionItem.id;
+
+        return (
+          <article
+            aria-expanded={expanded}
+            className={`context-task-row ${
+              expanded ? "context-card-expanded" : ""
+            }`}
+            key={actionItem.id}
+            onClick={() => toggleActionItem(actionItem.id)}
+            onKeyDown={(event) => handleActionItemKeyDown(event, actionItem.id)}
+            role="button"
+            tabIndex={0}
+          >
+            <button
+              aria-label={`${actionItem.title}を完了`}
+              className="question-check"
+              onClick={(event) => {
+                event.stopPropagation();
+                onComplete(actionItem);
+              }}
+              onKeyDown={(event) => event.stopPropagation()}
+              type="button"
+            />
+            <div>
+              <strong>{expanded ? actionItem.title : actionItem.body}</strong>
+              {expanded ? (
+                <p className="context-card-detail">{actionItem.body}</p>
+              ) : null}
+              <small>
+                優先度 {labelFor(priorityOptions, actionItem.priority)} /{" "}
+                {formatTime(actionItem.createdAt)}
+              </small>
+            </div>
+          </article>
+        );
+      })}
       {actionItems.length === 0 ? (
         <div className="empty-panel">未確認の項目はありません。</div>
       ) : null}
@@ -3048,25 +3088,46 @@ function ContextActionsTab({
   onSelectSuggestion: (suggestionId: string) => void;
   suggestions: SuggestionRow[];
 }) {
+  const [expandedSuggestionId, setExpandedSuggestionId] = useState<string | null>(
+    null,
+  );
+
+  function selectSuggestion(suggestionId: string) {
+    setExpandedSuggestionId((current) =>
+      current === suggestionId ? null : suggestionId,
+    );
+    onSelectSuggestion(suggestionId);
+  }
+
   return (
     <div className="context-panel-list">
       <div className="context-panel-summary">
         <StatusChip>{suggestions.length}件 一手</StatusChip>
       </div>
-      {suggestions.slice(0, 8).map((suggestion) => (
-        <button
-          className="context-item-button"
-          key={suggestion.id}
-          onClick={() => onSelectSuggestion(suggestion.id)}
-          type="button"
-        >
-          <strong>{suggestion.title}</strong>
-          <small>
-            売上 {labelFor(impactLevelOptions, suggestion.expectedRevenueImpact)} / 工数{" "}
-            {labelFor(costLevelOptions, suggestion.effortLevel)}
-          </small>
-        </button>
-      ))}
+      {suggestions.slice(0, 8).map((suggestion) => {
+        const expanded = expandedSuggestionId === suggestion.id;
+
+        return (
+          <button
+            aria-expanded={expanded}
+            className={`context-item-button context-action-button ${
+              expanded ? "context-card-expanded" : ""
+            }`}
+            key={suggestion.id}
+            onClick={() => selectSuggestion(suggestion.id)}
+            type="button"
+          >
+            <strong>{suggestion.title}</strong>
+            {expanded ? (
+              <p className="context-card-detail">{suggestion.description}</p>
+            ) : null}
+            <small>
+              売上 {labelFor(impactLevelOptions, suggestion.expectedRevenueImpact)} / 工数{" "}
+              {labelFor(costLevelOptions, suggestion.effortLevel)}
+            </small>
+          </button>
+        );
+      })}
       {suggestions.length === 0 ? (
         <div className="empty-panel">次の一手はまだありません。</div>
       ) : null}

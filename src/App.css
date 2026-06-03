@@ -1137,6 +1137,8 @@ button:disabled {
 .context-item-button strong,
 .context-task-row strong,
 .context-note-row strong {
+  display: block;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1164,8 +1166,38 @@ button:disabled {
   align-items: flex-start;
 }
 
+.context-task-row > div {
+  min-width: 0;
+}
+
 .context-task-row small {
   grid-column: auto;
+}
+
+.context-card-expanded strong {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.context-card-detail {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.5;
+}
+
+.context-action-button {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: flex-start;
+}
+
+.context-action-button small {
+  grid-column: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .context-note-row p {
