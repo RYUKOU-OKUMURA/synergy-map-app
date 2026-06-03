@@ -1248,6 +1248,7 @@ pub fn run() {
             mvp1::create_map_note,
             mvp1::update_map_note,
             mvp1::delete_map_note,
+            mvp1::delete_ai_lens_insight_comment,
             mvp1::create_named_version,
             mvp1::export_markdown,
             mvp1::export_csv_bundle

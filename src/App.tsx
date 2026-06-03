@@ -475,6 +475,9 @@ function App() {
   const [layoutSaveScope, setLayoutSaveScope] = useState<string | null>(null);
   const [mapInsightBusy, setMapInsightBusy] = useState(false);
   const [aiLensInsightBusyId, setAiLensInsightBusyId] = useState<string | null>(null);
+  const [deletingAiLensMemoId, setDeletingAiLensMemoId] = useState<string | null>(
+    null,
+  );
   const [isBusy, setIsBusy] = useState(false);
   const [codexRuntimeInfo, setCodexRuntimeInfo] = useState<CodexRuntimeInfo | null>(
     null,
@@ -1709,6 +1712,39 @@ function App() {
     }
   }
 
+  async function handleDeleteAiLensMemo(commentId: string) {
+    if (!activeProjectId) return;
+    setDeletingAiLensMemoId(commentId);
+    setError(null);
+    try {
+      if (!isTauriRuntime) {
+        setWorkspace((current) => ({
+          ...current,
+          aiComments: current.aiComments.filter((comment) => comment.id !== commentId),
+        }));
+        setNotice("理解メモを削除しました。");
+        return;
+      }
+      const nextWorkspace = await invoke<ProjectWorkspace>(
+        "delete_ai_lens_insight_comment",
+        {
+          projectId: activeProjectId,
+          commentId,
+        },
+      );
+      setWorkspace((current) => ({
+        ...current,
+        aiComments: nextWorkspace.aiComments,
+        versions: nextWorkspace.versions,
+      }));
+      setNotice("理解メモを削除しました。");
+    } catch (caughtError) {
+      setError(String(caughtError));
+    } finally {
+      setDeletingAiLensMemoId(null);
+    }
+  }
+
   useEffect(() => {
     if (!isTauriRuntime) return;
     let cancelled = false;
@@ -1895,6 +1931,7 @@ function App() {
               layoutSaveStatus={visibleLayoutSaveStatus}
               latestAiRun={latestAiRun}
               aiLensInsightBusyId={aiLensInsightBusyId}
+              deletingAiLensMemoId={deletingAiLensMemoId}
               mapInsightBusy={mapInsightBusy}
               mapUiPreferences={aiSettings.mapUiPreferences}
               mapViewMode={mapViewMode}
@@ -1904,6 +1941,7 @@ function App() {
               onCreateMapEdge={handleCreateMapEdge}
               onCreateOnboardingMap={handleCreateOnboardingMap}
               onEditModeChange={setIsMapEditMode}
+              onDeleteAiLensMemo={handleDeleteAiLensMemo}
               onFlowAnimationUserEnabledChange={setFlowAnimationUserEnabled}
               onGenerateMap={handleRegenerateMap}
               onGenerateAiLens={handleGenerateAiLens}
@@ -2521,6 +2559,7 @@ function MapWorkspace({
   layoutSaveStatus,
   latestAiRun,
   aiLensInsightBusyId,
+  deletingAiLensMemoId,
   mapInsightBusy,
   mapUiPreferences,
   mapViewMode,
@@ -2529,6 +2568,7 @@ function MapWorkspace({
   onAskWholeMap,
   onCreateMapEdge,
   onCreateOnboardingMap,
+  onDeleteAiLensMemo,
   onEditModeChange,
   onFlowAnimationUserEnabledChange,
   onGenerateAiLens,
@@ -2570,6 +2610,7 @@ function MapWorkspace({
   layoutSaveStatus: "idle" | "saving" | "saved" | "error";
   latestAiRun: AiRunRow | null;
   aiLensInsightBusyId: string | null;
+  deletingAiLensMemoId: string | null;
   mapInsightBusy: boolean;
   mapUiPreferences: MapUiPreferences;
   mapViewMode: MapViewMode;
@@ -2578,6 +2619,7 @@ function MapWorkspace({
   onAskWholeMap: (questionType?: string) => void;
   onCreateMapEdge: (sourceNodeId: string, targetNodeId: string) => void;
   onCreateOnboardingMap: (draft: OnboardingDraft) => void;
+  onDeleteAiLensMemo: (commentId: string) => void;
   onEditModeChange: (enabled: boolean) => void;
   onFlowAnimationUserEnabledChange: (enabled: boolean) => void;
   onGenerateAiLens: () => void;
@@ -2888,8 +2930,10 @@ function MapWorkspace({
         <AiLensPanel
           aiComments={workspace.aiComments}
           busyItemId={aiLensInsightBusyId}
+          deletingMemoId={deletingAiLensMemoId}
           items={aiLensItems}
           onAsk={onAskAiLens}
+          onDeleteMemo={onDeleteAiLensMemo}
           onPanelWidthChange={setAiLensPanelWidth}
           panelWidth={aiLensPanelWidth}
         />
@@ -3313,15 +3357,19 @@ function AiLensToggle({
 function AiLensPanel({
   aiComments,
   busyItemId,
+  deletingMemoId,
   items,
   onAsk,
+  onDeleteMemo,
   onPanelWidthChange,
   panelWidth,
 }: {
   aiComments: AiCommentRow[];
   busyItemId: string | null;
+  deletingMemoId: string | null;
   items: AiLensItem[];
   onAsk: (aiLensItemId: string, questionText: string) => void;
+  onDeleteMemo: (commentId: string) => void;
   onPanelWidthChange: (width: number) => void;
   panelWidth: number;
 }) {
@@ -3566,8 +3614,21 @@ function AiLensPanel({
                 const memo = parseAiLensInsightBody(comment.body);
                 return (
                   <article className="ai-lens-insight-card" key={comment.id}>
-                    <small>{formatTime(comment.createdAt)}</small>
-                    <h4>{comment.title}</h4>
+                    <div className="ai-lens-memo-card-header">
+                      <div>
+                        <small>{formatTime(comment.createdAt)}</small>
+                        <h4>{comment.title}</h4>
+                      </div>
+                      <button
+                        aria-label={`${comment.title}を削除`}
+                        disabled={deletingMemoId === comment.id}
+                        onClick={() => onDeleteMemo(comment.id)}
+                        type="button"
+                      >
+                        <Trash2 size={14} aria-hidden="true" />
+                        {deletingMemoId === comment.id ? "削除中" : "削除"}
+                      </button>
+                    </div>
                     {memo.question ? (
                       <div className="ai-lens-memo-section">
                         <span>質問</span>
@@ -3599,6 +3660,9 @@ function AiLensPanel({
                   </article>
                 );
               })}
+              {insightComments.length === 0 ? (
+                <div className="empty-panel">理解メモはまだありません。</div>
+              ) : null}
             </div>
           </section>
         </div>

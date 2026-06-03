@@ -2198,13 +2198,7 @@ pub async fn ask_ai_lens_insight(
 ) -> Result<MvpRunResult, String> {
     let db_path = state.db_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        ask_ai_lens_insight_blocking(
-            app,
-            db_path,
-            project_id,
-            ai_lens_item_id,
-            question_text,
-        )
+        ask_ai_lens_insight_blocking(app, db_path, project_id, ai_lens_item_id, question_text)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2721,6 +2715,44 @@ pub fn delete_map_note(
     transaction.commit().map_err(|error| error.to_string())?;
 
     load_workspace(&connection, &project_id)
+}
+
+#[tauri::command]
+pub fn delete_ai_lens_insight_comment(
+    state: State<'_, DbState>,
+    project_id: String,
+    comment_id: String,
+) -> Result<ProjectWorkspace, String> {
+    let mut connection = open_connection(&state.db_path)?;
+    ensure_project_exists(&connection, &project_id)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    delete_ai_lens_insight_comment_in_transaction(&transaction, &project_id, &comment_id)?;
+    record_snapshot_in_transaction(&transaction, &project_id, "ai_lens_insight_delete")?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    load_workspace(&connection, &project_id)
+}
+
+fn delete_ai_lens_insight_comment_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+    comment_id: &str,
+) -> Result<(), String> {
+    let deleted_count = transaction
+        .execute(
+            "DELETE FROM ai_comments
+             WHERE id = ?1 AND project_id = ?2 AND comment_type = 'ai_lens_insight'",
+            params![comment_id, project_id],
+        )
+        .map_err(|error| error.to_string())?;
+
+    if deleted_count == 0 {
+        return Err("理解メモが見つかりません。".to_string());
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -5747,15 +5779,9 @@ fn insert_ai_lens_insight_comment(
     }
     body.push_str("\n次に試す一手: ");
     body.push_str(match item.category.as_str() {
-        "sales_flow_defect" => {
-            "問い合わせ後の対応、提案、成約までの流れをマップ上で確認する。"
-        }
-        "dormant_revenue_asset" => {
-            "既にある商品、顧客接点、発信をどの売上導線につなぐか確認する。"
-        }
-        "profit_blind_spot" => {
-            "単価、継続、高単価商品につながるポイントを確認する。"
-        }
+        "sales_flow_defect" => "問い合わせ後の対応、提案、成約までの流れをマップ上で確認する。",
+        "dormant_revenue_asset" => "既にある商品、顧客接点、発信をどの売上導線につなぐか確認する。",
+        "profit_blind_spot" => "単価、継続、高単価商品につながるポイントを確認する。",
         _ => "この視点をマップ上の確認対象として残す。",
     });
 
@@ -7396,6 +7422,41 @@ mod tests {
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0].comment_type, "ai_lens_insight");
         assert!(comments[0].body.contains("なぜ重要ですか？"));
+
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[test]
+    fn delete_ai_lens_insight_comment_deletes_only_lens_memo() {
+        let app_data_dir = temp_app_data_dir("delete-ai-lens-insight-comment");
+        fs::create_dir_all(&app_data_dir).expect("app data dir should exist");
+        let db_path = app_data_dir.join("synergy-map.db");
+        crate::init_database(&db_path).expect("db should initialize");
+        let mut connection = open_connection(&db_path).expect("connection should open");
+        let project_id = "project-1";
+        insert_test_project(&connection, project_id);
+        insert_test_ai_run(&connection, project_id, "run-1");
+        let now = now_rfc3339().expect("time should format");
+        connection
+            .execute(
+                "INSERT INTO ai_comments (
+                    id, project_id, ai_run_id, comment_type, title, body, confidence_status, created_at
+                 ) VALUES
+                    ('lens-comment', ?1, 'run-1', 'ai_lens_insight', 'AI視点', '質問: test', 'estimated', ?2),
+                    ('map-comment', ?1, 'run-1', 'map_insight', 'マップ', '本文', 'estimated', ?2)",
+                params![project_id, now.as_str()],
+            )
+            .expect("comments should insert");
+
+        let transaction = connection.transaction().expect("transaction should start");
+        delete_ai_lens_insight_comment_in_transaction(&transaction, project_id, "lens-comment")
+            .expect("lens memo should delete");
+        transaction.commit().expect("transaction should commit");
+
+        let comments = load_ai_comments(&connection, project_id).expect("comments should load");
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].id, "map-comment");
+        assert_eq!(comments[0].comment_type, "map_insight");
 
         let _ = fs::remove_dir_all(app_data_dir);
     }

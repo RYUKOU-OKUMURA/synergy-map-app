@@ -1683,6 +1683,39 @@ button:disabled {
   padding: 13px;
 }
 
+.ai-lens-memo-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ai-lens-memo-card-header div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.ai-lens-memo-card-header button {
+  display: inline-flex;
+  min-height: 28px;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  background: #fff7f7;
+  color: var(--red);
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.ai-lens-memo-card-header button:not(:disabled):hover {
+  border-color: var(--red);
+  background: #fef2f2;
+}
+
 .ai-lens-memo-modal-list .ai-lens-insight-card h4 {
   font-size: 14px;
   font-weight: 850;
