@@ -14,9 +14,11 @@
 - [plans/](plans/): 現行フェーズの実装計画と進捗チェックリスト
   - [plans/trial-operation-phase-1.md](plans/trial-operation-phase-1.md): Phase 1本人試験運用チェックリスト
   - [plans/trial-operation-phase-2.md](plans/trial-operation-phase-2.md): Phase 2実事業試験運用チェックリスト
+  - [plans/post-mvp-priority-plan.md](plans/post-mvp-priority-plan.md): MVP-1後の実装優先順位メモ。進捗チェックリストの正本ではなく、着手順の判断材料
 - [design/](design/): UI、マップ表現、演出などの設計仕様
 - [product/](product/): プロダクト思想、競合、ポジショニング
 - [future/](future/): MVP-1後の将来構想
+  - [future/hypothesis-validation-loop-future-concept.md](future/hypothesis-validation-loop-future-concept.md): 追加調査用プロンプトと選ばれる理由の仮説検査の構想メモ
 - [operations/](operations/): 開発・運用メモ
 - [incidents/](incidents/): 調査ログ、障害、再発防止メモ
 - [archive/](archive/): 完了済み検証、旧構想、古い計画
