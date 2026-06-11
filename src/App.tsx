@@ -10,8 +10,6 @@ import {
   FolderKanban,
   FolderOpen,
   Gauge,
-  Globe2,
-  Link as LinkIcon,
   ListChecks,
   Map as MapIcon,
   MessageSquareText,
@@ -40,8 +38,32 @@ import {
   isFallbackRun,
 } from "@/features/app/aiRunLabels";
 import {
+  AI_LENS_PANEL_DEFAULT_WIDTH,
+  AI_LENS_PANEL_WIDTH_STORAGE_KEY,
+  clampAiLensPanelWidth,
+  contextPanelTabs,
+  defaultAiSettings,
+  emptyDeviceCodeResult,
+} from "@/features/app/appDefaults";
+import {
+  aiLensActionHint,
+  aiLensCategoryLabels,
+  aiLensDefaultQuestion,
+  aiLensMemoQuestion,
+  aiLensTargetDescription,
+  aiLensTargetLabel,
+  aiLensTargetNote,
+  compactStringList,
+  hasOnboardingBrief,
+  hasTauriRuntime,
+  hasUnconfirmedGeneratedItems,
+  isSameSelectedMapElement,
+  mergeAiRunWorkspace,
+  onboardingGenerationStageLabel,
+  shortText,
+} from "@/features/app/appHelpers";
+import {
   SIDEBAR_COLLAPSED_WIDTH,
-  SIDEBAR_DEFAULT_WIDTH,
   clampSidebarWidth,
 } from "@/features/app/sidebarLayout";
 import type {
@@ -49,6 +71,7 @@ import type {
   CursorConnectionAction,
   ProjectFormValues,
 } from "@/features/app/appViewTypes";
+import { ExtractView } from "@/features/extract/ExtractView";
 import { HomeView } from "@/features/home/HomeView";
 import {
   SynergyMapCanvas,
@@ -62,6 +85,12 @@ import {
   CursorSdkConnectionCard,
   SettingsView,
 } from "@/features/settings/SettingsView";
+import { SourcesView } from "@/features/sources/SourcesView";
+import {
+  type InformationSourceDraft,
+  sourceTypeLabel,
+} from "@/features/sources/sourceTypes";
+import { SuggestionsView } from "@/features/suggestions/SuggestionsView";
 import { api } from "@/lib/api";
 import { parseAiLensInsightBody } from "@/lib/aiLensInsight";
 import { formatTime } from "@/lib/appFormatters";
@@ -76,7 +105,6 @@ import type { ViewId } from "@/lib/appViewTypes";
 import { demoProject, demoWorkspace, emptyWorkspace } from "@/lib/demoWorkspace";
 import {
   actionStatusOptions,
-  adoptionOptions,
   categoryOptions,
   confidenceOptions,
   costLevelOptions,
@@ -84,7 +112,6 @@ import {
   labelFor,
   noteTypeOptions,
   priorityOptions,
-  timeToImpactOptions,
 } from "@/lib/mvp1Labels";
 import type {
   ActionItemRow,
@@ -112,6 +139,7 @@ import {
   mapPurposeOptions,
   type MapPurposeId,
 } from "@/lib/onboardingOptions";
+import { priorityRank } from "@/lib/priorityRank";
 import {
   activeSuggestions,
   buildTodayNextStep,
@@ -120,11 +148,9 @@ import {
   hasOpenActionForSuggestion,
   needsReflectionAttention,
   reflectionActionView,
-  reflectionStateLabel,
   reflectionSummaryText,
   shouldRegenerateMap,
   sortByDateDesc,
-  type SourceReflectionRow,
   type WorkspaceReflectionSummary,
 } from "@/lib/workspaceProgress";
 
@@ -151,192 +177,13 @@ type ActionItemUpdateDraft = ActionItemDraft & {
   status: ActionItemRow["status"];
 };
 
-const aiLensCategoryLabels: Record<AiLensItem["category"], string> = {
-  sales_flow_defect: "売上導線の欠陥",
-  dormant_revenue_asset: "眠っている売上資産",
-  profit_blind_spot: "利益化の盲点",
-};
-
-const AI_LENS_PANEL_DEFAULT_WIDTH = 360;
-const AI_LENS_PANEL_MIN_WIDTH = 320;
-const AI_LENS_PANEL_MAX_WIDTH = 560;
-const AI_LENS_PANEL_WIDTH_STORAGE_KEY = "synergy-map.aiLensPanelWidth";
-
-const contextPanelTabs: Array<{
-  id: MapUiPreferences["contextPanelTab"];
-  label: string;
-}> = [
-  { id: "materials", label: "材料" },
-  { id: "checks", label: "確認" },
-  { id: "actions", label: "一手" },
-  { id: "records", label: "記録" },
-];
-
-function clampAiLensPanelWidth(width: number | null | undefined) {
-  if (!Number.isFinite(width)) return AI_LENS_PANEL_DEFAULT_WIDTH;
-  return Math.min(
-    AI_LENS_PANEL_MAX_WIDTH,
-    Math.max(AI_LENS_PANEL_MIN_WIDTH, Math.round(width ?? AI_LENS_PANEL_DEFAULT_WIDTH)),
-  );
-}
-
 type MapNoteDraft = {
   title: string;
   body: string;
   noteType: MapNoteRow["noteType"];
 };
 
-const defaultAiSettings = (): AiSettings => ({
-  primaryProvider: "codex",
-  fallbackEnabled: true,
-  cursorModelId: "composer-2.5",
-  defaultExportDir: null,
-  mapUiPreferences: {
-    showInfluence: true,
-    layoutLocked: false,
-    contextPanelOpen: false,
-    contextPanelTab: "materials",
-    aiLensOpen: false,
-    sidebarMode: "auto",
-    sidebarWidth: SIDEBAR_DEFAULT_WIDTH,
-  },
-});
-
-type InformationSourceKind = "manual_note" | "website_url" | "sns_url" | "product_info";
-
-type InformationSourceDraft = {
-  sourceKind: InformationSourceKind;
-  title: string;
-  body: string;
-  url: string;
-};
-
 const CODEX_EVENT_NAME = "codex-app-server-event";
-
-function emptyDeviceCodeResult(): DeviceCodeLoginResult {
-  return {
-    ok: false,
-    loginId: null,
-    verificationUrl: null,
-    userCode: null,
-    completionSuccess: null,
-    cancelStatus: null,
-    events: [],
-    stderr: [],
-    errors: [],
-    warnings: [],
-  };
-}
-
-const informationSourceOptions: Array<{
-  id: InformationSourceKind;
-  label: string;
-  icon: typeof FileText;
-}> = [
-  { id: "manual_note", label: "自由メモ", icon: MessageSquareText },
-  { id: "website_url", label: "ホームページURL", icon: Globe2 },
-  { id: "sns_url", label: "SNS URL", icon: LinkIcon },
-  { id: "product_info", label: "商品情報", icon: Archive },
-];
-
-function sourceTypeLabel(fileType: string) {
-  return (
-    informationSourceOptions.find((option) => option.id === fileType)?.label ??
-    (fileType === "onboarding_brief"
-      ? "初回入力"
-      : fileType === "markdown"
-        ? "Markdown"
-        : fileType.toUpperCase())
-  );
-}
-
-function shortText(value: string, limit = 92) {
-  const trimmed = value.trim();
-  if (trimmed.length <= limit) return trimmed;
-  return `${trimmed.slice(0, limit)}...`;
-}
-
-function compactStringList(values: string[]) {
-  return values.map((value) => value.trim()).filter(Boolean);
-}
-
-function onboardingGenerationStageLabel(stage: OnboardingGenerationStage | null) {
-  if (stage === "source") return "材料を整理中";
-  if (stage === "extract") return "AI抽出中";
-  if (stage === "map") return "売上マップ生成中";
-  if (stage === "suggestions") return "次の一手を整理中";
-  return null;
-}
-
-function hasOnboardingBrief(workspace: ProjectWorkspace) {
-  return workspace.sourceFiles.some((source) => source.fileType === "onboarding_brief");
-}
-
-function hasUnconfirmedGeneratedItems(workspace: ProjectWorkspace) {
-  return workspace.extractedItems.some(
-    (item) =>
-      item.confidenceStatus === "estimated" || item.confidenceStatus === "needs_review",
-  );
-}
-
-function hasTauriRuntime() {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
-
-function aiLensTargetLabel(item: AiLensItem, index: number) {
-  if (item.targetKind === "map") return "全体";
-  return `${index + 1}`;
-}
-
-function aiLensTargetDescription(item: AiLensItem) {
-  if (item.targetKind === "map") return "マップ全体";
-  if (item.targetKind === "node") return "該当ノード";
-  return "該当導線";
-}
-
-function aiLensActionHint(category: AiLensItem["category"]) {
-  if (category === "sales_flow_defect") {
-    return "問い合わせ後の対応、提案、成約までの流れをマップ上で確認する。";
-  }
-  if (category === "dormant_revenue_asset") {
-    return "既にある商品、顧客接点、発信をどの売上導線につなぐか確認する。";
-  }
-  return "単価、継続、高単価商品につながるポイントを確認する。";
-}
-
-function aiLensDefaultQuestion(item: AiLensItem) {
-  return item.followUpQuestion ?? `${item.title}について、次に確認すべき点を整理して。`;
-}
-
-function aiLensMemoQuestion(item: AiLensItem) {
-  return `${item.title}を、AIの見立て・根拠・要確認・次に試す一手に分けて理解メモとして残して。`;
-}
-
-function mergeAiRunWorkspace(current: ProjectWorkspace, next: ProjectWorkspace) {
-  return {
-    ...current,
-    aiComments: next.aiComments,
-    aiRuns: next.aiRuns,
-    versions: next.versions,
-  };
-}
-
-function aiLensTargetNote(item: AiLensItem, index: number) {
-  if (item.targetKind === "map") {
-    return "マップ全体を対象にした指摘です。";
-  }
-  const target = item.targetKind === "node" ? "ノード" : "導線";
-  return `マップ上の番号${index + 1}の${target}を強調表示しています。`;
-}
-
-function isSameSelectedMapElement(
-  current: SelectedMapElement,
-  next: SelectedMapElement,
-) {
-  if (current === next) return true;
-  if (!current || !next) return false;
-  return current.kind === next.kind && current.id === next.id;
-}
 
 function App() {
   const isTauriRuntime = hasTauriRuntime();
@@ -3440,312 +3287,6 @@ function UrlListField({
   );
 }
 
-function SourcesView({
-  canPickFiles,
-  canSaveTextSource,
-  generationBusy,
-  onGenerateMap,
-  onCreateInformationSource,
-  onDeleteSource,
-  onOpenExtractReview,
-  onPickFiles,
-  reflectionSummary,
-}: {
-  canPickFiles: boolean;
-  canSaveTextSource: boolean;
-  generationBusy: boolean;
-  onGenerateMap: () => void;
-  onCreateInformationSource: (draft: InformationSourceDraft) => Promise<boolean>;
-  onDeleteSource: (source: SourceFileRow) => void;
-  onOpenExtractReview: () => void;
-  onPickFiles: () => void;
-  reflectionSummary: WorkspaceReflectionSummary;
-}) {
-  const [draft, setDraft] = useState<InformationSourceDraft>({
-    sourceKind: "manual_note",
-    title: "",
-    body: "",
-    url: "",
-  });
-  const [isSourceSaving, setIsSourceSaving] = useState(false);
-  const selectedOption =
-    informationSourceOptions.find((option) => option.id === draft.sourceKind) ??
-    informationSourceOptions[0];
-  const needsUrl = draft.sourceKind === "website_url" || draft.sourceKind === "sns_url";
-  const canSave =
-    canSaveTextSource &&
-    (needsUrl ? draft.url.trim().length > 0 : draft.body.trim().length > 0);
-  const canSubmit = canSave && !isSourceSaving;
-
-  function updateDraft<K extends keyof InformationSourceDraft>(
-    key: K,
-    value: InformationSourceDraft[K],
-  ) {
-    setDraft((current) => ({ ...current, [key]: value }));
-  }
-
-  async function submitInformationSource(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!canSubmit) return;
-    setIsSourceSaving(true);
-    try {
-      const saved = await onCreateInformationSource(draft);
-      if (saved) {
-        setDraft({
-          sourceKind: draft.sourceKind,
-          title: "",
-          body: "",
-          url: "",
-        });
-      }
-    } finally {
-      setIsSourceSaving(false);
-    }
-  }
-
-  return (
-    <section className="page-panel">
-      <div className="page-header">
-        <div>
-          <h1>情報ソース</h1>
-          <p>ファイル、メモ、URL、SNS、商品情報をマップの材料として追加します。</p>
-        </div>
-      </div>
-      <SourceReflectionOverview
-        generationBusy={generationBusy}
-        onGenerateMap={onGenerateMap}
-        onOpenExtractReview={onOpenExtractReview}
-        summary={reflectionSummary}
-      />
-      <form className="source-add-panel" onSubmit={submitInformationSource}>
-        <div className="source-add-heading">
-          <strong>情報ソースを追加</strong>
-          <span>
-            URLやSNSは本文を自動取得せず、入力したURLと補足メモを材料として扱います。
-          </span>
-        </div>
-        <div className="source-kind-tabs" role="tablist" aria-label="情報ソース種別">
-          {informationSourceOptions.map((option) => {
-            const SourceIcon = option.icon;
-            return (
-              <button
-                className={draft.sourceKind === option.id ? "active" : ""}
-                disabled={isSourceSaving}
-                key={option.id}
-                onClick={() => updateDraft("sourceKind", option.id)}
-                type="button"
-              >
-                <SourceIcon size={14} aria-hidden="true" />
-                {option.label}
-              </button>
-            );
-          })}
-        </div>
-        <FormGrid>
-          <Field label="タイトル">
-            <input
-              disabled={isSourceSaving}
-              onChange={(event) => updateDraft("title", event.target.value)}
-              placeholder={selectedOption.label}
-              value={draft.title}
-            />
-          </Field>
-          {needsUrl ? (
-            <Field label="URL">
-              <input
-                disabled={isSourceSaving}
-                onChange={(event) => updateDraft("url", event.target.value)}
-                placeholder={
-                  draft.sourceKind === "sns_url"
-                    ? "https://instagram.com/example"
-                    : "https://example.com"
-                }
-                value={draft.url}
-              />
-            </Field>
-          ) : null}
-        </FormGrid>
-        <Field label={needsUrl ? "補足メモ" : "内容"}>
-          <textarea
-            disabled={isSourceSaving}
-            onChange={(event) => updateDraft("body", event.target.value)}
-            placeholder={
-              needsUrl
-                ? "このURLから確認したいこと、見てほしい商品や導線など"
-                : "事業、商品、集客、顧客接点、売上導線について分かっていること"
-            }
-            value={draft.body}
-          />
-        </Field>
-        <div className="source-add-actions">
-          <button className="primary-button" disabled={!canSubmit} type="submit">
-            <Plus size={15} aria-hidden="true" />
-            {isSourceSaving ? "保存中" : "情報ソースに追加"}
-          </button>
-          <small>
-            URLやSNSは本文を自動取得せず、入力内容をローカルの材料として保存します。
-          </small>
-        </div>
-      </form>
-      <button
-        className="drop-zone"
-        disabled={!canPickFiles}
-        onClick={onPickFiles}
-        type="button"
-      >
-        <Upload size={24} aria-hidden="true" />
-        <strong>ここにファイルをドロップ / クリックして選択</strong>
-        <span>PDF / CSV / Excel / Markdown / Textを追加できます。</span>
-      </button>
-      <SourceReflectionList
-        onDeleteSource={onDeleteSource}
-        summary={reflectionSummary}
-      />
-    </section>
-  );
-}
-
-function SourceReflectionOverview({
-  generationBusy,
-  onGenerateMap,
-  onOpenExtractReview,
-  summary,
-}: {
-  generationBusy: boolean;
-  onGenerateMap: () => void;
-  onOpenExtractReview: () => void;
-  summary: WorkspaceReflectionSummary;
-}) {
-  const needsExtraction = summary.pendingExtractionCount > 0;
-  const needsMapRefresh = summary.pendingMapCount > 0 || summary.mapRefreshNeeded;
-
-  return (
-    <section
-      className={`source-overview ${
-        needsExtraction || needsMapRefresh ? "source-overview-warning" : ""
-      }`}
-    >
-      <div>
-        <span className="section-kicker">反映状況</span>
-        <strong>{reflectionSummaryText(summary)}</strong>
-      </div>
-      <div className="source-overview-stats">
-        <StatusChip>{summary.sourceCount}ソース</StatusChip>
-        <StatusChip>{summary.extractedSourceCount}抽出済み</StatusChip>
-        <StatusChip>{summary.mappedSourceCount}マップ反映済み</StatusChip>
-      </div>
-      <div className="source-overview-actions">
-        {needsExtraction ? (
-          <button
-            className="primary-button"
-            onClick={onOpenExtractReview}
-            type="button"
-          >
-            <ListChecks size={15} aria-hidden="true" />
-            抽出カードを更新
-          </button>
-        ) : needsMapRefresh ? (
-          <button
-            className="primary-button"
-            disabled={generationBusy}
-            onClick={onGenerateMap}
-            type="button"
-          >
-            <Sparkles size={15} aria-hidden="true" />
-            {generationBusy ? "再生成中" : "追加内容でマップ再生成"}
-          </button>
-        ) : null}
-      </div>
-    </section>
-  );
-}
-
-function SourceReflectionList({
-  onDeleteSource,
-  summary,
-}: {
-  onDeleteSource: (source: SourceFileRow) => void;
-  summary: WorkspaceReflectionSummary;
-}) {
-  if (summary.rows.length === 0) {
-    return (
-      <div className="source-empty-state">
-        <Database size={18} aria-hidden="true" />
-        <strong>まだ情報ソースがありません</strong>
-        <span>ファイル、メモ、URL、SNS、商品情報を追加するとここに表示されます。</span>
-      </div>
-    );
-  }
-
-  return (
-    <section className="source-inventory">
-      <div className="source-inventory-header">
-        <strong>登録済みソース</strong>
-        <span>抽出カードとマップへの反映状態</span>
-      </div>
-      <div className="source-grid">
-        {summary.rows.map((row) => (
-          <SourceReflectionCard
-            key={row.source.id}
-            onDeleteSource={onDeleteSource}
-            row={row}
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function SourceReflectionCard({
-  onDeleteSource,
-  row,
-}: {
-  onDeleteSource: (source: SourceFileRow) => void;
-  row: SourceReflectionRow;
-}) {
-  const SourceIcon =
-    informationSourceOptions.find((option) => option.id === row.source.fileType)
-      ?.icon ?? FileText;
-
-  return (
-    <article className={`source-row source-row-${row.mapState}`}>
-      <SourceIcon size={16} aria-hidden="true" />
-      <div className="source-row-main">
-        <div className="source-row-title">
-          <strong>{row.title}</strong>
-          <span>{sourceTypeLabel(row.source.fileType)}</span>
-        </div>
-        {row.detail ? <small>{row.detail}</small> : null}
-        <small>
-          追加 {formatTime(row.source.createdAt)} / 読み取り {row.source.chunkCount}
-          chunks
-        </small>
-      </div>
-      <div className="source-row-progress">
-        <span className={`reflection-pill reflection-pill-${row.extractionState}`}>
-          {reflectionStateLabel(row.extractionState, "extract")}
-        </span>
-        <span className={`reflection-pill reflection-pill-${row.mapState}`}>
-          {reflectionStateLabel(row.mapState, "map")}
-        </span>
-      </div>
-      <div className="source-row-counts">
-        <span>{row.extractedItemCount}カード</span>
-        <span>{row.mappedItemCount}ノード</span>
-      </div>
-      <button
-        aria-label={`${row.title}を削除`}
-        className="ghost-button icon-button danger-button"
-        onClick={() => onDeleteSource(row.source)}
-        title="情報ソースを削除"
-        type="button"
-      >
-        <Trash2 size={15} aria-hidden="true" />
-      </button>
-    </article>
-  );
-}
-
 function TodayView({
   busy,
   canEdit,
@@ -4501,232 +4042,6 @@ function MapNoteCard({
       </div>
     </article>
   );
-}
-
-function ExtractView({
-  aiSendApproved,
-  onCreateManualItem,
-  onAiSendApprovedChange,
-  onExtract,
-  onSelectAllChunks,
-  onSelectItem,
-  onToggleChunk,
-  selectedItemId,
-  selectedChunkIds,
-  workspace,
-}: {
-  aiSendApproved: boolean;
-  onCreateManualItem: () => void;
-  onAiSendApprovedChange: (value: boolean) => void;
-  onExtract: () => void;
-  onSelectAllChunks: (selected: boolean) => void;
-  onSelectItem: (itemId: string) => void;
-  onToggleChunk: (chunkId: string) => void;
-  selectedItemId: string | null;
-  selectedChunkIds: string[];
-  workspace: ProjectWorkspace;
-}) {
-  const selectedChunkSet = new Set(selectedChunkIds);
-  const excludedChunks = workspace.sourceChunks.filter(
-    (chunk) => !selectedChunkSet.has(chunk.id),
-  );
-  const allChunksSelected =
-    workspace.sourceChunks.length > 0 &&
-    selectedChunkIds.length === workspace.sourceChunks.length;
-  const extractDisabledReason =
-    selectedChunkIds.length === 0
-      ? "送信対象の情報ソースがありません"
-      : !aiSendApproved
-        ? "送信範囲を確認するとAI抽出できます"
-        : null;
-
-  return (
-    <section className="page-panel">
-      <div className="page-header">
-        <div>
-          <h1>抽出カード</h1>
-          <p>AI抽出結果を確認し、採用 / 保留 / 却下を整理します。</p>
-        </div>
-        <div className="button-row">
-          <button
-            className="primary-button"
-            disabled={Boolean(extractDisabledReason)}
-            onClick={onExtract}
-            title={extractDisabledReason ?? "AI抽出を実行"}
-            type="button"
-          >
-            <Sparkles size={15} aria-hidden="true" />
-            AI抽出
-          </button>
-          {extractDisabledReason ? (
-            <small className="button-row-hint">{extractDisabledReason}</small>
-          ) : null}
-          <button className="ghost-button" onClick={onCreateManualItem} type="button">
-            <Plus size={15} aria-hidden="true" />
-            手動カード追加
-          </button>
-        </div>
-      </div>
-      <div className="ai-send-confirm">
-        <div>
-          <strong>AI送信前確認</strong>
-          <span>
-            既定モードは「ローカル要約だけ送る」です。対象は読み取り済みsource chunks
-            {selectedChunkIds.length}/{workspace.sourceChunks.length}
-            件、抽出不可ファイルは送信対象外です。
-          </span>
-        </div>
-        <label>
-          <input
-            checked={aiSendApproved}
-            onChange={(event) => onAiSendApprovedChange(event.target.checked)}
-            type="checkbox"
-          />
-          送信範囲を確認しました
-        </label>
-      </div>
-      <div className="chunk-selector">
-        <div className="chunk-selector-header">
-          <strong>送信対象source chunks</strong>
-          <div className="button-row">
-            <button
-              className="ghost-button"
-              onClick={() => onSelectAllChunks(!allChunksSelected)}
-              type="button"
-            >
-              {allChunksSelected ? "全解除" : "全選択"}
-            </button>
-          </div>
-        </div>
-        <div className="chunk-list">
-          {workspace.sourceChunks.map((chunk) => (
-            <label className="chunk-row" key={chunk.id}>
-              <input
-                checked={selectedChunkSet.has(chunk.id)}
-                onChange={() => onToggleChunk(chunk.id)}
-                type="checkbox"
-              />
-              <span>
-                <strong>
-                  {chunk.fileName} #{chunk.chunkIndex + 1}
-                </strong>
-                <small>{chunk.contentPreview || "プレビューなし"}</small>
-              </span>
-            </label>
-          ))}
-          {workspace.sourceChunks.length === 0 ? (
-            <div className="empty-panel">先にマップの材料を追加してください。</div>
-          ) : null}
-        </div>
-        {excludedChunks.length > 0 ? (
-          <div className="excluded-chunks">
-            送信しない情報ソース:{" "}
-            {excludedChunks
-              .slice(0, 4)
-              .map((chunk) => `${chunk.fileName} #${chunk.chunkIndex + 1}`)
-              .join("、")}
-            {excludedChunks.length > 4 ? ` ほか${excludedChunks.length - 4}件` : ""}
-          </div>
-        ) : null}
-      </div>
-      <div className="cards-grid">
-        {workspace.extractedItems.map((item) => (
-          <button
-            className={`review-card ${selectedItemId === item.id ? "review-card-selected" : ""}`}
-            key={item.id}
-            onClick={() => onSelectItem(item.id)}
-            type="button"
-          >
-            <div className="card-row">
-              <span className={`category-dot category-${item.itemType}`} />
-              <strong>{item.name}</strong>
-            </div>
-            <p>{item.description ?? "説明未設定"}</p>
-            <div className="card-meta">
-              <span>{labelFor(categoryOptions, item.itemType)}</span>
-              <span>{labelFor(confidenceOptions, item.confidenceStatus)}</span>
-              <span>{labelFor(adoptionOptions, item.adoptionStatus)}</span>
-            </div>
-          </button>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function SuggestionsView({
-  onGenerate,
-  onSelectSuggestion,
-  selectedSuggestionId,
-  workspace,
-}: {
-  onGenerate: () => void;
-  onSelectSuggestion: (suggestionId: string) => void;
-  selectedSuggestionId: string | null;
-  workspace: ProjectWorkspace;
-}) {
-  const suggestions = useMemo(
-    () =>
-      [...workspace.suggestions].sort(
-        (left, right) =>
-          right.impactScore - left.impactScore ||
-          priorityRank(left.priority) - priorityRank(right.priority),
-      ),
-    [workspace.suggestions],
-  );
-
-  return (
-    <section className="page-panel">
-      <div className="page-header">
-        <div>
-          <h1>次の一手</h1>
-          <p>売上・利益・費用・工数への効き方を根拠付きで確認します。</p>
-        </div>
-        <button className="primary-button" onClick={onGenerate} type="button">
-          <Sparkles size={15} aria-hidden="true" />
-          評価生成
-        </button>
-      </div>
-      <div className="cards-grid">
-        {suggestions.map((suggestion) => (
-          <button
-            className={`review-card impact-review-card ${
-              selectedSuggestionId === suggestion.id ? "review-card-selected" : ""
-            }`}
-            key={suggestion.id}
-            onClick={() => onSelectSuggestion(suggestion.id)}
-            type="button"
-          >
-            <div className="card-row">
-              <strong>{suggestion.title}</strong>
-              <span className="status-chip">
-                {labelFor(priorityOptions, suggestion.priority)}
-              </span>
-            </div>
-            <p>{suggestion.description}</p>
-            <div className="impact-metrics">
-              <span>
-                売上 {labelFor(impactLevelOptions, suggestion.expectedRevenueImpact)}
-              </span>
-              <span>
-                利益 {labelFor(impactLevelOptions, suggestion.expectedProfitImpact)}
-              </span>
-              <span>費用 {labelFor(costLevelOptions, suggestion.costLevel)}</span>
-              <span>工数 {labelFor(costLevelOptions, suggestion.effortLevel)}</span>
-              <span>時期 {labelFor(timeToImpactOptions, suggestion.timeToImpact)}</span>
-            </div>
-            <small>{suggestion.evidence ?? suggestion.rationale}</small>
-          </button>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function priorityRank(value: string) {
-  if (value === "high") return 0;
-  if (value === "medium") return 1;
-  return 2;
 }
 
 function ExportView({
