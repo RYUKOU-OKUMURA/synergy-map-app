@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 
 use csv::Terminator;
 use rusqlite::{params, types::ValueRef, Connection, OptionalExtension, TransactionBehavior};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, State};
@@ -21,319 +20,10 @@ use crate::ai_schema::{
     SCHEMA_VERSION,
 };
 use crate::app_settings::load_ai_settings;
+use crate::mvp1_types::*;
 use crate::DbState;
 
 const LOCAL_MODEL: &str = "mvp-local-draft";
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceFileRow {
-    id: String,
-    project_id: String,
-    file_name: String,
-    file_type: String,
-    local_path: String,
-    file_hash: Option<String>,
-    status: String,
-    metadata_json: String,
-    chunk_count: i64,
-    created_at: String,
-    updated_at: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceChunkRow {
-    id: String,
-    project_id: String,
-    source_file_id: String,
-    file_name: String,
-    chunk_index: i64,
-    content_path: String,
-    content_preview: String,
-    content_hash: String,
-    page_number: Option<i64>,
-    sheet_name: Option<String>,
-    row_start: Option<i64>,
-    row_end: Option<i64>,
-    column_start: Option<i64>,
-    column_end: Option<i64>,
-    heading_path: Option<String>,
-    metadata_json: String,
-    created_at: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ItemSourceRow {
-    id: String,
-    extracted_item_id: String,
-    source_file_id: Option<String>,
-    source_chunk_id: Option<String>,
-    source_file_name: Option<String>,
-    quote: Option<String>,
-    page_number: Option<i64>,
-    sheet_name: Option<String>,
-    row_start: Option<i64>,
-    row_end: Option<i64>,
-    heading_path: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExtractedItemRow {
-    id: String,
-    project_id: String,
-    ai_run_id: Option<String>,
-    name: String,
-    item_type: String,
-    description: Option<String>,
-    confidence_status: String,
-    impact_score: i64,
-    subjective_importance: i64,
-    adoption_status: String,
-    memo: Option<String>,
-    sources: Vec<ItemSourceRow>,
-    created_at: String,
-    updated_at: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MapNodeRow {
-    id: String,
-    project_id: String,
-    extracted_item_id: Option<String>,
-    node_type: String,
-    label: String,
-    description: Option<String>,
-    influence_level: Option<String>,
-    information_richness: Option<String>,
-    confidence_status: Option<String>,
-    badges_json: String,
-    position_json: String,
-    adoption_status: String,
-    memo: Option<String>,
-    created_at: String,
-    updated_at: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MapEdgeRow {
-    id: String,
-    project_id: String,
-    source_node_id: String,
-    target_node_id: String,
-    edge_type: String,
-    flow_type: Option<String>,
-    strength: Option<String>,
-    direction: Option<String>,
-    confidence_status: Option<String>,
-    evidence: Option<String>,
-    note: Option<String>,
-    label: Option<String>,
-    adoption_status: String,
-    priority: Option<String>,
-    created_at: String,
-    updated_at: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SuggestionRow {
-    id: String,
-    project_id: String,
-    ai_run_id: Option<String>,
-    title: String,
-    description: String,
-    priority: String,
-    adoption_status: String,
-    rationale: Option<String>,
-    related_node_ids_json: String,
-    expected_revenue_impact: String,
-    expected_profit_impact: String,
-    cost_level: String,
-    effort_level: String,
-    time_to_impact: String,
-    confidence_status: String,
-    impact_score: i64,
-    evidence: Option<String>,
-    memo: Option<String>,
-    created_at: String,
-    updated_at: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiCommentRow {
-    id: String,
-    project_id: String,
-    ai_run_id: Option<String>,
-    comment_type: String,
-    title: String,
-    body: String,
-    confidence_status: String,
-    created_at: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiLensItemRow {
-    id: String,
-    project_id: String,
-    ai_run_id: Option<String>,
-    category: String,
-    target_kind: String,
-    target_id: Option<String>,
-    title: String,
-    body: String,
-    confidence_status: String,
-    evidence: String,
-    follow_up_question: Option<String>,
-    sort_order: i64,
-    created_at: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiRunRow {
-    id: String,
-    project_id: String,
-    codex_thread_id: Option<String>,
-    run_type: String,
-    schema_name: Option<String>,
-    schema_version: Option<String>,
-    model: Option<String>,
-    status: String,
-    started_at: Option<String>,
-    completed_at: Option<String>,
-    error: Option<String>,
-    request_summary_path: Option<String>,
-    response_json_path: Option<String>,
-    created_at: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExportJobRow {
-    id: String,
-    project_id: String,
-    export_type: String,
-    status: String,
-    output_path: Option<String>,
-    error: Option<String>,
-    created_at: String,
-    completed_at: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VersionRow {
-    id: String,
-    project_id: String,
-    version_type: String,
-    name: Option<String>,
-    memo: Option<String>,
-    snapshot_json: String,
-    created_at: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ViewLayoutRow {
-    id: String,
-    project_id: String,
-    view_id: String,
-    layout_json: String,
-    created_at: String,
-    updated_at: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActionItemRow {
-    id: String,
-    project_id: String,
-    ai_run_id: Option<String>,
-    source_type: String,
-    source_id: Option<String>,
-    title: String,
-    body: String,
-    status: String,
-    priority: String,
-    memo: Option<String>,
-    created_at: String,
-    updated_at: String,
-    completed_at: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MapNoteRow {
-    id: String,
-    project_id: String,
-    title: String,
-    body: String,
-    note_type: String,
-    created_at: String,
-    updated_at: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectWorkspace {
-    center_node_id: Option<String>,
-    source_files: Vec<SourceFileRow>,
-    source_chunks: Vec<SourceChunkRow>,
-    extracted_items: Vec<ExtractedItemRow>,
-    nodes: Vec<MapNodeRow>,
-    edges: Vec<MapEdgeRow>,
-    suggestions: Vec<SuggestionRow>,
-    ai_comments: Vec<AiCommentRow>,
-    ai_lens_items: Vec<AiLensItemRow>,
-    ai_runs: Vec<AiRunRow>,
-    export_jobs: Vec<ExportJobRow>,
-    versions: Vec<VersionRow>,
-    view_layouts: Vec<ViewLayoutRow>,
-    action_items: Vec<ActionItemRow>,
-    map_notes: Vec<MapNoteRow>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MvpRunResult {
-    ok: bool,
-    ai_run_id: Option<String>,
-    message: String,
-    workspace: ProjectWorkspace,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExportResult {
-    ok: bool,
-    export_job: ExportJobRow,
-    warning: Option<String>,
-    workspace: ProjectWorkspace,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeleteSourceResult {
-    workspace: ProjectWorkspace,
-    warnings: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MapPositionInput {
-    node_id: String,
-    x: f64,
-    y: f64,
-    width: Option<f64>,
-    height: Option<f64>,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct MapLayoutValues {
@@ -790,16 +480,16 @@ pub fn create_onboarding_brief_source(
     let chunks_dir = source_chunks_dir(&app_data_dir, &project_id).join(&source_file_id);
     let source_path = source_dir.join("onboarding-brief.md");
     let chunk_path = chunks_dir.join("0000.txt");
-    let content = onboarding_brief_markdown(
-        trimmed_company_name,
-        &purpose_id,
-        trimmed_purpose_label,
-        industry.as_deref(),
-        memo.as_deref(),
-        &normalized_website_urls,
-        &normalized_sns_urls,
-        product_info.as_deref(),
-    );
+    let content = onboarding_brief_markdown(OnboardingBriefMarkdownInput {
+        company_name: trimmed_company_name,
+        purpose_id: &purpose_id,
+        purpose_label: trimmed_purpose_label,
+        industry: industry.as_deref(),
+        memo: memo.as_deref(),
+        website_urls: &normalized_website_urls,
+        sns_urls: &normalized_sns_urls,
+        product_info: product_info.as_deref(),
+    });
     let content_hash = hash_text(&content);
     let metadata_json = json!({
         "sourceKind": "onboarding_brief",
@@ -1077,28 +767,34 @@ fn delete_source_file_inner(
     })
 }
 
-fn onboarding_brief_markdown(
-    company_name: &str,
-    purpose_id: &str,
-    purpose_label: &str,
-    industry: Option<&str>,
-    memo: Option<&str>,
-    website_urls: &[String],
-    sns_urls: &[String],
-    product_info: Option<&str>,
-) -> String {
+struct OnboardingBriefMarkdownInput<'a> {
+    company_name: &'a str,
+    purpose_id: &'a str,
+    purpose_label: &'a str,
+    industry: Option<&'a str>,
+    memo: Option<&'a str>,
+    website_urls: &'a [String],
+    sns_urls: &'a [String],
+    product_info: Option<&'a str>,
+}
+
+fn onboarding_brief_markdown(input: OnboardingBriefMarkdownInput<'_>) -> String {
     let mut sections = vec![
         "# 初回マップ作成メモ".to_string(),
-        format!("- 事業名 / マップ名: {}", company_name.trim()),
-        format!("- マップ生成の目的: {}", purpose_label.trim()),
-        format!("- 目的ID: {}", purpose_id.trim()),
+        format!("- 事業名 / マップ名: {}", input.company_name.trim()),
+        format!("- マップ生成の目的: {}", input.purpose_label.trim()),
+        format!("- 目的ID: {}", input.purpose_id.trim()),
     ];
 
-    push_optional_markdown_line(&mut sections, "業種", industry);
-    push_optional_markdown_lines(&mut sections, "ホームページURL", website_urls);
-    push_optional_markdown_lines(&mut sections, "SNSアカウントURL", sns_urls);
-    push_optional_section(&mut sections, "今わかっていること / 困っていること", memo);
-    push_optional_section(&mut sections, "商品 / サービス情報", product_info);
+    push_optional_markdown_line(&mut sections, "業種", input.industry);
+    push_optional_markdown_lines(&mut sections, "ホームページURL", input.website_urls);
+    push_optional_markdown_lines(&mut sections, "SNSアカウントURL", input.sns_urls);
+    push_optional_section(
+        &mut sections,
+        "今わかっていること / 困っていること",
+        input.memo,
+    );
+    push_optional_section(&mut sections, "商品 / サービス情報", input.product_info);
 
     sections.push("## 利用上の注意".to_string());
     sections.push(
@@ -3793,9 +3489,7 @@ fn load_prompt_purpose_context(
 fn prompt_purpose_context_from_metadata(metadata_json: &str) -> Option<PromptPurposeContext> {
     let parsed: Value = serde_json::from_str(metadata_json).ok()?;
     let purpose_label = json_string(&parsed, "purposeLabel");
-    if purpose_label.is_none() {
-        return None;
-    }
+    purpose_label.as_ref()?;
 
     Some(PromptPurposeContext {
         purpose_id: json_string(&parsed, "purposeId"),
@@ -6809,16 +6503,16 @@ mod tests {
 
     #[test]
     fn onboarding_brief_marks_sparse_input_as_needs_review() {
-        let content = onboarding_brief_markdown(
-            "山田製作所",
-            "sales_flow",
-            "売上導線を整理したい",
-            None,
-            None,
-            &[],
-            &[],
-            None,
-        );
+        let content = onboarding_brief_markdown(OnboardingBriefMarkdownInput {
+            company_name: "山田製作所",
+            purpose_id: "sales_flow",
+            purpose_label: "売上導線を整理したい",
+            industry: None,
+            memo: None,
+            website_urls: &[],
+            sns_urls: &[],
+            product_info: None,
+        });
 
         assert!(content.contains("山田製作所"));
         assert!(content.contains("売上導線を整理したい"));
@@ -6830,19 +6524,19 @@ mod tests {
 
     #[test]
     fn onboarding_brief_keeps_url_inputs_as_source_context() {
-        let content = onboarding_brief_markdown(
-            "山田製作所",
-            "sns_web_sales",
-            "SNS / Webから売上につなげたい",
-            Some("製造業"),
-            Some("Web問い合わせから商談につながる導線を確認したい。"),
-            &[
+        let content = onboarding_brief_markdown(OnboardingBriefMarkdownInput {
+            company_name: "山田製作所",
+            purpose_id: "sns_web_sales",
+            purpose_label: "SNS / Webから売上につなげたい",
+            industry: Some("製造業"),
+            memo: Some("Web問い合わせから商談につながる導線を確認したい。"),
+            website_urls: &[
                 "https://example.com".to_string(),
                 "https://lp.example.com".to_string(),
             ],
-            &["https://instagram.com/example".to_string()],
-            Some("保守サービスと部品販売を提供している。"),
-        );
+            sns_urls: &["https://instagram.com/example".to_string()],
+            product_info: Some("保守サービスと部品販売を提供している。"),
+        });
 
         assert!(content.contains("https://example.com"));
         assert!(content.contains("https://lp.example.com"));
@@ -6895,16 +6589,16 @@ mod tests {
 
     #[test]
     fn onboarding_summary_keeps_user_entered_business_context() {
-        let content = onboarding_brief_markdown(
-            "山田製作所",
-            "sns_web_sales",
-            "SNS / Webから売上につなげたい",
-            Some("製造業"),
-            Some("Web問い合わせはあるが、商談化と保守サービスへの導線が弱い。"),
-            &["https://example.com".to_string()],
-            &["https://instagram.com/example".to_string()],
-            Some("保守サービスと部品販売を提供している。"),
-        );
+        let content = onboarding_brief_markdown(OnboardingBriefMarkdownInput {
+            company_name: "山田製作所",
+            purpose_id: "sns_web_sales",
+            purpose_label: "SNS / Webから売上につなげたい",
+            industry: Some("製造業"),
+            memo: Some("Web問い合わせはあるが、商談化と保守サービスへの導線が弱い。"),
+            website_urls: &["https://example.com".to_string()],
+            sns_urls: &["https://instagram.com/example".to_string()],
+            product_info: Some("保守サービスと部品販売を提供している。"),
+        });
         let chunk = ExtractionChunk {
             id: "chunk-1".to_string(),
             source_file_id: "source-file-1".to_string(),

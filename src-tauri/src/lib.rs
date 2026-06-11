@@ -21,6 +21,7 @@ mod codex_app_server;
 mod cursor_sdk_bridge;
 mod env_config;
 mod mvp1;
+mod mvp1_types;
 mod source_reader;
 
 use app_settings::{load_ai_settings, save_ai_settings, AiSettings};
@@ -160,6 +161,7 @@ const PHASE0_SAMPLE_FILES: &[&str] = &[
 
 const AI_SCHEMA_NAME: &str = "AiAnalysisOutput";
 const AI_RUN_TYPE: &str = "phase0_schema_poc";
+#[cfg(test)]
 const AI_RUN_MODEL: &str = "codex-app-server";
 const AI_REQUEST_SUMMARY: &str =
     "Phase 0 sample map analysis request. Full source chunks are not included.";
@@ -1018,6 +1020,7 @@ fn ai_schema_poc_failure(errors: Vec<String>) -> AiSchemaPocResult {
     }
 }
 
+#[cfg(test)]
 fn save_ai_run(
     db_path: &PathBuf,
     app_data_dir: &Path,

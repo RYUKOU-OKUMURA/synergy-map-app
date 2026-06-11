@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
@@ -32,7 +31,6 @@ import {
   Save,
   Settings,
   Sparkles,
-  Star,
   Target,
   Trash2,
   TriangleAlert,
@@ -50,11 +48,14 @@ import {
   type MapViewMode,
   type MapNodeLayout,
 } from "@/features/map/SynergyMapCanvas";
+import { InspectorPanel } from "@/features/inspector/InspectorPanel";
+import { api } from "@/lib/api";
+import { parseAiLensInsightBody } from "@/lib/aiLensInsight";
+import { formatTime } from "@/lib/appFormatters";
 import {
   applyLocalMapLayouts,
   buildImpactPositionOverrides,
   buildNodeImpactStats,
-  parseRelatedNodeIds,
   readableCustomerJourneyLayouts,
   resolveCenterNodeId,
 } from "@/features/map/mapLayoutModel";
@@ -86,13 +87,8 @@ import type {
   CursorSdkSmokeResult,
   CursorSdkStatus,
   DeviceCodeLoginResult,
-  DeleteSourceResult,
-  ExportResult,
-  ExtractedItemRow,
   MapEdgeRow,
   MapNoteRow,
-  MapNodeRow,
-  MvpRunResult,
   Project,
   ProjectWorkspace,
   SelectedMapElement,
@@ -316,20 +312,6 @@ function hasTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-function formatTime(value: string | null | undefined) {
-  if (!value) return "-";
-  try {
-    return new Intl.DateTimeFormat("ja-JP", {
-      hour: "2-digit",
-      minute: "2-digit",
-      month: "2-digit",
-      day: "2-digit",
-    }).format(new Date(value));
-  } catch {
-    return value;
-  }
-}
-
 function aiLensTargetLabel(item: AiLensItem, index: number) {
   if (item.targetKind === "map") return "全体";
   return `${index + 1}`;
@@ -357,55 +339,6 @@ function aiLensDefaultQuestion(item: AiLensItem) {
 
 function aiLensMemoQuestion(item: AiLensItem) {
   return `${item.title}を、AIの見立て・根拠・要確認・次に試す一手に分けて理解メモとして残して。`;
-}
-
-function parseAiLensInsightBody(body: string) {
-  const questionMatch = body.match(/^質問:\s*(.+?)(?:\n|$)/);
-  const question = questionMatch?.[1]?.trim() ?? null;
-  const withoutQuestion = body.replace(/^質問:\s*.+?(?:\n|$)/, "").trim();
-  const labels = [
-    "AIの見立て:",
-    "根拠:",
-    "要点:",
-    "要確認:",
-    "次に聞くこと:",
-    "次に試す一手:",
-  ];
-
-  function section(label: string) {
-    const startIndex = withoutQuestion.indexOf(label);
-    if (startIndex < 0) return null;
-    const contentStart = startIndex + label.length;
-    const contentEnd = labels
-      .map((candidate) => withoutQuestion.indexOf(candidate, contentStart))
-      .filter((index) => index >= 0)
-      .sort((a, b) => a - b)[0];
-    return withoutQuestion
-      .slice(contentStart, contentEnd ?? withoutQuestion.length)
-      .trim();
-  }
-
-  const labeledEstimation = section("AIの見立て:");
-  const evidence = section("根拠:");
-  const keyPoints = section("要点:");
-  const followUp = section("要確認:") ?? section("次に聞くこと:");
-  const nextAction = section("次に試す一手:");
-  const sectionStarts = labels
-    .map((label) => withoutQuestion.indexOf(label))
-    .filter((index) => index >= 0);
-  const estimationEnd = sectionStarts.length > 0 ? Math.min(...sectionStarts) : -1;
-  const estimation =
-    labeledEstimation ??
-    (estimationEnd >= 0
-      ? withoutQuestion.slice(0, estimationEnd).trim()
-      : withoutQuestion.trim());
-  return {
-    question,
-    estimation: estimation || withoutQuestion,
-    keyPoints: [evidence, keyPoints].filter(Boolean).join(" / ") || null,
-    followUp,
-    nextAction,
-  };
 }
 
 function mergeAiRunWorkspace(current: ProjectWorkspace, next: ProjectWorkspace) {
@@ -478,9 +411,7 @@ function App() {
   const [layoutSaveScope, setLayoutSaveScope] = useState<string | null>(null);
   const [mapInsightBusy, setMapInsightBusy] = useState(false);
   const [aiLensInsightBusyId, setAiLensInsightBusyId] = useState<string | null>(null);
-  const [deletingAiLensMemoId, setDeletingAiLensMemoId] = useState<string | null>(
-    null,
-  );
+  const [deletingAiLensMemoId, setDeletingAiLensMemoId] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [codexRuntimeInfo, setCodexRuntimeInfo] = useState<CodexRuntimeInfo | null>(
     null,
@@ -566,8 +497,7 @@ function App() {
     [workspace],
   );
   const aiLensItems = useMemo(() => workspace.aiLensItems.slice(0, 3), [workspace]);
-  const aiLensOpen =
-    aiSettings.mapUiPreferences.aiLensOpen && aiLensItems.length > 0;
+  const aiLensOpen = aiSettings.mapUiPreferences.aiLensOpen && aiLensItems.length > 0;
   const currentLayoutScope = `${activeProjectId ?? "none"}:${mapViewMode}`;
   const visibleLayoutSaveStatus =
     layoutSaveScope === currentLayoutScope ? layoutSaveStatus : "idle";
@@ -724,15 +654,8 @@ function App() {
   async function handleUpdateProject(projectId: string, values: ProjectFormValues) {
     return runAction(
       async () => {
-        const nextWorkspace = await invoke<ProjectWorkspace>("update_project", {
-          projectId,
-          name: values.name,
-          clientName: values.clientName,
-          industry: values.industry,
-          description: values.description,
-          memo: values.memo,
-        });
-        const nextProjects = await invoke<Project[]>("list_projects");
+        const nextWorkspace = await api.updateProject(projectId, values);
+        const nextProjects = await api.listProjects();
         return { nextProjects, nextWorkspace };
       },
       ({ nextProjects, nextWorkspace }) => {
@@ -751,8 +674,8 @@ function App() {
   async function handleDeleteProject(projectId: string) {
     return runAction(
       async () => {
-        await invoke("delete_project", { projectId });
-        const nextProjects = await invoke<Project[]>("list_projects");
+        await api.deleteProject(projectId);
+        const nextProjects = await api.listProjects();
         return { nextProjects };
       },
       ({ nextProjects }) => {
@@ -780,11 +703,7 @@ function App() {
         return;
       }
       await runAction(
-        () =>
-          invoke<MvpRunResult>("run_extract_items", {
-            projectId: activeProjectId,
-            sourceChunkIds: selectedChunkIds,
-          }),
+        () => api.runExtractItems(activeProjectId, selectedChunkIds),
         (result) => {
           setWorkspace(result.workspace);
           setNotice(result.message);
@@ -797,10 +716,7 @@ function App() {
     }
     if (workspace.nodes.length === 0 || shouldRegenerateMap(workspace)) {
       await runAction(
-        () =>
-          invoke<MvpRunResult>("generate_map_from_items", {
-            projectId: activeProjectId,
-          }),
+        () => api.generateMapFromItems(activeProjectId),
         (result) => {
           setWorkspace(result.workspace);
           setNotice(result.message);
@@ -813,10 +729,7 @@ function App() {
     }
     if (workspace.suggestions.length === 0 && workspace.aiComments.length === 0) {
       await runAction(
-        () =>
-          invoke<MvpRunResult>("generate_suggestions_from_map", {
-            projectId: activeProjectId,
-          }),
+        () => api.generateSuggestionsFromMap(activeProjectId),
         (result) => {
           setWorkspace(result.workspace);
           setNotice(result.message);
@@ -827,10 +740,7 @@ function App() {
     }
     if (workspace.aiLensItems.length === 0) {
       await runAction(
-        () =>
-          invoke<MvpRunResult>("generate_ai_lens_from_map", {
-            projectId: activeProjectId,
-          }),
+        () => api.generateAiLensFromMap(activeProjectId),
         (result) => {
           setWorkspace(result.workspace);
           setNotice(result.message);
@@ -851,11 +761,7 @@ function App() {
   async function handleExtract() {
     if (!activeProjectId) return;
     await runAction(
-      () =>
-        invoke<MvpRunResult>("run_extract_items", {
-          projectId: activeProjectId,
-          sourceChunkIds: selectedChunkIds,
-        }),
+      () => api.runExtractItems(activeProjectId, selectedChunkIds),
       (result) => {
         setWorkspace(result.workspace);
         setNotice(result.message);
@@ -869,10 +775,7 @@ function App() {
   async function handleRegenerateMap() {
     if (!activeProjectId) return;
     await runAction(
-      () =>
-        invoke<MvpRunResult>("generate_map_from_items", {
-          projectId: activeProjectId,
-        }),
+      () => api.generateMapFromItems(activeProjectId),
       (result) => {
         setWorkspace(result.workspace);
         setNotice(result.message);
@@ -887,8 +790,7 @@ function App() {
     if (!activeProjectId) return;
     await runAction(
       () =>
-        invoke<ProjectWorkspace>("create_extracted_item", {
-          projectId: activeProjectId,
+        api.createExtractedItem(activeProjectId, {
           name: "手動カード",
           itemType: "business",
           description: "会議中に追加した確認対象です。",
@@ -904,10 +806,7 @@ function App() {
   async function handleGenerateSuggestions() {
     if (!activeProjectId) return;
     await runAction(
-      () =>
-        invoke<MvpRunResult>("generate_suggestions_from_map", {
-          projectId: activeProjectId,
-        }),
+      () => api.generateSuggestionsFromMap(activeProjectId),
       (result) => {
         setWorkspace(result.workspace);
         setNotice(result.message);
@@ -923,10 +822,7 @@ function App() {
   async function handleGenerateAiLens() {
     if (!activeProjectId) return;
     await runAction(
-      () =>
-        invoke<MvpRunResult>("generate_ai_lens_from_map", {
-          projectId: activeProjectId,
-        }),
+      () => api.generateAiLensFromMap(activeProjectId),
       (result) => {
         setWorkspace(result.workspace);
         setNotice(result.message);
@@ -938,7 +834,7 @@ function App() {
   async function handleExport(command: "export_markdown" | "export_csv_bundle") {
     if (!activeProjectId) return;
     await runAction(
-      () => invoke<ExportResult>(command, { projectId: activeProjectId }),
+      () => api.exportProject(command, activeProjectId),
       (result) => {
         setWorkspace(result.workspace);
         setNotice(
@@ -968,7 +864,7 @@ function App() {
     setCodexBusy("refresh");
     setError(null);
     try {
-      const result = await invoke<CodexRuntimeInfo>("get_codex_runtime_info");
+      const result = await api.getCodexRuntimeInfo();
       setCodexRuntimeInfo(result);
     } catch (caughtError) {
       setError(String(caughtError));
@@ -982,7 +878,7 @@ function App() {
     setCodexBusy("smoke");
     setError(null);
     try {
-      const result = await invoke<CodexSmokeResult>("run_codex_smoke_test");
+      const result = await api.runCodexSmokeTest();
       setCodexSmokeResult(result);
       setNotice(
         result.ok ? "Codex接続を確認しました。" : "Codex接続確認に失敗しました。",
@@ -999,7 +895,7 @@ function App() {
     setCodexBusy("login");
     setError(null);
     try {
-      const result = await invoke<DeviceCodeLoginResult>("run_codex_device_code_check");
+      const result = await api.runCodexDeviceCodeCheck();
       setDeviceCodeResult(result);
       setNotice(
         result.verificationUrl
@@ -1018,9 +914,7 @@ function App() {
     setAiSettingsBusy(true);
     setError(null);
     try {
-      const saved = await invoke<AiSettings>("save_ai_settings_command", {
-        settings: nextSettings,
-      });
+      const saved = await api.saveAiSettings(nextSettings);
       setAiSettings(saved);
       setNotice("AIプロバイダ設定を保存しました。");
     } catch (caughtError) {
@@ -1044,9 +938,7 @@ function App() {
     setAiSettings(nextSettings);
     if (!isTauriRuntime) return;
     try {
-      const saved = await invoke<AiSettings>("save_ai_settings_command", {
-        settings: nextSettings,
-      });
+      const saved = await api.saveAiSettings(nextSettings);
       setAiSettings(saved);
       if (options.notify) setNotice("マップ表示設定を保存しました。");
     } catch (caughtError) {
@@ -1073,7 +965,7 @@ function App() {
     setAiSettingsBusy(true);
     setError(null);
     try {
-      const saved = await invoke<AiSettings>("select_default_export_dir");
+      const saved = await api.selectDefaultExportDir();
       setAiSettings(saved);
       setNotice(
         saved.defaultExportDir
@@ -1101,7 +993,7 @@ function App() {
     setCursorBusy("refresh");
     setError(null);
     try {
-      const result = await invoke<CursorSdkStatus>("get_cursor_sdk_status");
+      const result = await api.getCursorSdkStatus();
       setCursorSdkStatus(result);
     } catch (caughtError) {
       setError(String(caughtError));
@@ -1115,7 +1007,7 @@ function App() {
     setCursorBusy("smoke");
     setError(null);
     try {
-      const result = await invoke<CursorSdkSmokeResult>("run_cursor_sdk_smoke_test");
+      const result = await api.runCursorSdkSmokeTest();
       setCursorSdkSmokeResult(result);
       setNotice(
         result.ok
@@ -1136,7 +1028,7 @@ function App() {
       return;
     }
     try {
-      await invoke("open_external_url", { url });
+      await api.openExternalUrl(url);
     } catch (caughtError) {
       setError(String(caughtError));
     }
@@ -1149,7 +1041,7 @@ function App() {
       return;
     }
     try {
-      await invoke("open_export_path", { path });
+      await api.openExportPath(path);
     } catch (caughtError) {
       setError(String(caughtError));
     }
@@ -1171,7 +1063,7 @@ function App() {
       let nextProjects: Project[];
 
       if (!projectId || !activeProject) {
-        const created = await invoke<Project>("create_project", {
+        const created = await api.createProject({
           name: draft.companyName.trim(),
           clientName: draft.companyName.trim(),
           industry: draft.industry.trim(),
@@ -1179,33 +1071,28 @@ function App() {
           memo: draft.memo.trim(),
         });
         projectId = created.id;
-        nextProjects = await invoke<Project[]>("list_projects");
+        nextProjects = await api.listProjects();
       } else {
-        await invoke<ProjectWorkspace>("update_project", {
-          projectId,
+        await api.updateProject(projectId, {
           name: draft.companyName.trim(),
           clientName: activeProject.clientName?.trim() || draft.companyName.trim(),
           industry: draft.industry.trim() || activeProject.industry || "",
           description: purposeLabel,
           memo: draft.memo.trim() || activeProject.memo || "",
         });
-        nextProjects = await invoke<Project[]>("list_projects");
+        nextProjects = await api.listProjects();
       }
 
-      const sourceWorkspace = await invoke<ProjectWorkspace>(
-        "create_onboarding_brief_source",
-        {
-          projectId,
-          companyName: draft.companyName.trim(),
-          purposeId: draft.purposeId,
-          purposeLabel,
-          industry: draft.industry.trim(),
-          memo: draft.memo.trim(),
-          websiteUrls: compactStringList(draft.websiteUrls),
-          snsUrls: compactStringList(draft.snsUrls),
-          productInfo: draft.productInfo.trim(),
-        },
-      );
+      const sourceWorkspace = await api.createOnboardingBriefSource(projectId, {
+        companyName: draft.companyName.trim(),
+        purposeId: draft.purposeId,
+        purposeLabel,
+        industry: draft.industry.trim(),
+        memo: draft.memo.trim(),
+        websiteUrls: compactStringList(draft.websiteUrls),
+        snsUrls: compactStringList(draft.snsUrls),
+        productInfo: draft.productInfo.trim(),
+      });
 
       setProjects(nextProjects);
       setSelectedProjectId(projectId);
@@ -1219,23 +1106,15 @@ function App() {
 
       const sourceChunkIds = sourceWorkspace.sourceChunks.map((chunk) => chunk.id);
       setOnboardingGenerationStage("extract");
-      const extractResult = await invoke<MvpRunResult>("run_extract_items", {
-        projectId,
-        sourceChunkIds,
-      });
+      const extractResult = await api.runExtractItems(projectId, sourceChunkIds);
       setWorkspace(extractResult.workspace);
 
       setOnboardingGenerationStage("map");
-      const mapResult = await invoke<MvpRunResult>("generate_map_from_items", {
-        projectId,
-      });
+      const mapResult = await api.generateMapFromItems(projectId);
       setWorkspace(mapResult.workspace);
 
       setOnboardingGenerationStage("suggestions");
-      const suggestionsResult = await invoke<MvpRunResult>(
-        "generate_suggestions_from_map",
-        { projectId },
-      );
+      const suggestionsResult = await api.generateSuggestionsFromMap(projectId);
 
       setWorkspace(
         suggestionsResult.workspace.nodes.length > 0
@@ -1274,15 +1153,8 @@ function App() {
       try {
         const nextWorkspace = isTauriRuntime
           ? viewMode === "customer_journey"
-            ? await invoke<ProjectWorkspace>("save_map_layout", {
-                projectId: activeProjectId,
-                positions,
-              })
-            : await invoke<ProjectWorkspace>("save_view_layout", {
-                projectId: activeProjectId,
-                viewId: viewMode,
-                positions,
-              })
+            ? await api.saveMapLayout(activeProjectId, positions)
+            : await api.saveViewLayout(activeProjectId, viewMode, positions)
           : applyLocalMapLayouts(workspace, activeProjectId, viewMode, positions);
         setWorkspace(nextWorkspace);
         setLayoutSaveStatus("saved");
@@ -1299,10 +1171,7 @@ function App() {
     setError(null);
     try {
       const nextWorkspace = isTauriRuntime
-        ? await invoke<ProjectWorkspace>("set_project_center_node", {
-            projectId: activeProjectId,
-            nodeId,
-          })
+        ? await api.setProjectCenterNode(activeProjectId, nodeId)
         : { ...workspace, centerNodeId: nodeId };
       setWorkspace(nextWorkspace);
       setNotice(
@@ -1337,11 +1206,7 @@ function App() {
     setError(null);
     try {
       const nextWorkspace = isTauriRuntime
-        ? await invoke<ProjectWorkspace>("create_map_edge", {
-            projectId: activeProjectId,
-            sourceNodeId,
-            targetNodeId,
-          })
+        ? await api.createMapEdge(activeProjectId, sourceNodeId, targetNodeId)
         : (() => {
             const now = new Date().toISOString();
             const edgeId =
@@ -1378,15 +1243,11 @@ function App() {
     if (!activeProjectId || !isTauriRuntime) return;
     await runAction(
       async () => {
-        const imported = await invoke<unknown[]>("import_source_files_from_dialog", {
-          projectId: activeProjectId,
-        });
+        const imported = await api.importSourceFilesFromDialog(activeProjectId);
         if (imported.length === 0) {
           return null;
         }
-        const nextWorkspace = await invoke<ProjectWorkspace>("get_project_workspace", {
-          projectId: activeProjectId,
-        });
+        const nextWorkspace = await api.getProjectWorkspace(activeProjectId);
         return { nextWorkspace, count: imported.length };
       },
       (result) => {
@@ -1402,8 +1263,7 @@ function App() {
     if (!activeProjectId || !isTauriRuntime) return false;
     return runAction(
       () =>
-        invoke<ProjectWorkspace>("create_text_information_source", {
-          projectId: activeProjectId,
+        api.createTextInformationSource(activeProjectId, {
           sourceKind: draft.sourceKind,
           title: draft.title.trim(),
           body: draft.body.trim(),
@@ -1439,11 +1299,7 @@ function App() {
     }
 
     await runAction(
-      () =>
-        invoke<DeleteSourceResult>("delete_source_file", {
-          projectId: activeProjectId,
-          sourceFileId: source.id,
-        }),
+      () => api.deleteSourceFile(activeProjectId, source.id),
       (result) => {
         setWorkspace(result.workspace);
         setApprovedChunkSignature(null);
@@ -1461,8 +1317,7 @@ function App() {
     if (!activeProjectId || !isTauriRuntime) return;
     await runAction(
       () =>
-        invoke<ProjectWorkspace>("create_action_item", {
-          projectId: activeProjectId,
+        api.createActionItem(activeProjectId, {
           title: draft.title.trim(),
           body: draft.body.trim(),
           priority: draft.priority,
@@ -1482,9 +1337,7 @@ function App() {
     if (!activeProjectId || !isTauriRuntime) return;
     await runAction(
       () =>
-        invoke<ProjectWorkspace>("update_action_item", {
-          projectId: activeProjectId,
-          actionItemId: actionItem.id,
+        api.updateActionItem(activeProjectId, actionItem.id, {
           title: draft.title.trim(),
           body: draft.body.trim(),
           status: draft.status,
@@ -1501,11 +1354,7 @@ function App() {
   async function handleCreateActionItemFromSuggestion(suggestion: SuggestionRow) {
     if (!activeProjectId || !isTauriRuntime) return;
     await runAction(
-      () =>
-        invoke<ProjectWorkspace>("create_action_item_from_suggestion", {
-          projectId: activeProjectId,
-          suggestionId: suggestion.id,
-        }),
+      () => api.createActionItemFromSuggestion(activeProjectId, suggestion.id),
       (nextWorkspace) => {
         setWorkspace(nextWorkspace);
         setNotice("次の一手を確認事項に追加しました。");
@@ -1517,8 +1366,7 @@ function App() {
     if (!activeProjectId || !isTauriRuntime) return;
     await runAction(
       () =>
-        invoke<ProjectWorkspace>("create_map_note", {
-          projectId: activeProjectId,
+        api.createMapNote(activeProjectId, {
           title: draft.title.trim(),
           body: draft.body.trim(),
           noteType: draft.noteType,
@@ -1534,9 +1382,7 @@ function App() {
     if (!activeProjectId || !isTauriRuntime) return;
     await runAction(
       () =>
-        invoke<ProjectWorkspace>("update_map_note", {
-          projectId: activeProjectId,
-          noteId: note.id,
+        api.updateMapNote(activeProjectId, note.id, {
           title: draft.title.trim(),
           body: draft.body.trim(),
           noteType: draft.noteType,
@@ -1552,11 +1398,7 @@ function App() {
     if (!activeProjectId || !isTauriRuntime) return;
     if (!window.confirm(`メモ「${note.title}」を削除しますか？`)) return;
     await runAction(
-      () =>
-        invoke<ProjectWorkspace>("delete_map_note", {
-          projectId: activeProjectId,
-          noteId: note.id,
-        }),
+      () => api.deleteMapNote(activeProjectId, note.id),
       (nextWorkspace) => {
         setWorkspace(nextWorkspace);
         setNotice("メモを削除しました。");
@@ -1567,12 +1409,7 @@ function App() {
   async function handleCreateNamedVersion(name: string, memo: string) {
     if (!activeProjectId || !isTauriRuntime) return;
     await runAction(
-      () =>
-        invoke<ProjectWorkspace>("create_named_version", {
-          projectId: activeProjectId,
-          name: name.trim(),
-          memo: memo.trim(),
-        }),
+      () => api.createNamedVersion(activeProjectId, name.trim(), memo.trim()),
       (nextWorkspace) => {
         setWorkspace(nextWorkspace);
         setNotice("現在の状態を名前付きで保存しました。");
@@ -1594,20 +1431,16 @@ function App() {
     await runAction(
       async () => {
         const purposeLabel = mapPurposeLabel(draft.purposeId);
-        const project = await invoke<Project>("create_project", {
+        const project = await api.createProject({
           name: draft.companyName.trim(),
           clientName: draft.companyName.trim(),
           industry: draft.industry.trim(),
           description: purposeLabel,
           memo: draft.memo.trim(),
         });
-        const imported = await invoke<unknown[]>("import_source_files_from_dialog", {
-          projectId: project.id,
-        });
-        const nextProjects = await invoke<Project[]>("list_projects");
-        const nextWorkspace = await invoke<ProjectWorkspace>("get_project_workspace", {
-          projectId: project.id,
-        });
+        const imported = await api.importSourceFilesFromDialog(project.id);
+        const nextProjects = await api.listProjects();
+        const nextWorkspace = await api.getProjectWorkspace(project.id);
         return { importedCount: imported.length, nextProjects, nextWorkspace, project };
       },
       ({ importedCount, nextProjects, nextWorkspace, project }) => {
@@ -1650,12 +1483,12 @@ function App() {
         void handleMapUiPreferencesChange({ aiLensOpen: true });
         return;
       }
-      const result = await invoke<MvpRunResult>("ask_map_insight", {
-        projectId: activeProjectId,
-        targetKind: "map",
-        targetId: null,
+      const result = await api.askMapInsight(
+        activeProjectId,
+        "map",
+        null,
         questionType,
-      });
+      );
       setWorkspace((current) => mergeAiRunWorkspace(current, result.workspace));
       setNotice(result.message);
       void handleMapUiPreferencesChange({ aiLensOpen: true });
@@ -1701,11 +1534,11 @@ function App() {
         setNotice("AI視点への理解メモを生成しました。");
         return;
       }
-      const result = await invoke<MvpRunResult>("ask_ai_lens_insight", {
-        projectId: activeProjectId,
+      const result = await api.askAiLensInsight(
+        activeProjectId,
         aiLensItemId,
-        questionText: question,
-      });
+        question,
+      );
       setWorkspace((current) => mergeAiRunWorkspace(current, result.workspace));
       setNotice(result.message);
     } catch (caughtError) {
@@ -1728,12 +1561,9 @@ function App() {
         setNotice("理解メモを削除しました。");
         return;
       }
-      const nextWorkspace = await invoke<ProjectWorkspace>(
-        "delete_ai_lens_insight_comment",
-        {
-          projectId: activeProjectId,
-          commentId,
-        },
+      const nextWorkspace = await api.deleteAiLensInsightComment(
+        activeProjectId,
+        commentId,
       );
       setWorkspace((current) => ({
         ...current,
@@ -1755,8 +1585,8 @@ function App() {
     async function loadAiProviderState() {
       try {
         const [settings, status] = await Promise.all([
-          invoke<AiSettings>("get_ai_settings"),
-          invoke<CursorSdkStatus>("get_cursor_sdk_status"),
+          api.getAiSettings(),
+          api.getCursorSdkStatus(),
         ]);
         if (cancelled) return;
         setAiSettings(settings);
@@ -1780,7 +1610,7 @@ function App() {
     let cancelled = false;
 
     async function loadInitialProjects() {
-      const rows = await invoke<Project[]>("list_projects");
+      const rows = await api.listProjects();
       if (cancelled) return;
       setProjects(rows);
       setSelectedProjectId((current) =>
@@ -1798,11 +1628,10 @@ function App() {
   useEffect(() => {
     if (!isTauriRuntime || !activeProjectId) return;
     let cancelled = false;
+    const projectId = activeProjectId;
 
     async function loadActiveWorkspace() {
-      const nextWorkspace = await invoke<ProjectWorkspace>("get_project_workspace", {
-        projectId: activeProjectId,
-      });
+      const nextWorkspace = await api.getProjectWorkspace(projectId);
       if (!cancelled) {
         setWorkspace(nextWorkspace);
       }
@@ -1832,16 +1661,13 @@ function App() {
             async () => {
               let importError: string | null = null;
               try {
-                await invoke("import_source_files", {
-                  projectId: activeProjectId,
-                  paths: droppedPaths,
-                });
+                await api.importSourceFiles(activeProjectId, droppedPaths);
               } catch (caughtError) {
                 importError = String(caughtError);
               }
-              return invoke<ProjectWorkspace>("get_project_workspace", {
-                projectId: activeProjectId,
-              }).then((nextWorkspace) => ({ importError, nextWorkspace }));
+              return api
+                .getProjectWorkspace(activeProjectId)
+                .then((nextWorkspace) => ({ importError, nextWorkspace }));
             },
             ({ importError, nextWorkspace }) => {
               setWorkspace(nextWorkspace);
@@ -2896,7 +2722,6 @@ function MapWorkspace({
                 </span>
               )}
             </div>
-
           </div>
         </>
       ) : null}
@@ -3223,9 +3048,7 @@ function ContextChecksTab({
   actionItems: ActionItemRow[];
   onComplete: (actionItem: ActionItemRow) => void;
 }) {
-  const [expandedActionItemId, setExpandedActionItemId] = useState<string | null>(
-    null,
-  );
+  const [expandedActionItemId, setExpandedActionItemId] = useState<string | null>(null);
 
   function toggleActionItem(actionItemId: string) {
     setExpandedActionItemId((current) =>
@@ -3253,9 +3076,7 @@ function ContextChecksTab({
         return (
           <article
             aria-expanded={expanded}
-            className={`context-task-row ${
-              expanded ? "context-card-expanded" : ""
-            }`}
+            className={`context-task-row ${expanded ? "context-card-expanded" : ""}`}
             key={actionItem.id}
             onClick={() => toggleActionItem(actionItem.id)}
             onKeyDown={(event) => handleActionItemKeyDown(event, actionItem.id)}
@@ -3301,9 +3122,7 @@ function ContextActionsTab({
   onSelectSuggestion: (suggestionId: string) => void;
   suggestions: SuggestionRow[];
 }) {
-  const [expandedSuggestionId, setExpandedSuggestionId] = useState<string | null>(
-    null,
-  );
+  const [expandedSuggestionId, setExpandedSuggestionId] = useState<string | null>(null);
 
   function selectSuggestion(suggestionId: string) {
     setExpandedSuggestionId((current) =>
@@ -3335,8 +3154,8 @@ function ContextActionsTab({
               <p className="context-card-detail">{suggestion.description}</p>
             ) : null}
             <small>
-              売上 {labelFor(impactLevelOptions, suggestion.expectedRevenueImpact)} / 工数{" "}
-              {labelFor(costLevelOptions, suggestion.effortLevel)}
+              売上 {labelFor(impactLevelOptions, suggestion.expectedRevenueImpact)} /
+              工数 {labelFor(costLevelOptions, suggestion.effortLevel)}
             </small>
           </button>
         );
@@ -4428,9 +4247,7 @@ function ProjectsView({
 
   async function confirmDeleteProject(project: Project) {
     if (
-      !window.confirm(
-        `「${project.name}」を削除しますか？この操作は元に戻せません。`,
-      )
+      !window.confirm(`「${project.name}」を削除しますか？この操作は元に戻せません。`)
     ) {
       return;
     }
@@ -6346,710 +6163,6 @@ function HistoryView({
         ))}
       </div>
     </section>
-  );
-}
-
-function InspectorPanel({
-  edge,
-  isTauriRuntime,
-  item,
-  node,
-  onClose,
-  onSetCenterNode,
-  onWorkspaceChange,
-  projectId,
-  suggestion,
-  workspace,
-}: {
-  edge: MapEdgeRow | null;
-  isTauriRuntime: boolean;
-  item: ExtractedItemRow | null;
-  node: MapNodeRow | null;
-  onClose: () => void;
-  onSetCenterNode: (nodeId: string | null) => void;
-  onWorkspaceChange: (workspace: ProjectWorkspace) => void;
-  projectId: string | null;
-  suggestion: SuggestionRow | null;
-  workspace: ProjectWorkspace;
-}) {
-  const [askBusy, setAskBusy] = useState(false);
-  const [askError, setAskError] = useState<string | null>(null);
-  const insightTargetKind = node ? "node" : edge ? "edge" : "map";
-  const insightTargetId = node?.id ?? edge?.id ?? null;
-  const resolvedCenterNodeId = resolveCenterNodeId(workspace);
-  const selectedNodeIsCenter = Boolean(node && resolvedCenterNodeId === node.id);
-
-  async function askMapInsight(questionType: string) {
-    if (!projectId) return;
-    setAskBusy(true);
-    setAskError(null);
-    try {
-      if (!isTauriRuntime) {
-        const now = new Date().toISOString();
-        const targetLabel = node
-          ? `ノード「${node.label}」`
-          : edge
-            ? "選択中の導線"
-            : "マップ全体";
-        onWorkspaceChange({
-          ...workspace,
-          aiComments: [
-            {
-              id: `local-insight-${Date.now()}`,
-              projectId,
-              aiRunId: null,
-              commentType: "map_insight",
-              title: "壁打ち: ローカルドラフト",
-              body: `${targetLabel}について、情報ソース要約とマップ構造から確認するための下書きです。実際の状況では、重要度、担当、成果指標を確認してください。`,
-              confidenceStatus: "estimated",
-              createdAt: now,
-            },
-            ...workspace.aiComments,
-          ],
-        });
-        return;
-      }
-      const result = await invoke<MvpRunResult>("ask_map_insight", {
-        projectId,
-        targetKind: insightTargetKind,
-        targetId: insightTargetId,
-        questionType,
-      });
-      onWorkspaceChange(result.workspace);
-    } catch (caughtError) {
-      setAskError(String(caughtError));
-    } finally {
-      setAskBusy(false);
-    }
-  }
-
-  if (!item && !node && !edge && !suggestion) {
-    return null;
-  }
-
-  async function submitItem(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!item || !projectId || !isTauriRuntime) return;
-    const form = new FormData(event.currentTarget);
-    const nextWorkspace = await invoke<ProjectWorkspace>("update_extracted_item", {
-      projectId,
-      itemId: item.id,
-      name: String(form.get("name") ?? ""),
-      itemType: String(form.get("itemType") ?? "business"),
-      description: String(form.get("description") ?? ""),
-      confidenceStatus: String(form.get("confidenceStatus") ?? "estimated"),
-      impactScore: Number(form.get("impactScore") ?? 2),
-      subjectiveImportance: Number(form.get("subjectiveImportance") ?? 2),
-      adoptionStatus: String(form.get("adoptionStatus") ?? "accepted"),
-      memo: String(form.get("memo") ?? ""),
-    });
-    onWorkspaceChange(nextWorkspace);
-  }
-
-  async function submitNode(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!node || !projectId || !isTauriRuntime) return;
-    const form = new FormData(event.currentTarget);
-    const nextWorkspace = await invoke<ProjectWorkspace>("update_map_node", {
-      projectId,
-      nodeId: node.id,
-      label: String(form.get("label") ?? ""),
-      nodeType: String(form.get("nodeType") ?? "business"),
-      description: String(form.get("description") ?? ""),
-      confidenceStatus: String(form.get("confidenceStatus") ?? "estimated"),
-      influenceLevel: String(form.get("influenceLevel") ?? "2"),
-      informationRichness: String(form.get("informationRichness") ?? "50"),
-      adoptionStatus: String(form.get("adoptionStatus") ?? "accepted"),
-      memo: String(form.get("memo") ?? ""),
-    });
-    onWorkspaceChange(nextWorkspace);
-  }
-
-  async function submitEdge(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!edge || !projectId || !isTauriRuntime) return;
-    const form = new FormData(event.currentTarget);
-    const nextWorkspace = await invoke<ProjectWorkspace>("update_map_edge", {
-      projectId,
-      edgeId: edge.id,
-      label: String(form.get("label") ?? ""),
-      flowType: String(form.get("flowType") ?? "inquiry"),
-      strength: String(form.get("strength") ?? "normal"),
-      confidenceStatus: String(form.get("confidenceStatus") ?? "estimated"),
-      edgeType: String(form.get("edgeType") ?? "normal"),
-      adoptionStatus: String(form.get("adoptionStatus") ?? "accepted"),
-      note: String(form.get("note") ?? ""),
-    });
-    onWorkspaceChange(nextWorkspace);
-  }
-
-  async function hideEdge() {
-    if (!edge || !projectId) return;
-    if (!isTauriRuntime) {
-      onWorkspaceChange({
-        ...workspace,
-        edges: workspace.edges.map((candidate) =>
-          candidate.id === edge.id
-            ? {
-                ...candidate,
-                adoptionStatus: "rejected",
-                updatedAt: new Date().toISOString(),
-              }
-            : candidate,
-        ),
-      });
-      return;
-    }
-    const nextWorkspace = await invoke<ProjectWorkspace>("update_map_edge", {
-      projectId,
-      edgeId: edge.id,
-      label: edge.label ?? "",
-      flowType: edge.flowType ?? "inquiry",
-      strength: edge.strength ?? "normal",
-      confidenceStatus: edge.confidenceStatus ?? "estimated",
-      edgeType: edge.edgeType,
-      adoptionStatus: "rejected",
-      note: edge.note ?? "",
-    });
-    onWorkspaceChange(nextWorkspace);
-  }
-
-  async function submitSuggestion(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!suggestion || !projectId || !isTauriRuntime) return;
-    const form = new FormData(event.currentTarget);
-    const nextWorkspace = await invoke<ProjectWorkspace>("update_suggestion", {
-      projectId,
-      suggestionId: suggestion.id,
-      title: String(form.get("title") ?? ""),
-      description: String(form.get("description") ?? ""),
-      priority: String(form.get("priority") ?? "medium"),
-      adoptionStatus: String(form.get("adoptionStatus") ?? "pending"),
-      rationale: String(form.get("rationale") ?? ""),
-      expectedRevenueImpact: String(form.get("expectedRevenueImpact") ?? "medium"),
-      expectedProfitImpact: String(form.get("expectedProfitImpact") ?? "medium"),
-      costLevel: String(form.get("costLevel") ?? "medium"),
-      effortLevel: String(form.get("effortLevel") ?? "medium"),
-      timeToImpact: String(form.get("timeToImpact") ?? "mid"),
-      confidenceStatus: String(form.get("confidenceStatus") ?? "estimated"),
-      impactScore: Number(form.get("impactScore") ?? 50),
-      evidence: String(form.get("evidence") ?? ""),
-      memo: String(form.get("memo") ?? ""),
-    });
-    onWorkspaceChange(nextWorkspace);
-  }
-
-  return (
-    <aside className="inspector">
-      <div className="panel-heading">
-        <div>
-          <span>
-            {item ? "抽出カード" : node ? "ノード" : edge ? "導線" : "施策候補"}
-          </span>
-          <small>編集</small>
-        </div>
-        <button
-          aria-label="詳細パネルを閉じる"
-          className="panel-close-button"
-          onClick={onClose}
-          type="button"
-        >
-          <X size={15} aria-hidden="true" />
-        </button>
-      </div>
-      {!item && !suggestion ? (
-        <MapInsightActions
-          busy={askBusy}
-          error={askError}
-          onAsk={askMapInsight}
-          targetLabel={node ? node.label : edge ? "選択中の導線" : "マップ全体"}
-        />
-      ) : null}
-      {node ? (
-        <div className="inspector-center-actions">
-          <div>
-            <strong>売上の核</strong>
-            <span>
-              {selectedNodeIsCenter
-                ? "このノードが現在の中心です。"
-                : "このノードをマップの中心として強調できます。"}
-            </span>
-          </div>
-          <button
-            className={selectedNodeIsCenter ? "ghost-button" : "primary-button"}
-            onClick={() => onSetCenterNode(selectedNodeIsCenter ? null : node.id)}
-            type="button"
-          >
-            <Star size={14} aria-hidden="true" />
-            {selectedNodeIsCenter ? "核指定を解除" : "売上の核にする"}
-          </button>
-        </div>
-      ) : null}
-      {item ? <ItemForm item={item} onSubmit={submitItem} /> : null}
-      {node ? <NodeForm node={node} onSubmit={submitNode} /> : null}
-      {edge ? <EdgeForm edge={edge} onHide={hideEdge} onSubmit={submitEdge} /> : null}
-      {suggestion ? (
-        <SuggestionForm
-          suggestion={suggestion}
-          workspace={workspace}
-          onSubmit={submitSuggestion}
-        />
-      ) : null}
-    </aside>
-  );
-}
-
-function MapInsightActions({
-  busy,
-  error,
-  onAsk,
-  targetLabel,
-}: {
-  busy: boolean;
-  error: string | null;
-  onAsk: (questionType: string) => void;
-  targetLabel: string;
-}) {
-  return (
-    <div className="map-insight-actions">
-      <div className="map-insight-header">
-        <MessageSquareText size={14} aria-hidden="true" />
-        <span>Codexに聞く</span>
-        <small>{targetLabel}</small>
-      </div>
-      <div className="map-insight-buttons">
-        <button disabled={busy} onClick={() => onAsk("explain")} type="button">
-          これは何？
-        </button>
-        <button disabled={busy} onClick={() => onAsk("importance")} type="button">
-          なぜ重要？
-        </button>
-        <button disabled={busy} onClick={() => onAsk("bottleneck")} type="button">
-          詰まりは？
-        </button>
-        <button disabled={busy} onClick={() => onAsk("next_questions")} type="button">
-          次に聞くこと
-        </button>
-        <button disabled={busy} onClick={() => onAsk("revenue_action")} type="button">
-          売上への一手
-        </button>
-      </div>
-      {busy ? <small className="map-insight-status">Codex確認中...</small> : null}
-      {error ? <small className="map-insight-error">{error}</small> : null}
-    </div>
-  );
-}
-
-function SuggestionForm({
-  onSubmit,
-  suggestion,
-  workspace,
-}: {
-  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
-  suggestion: SuggestionRow;
-  workspace: ProjectWorkspace;
-}) {
-  return (
-    <form className="inspector-form" key={suggestion.id} onSubmit={onSubmit}>
-      <Field label="施策名">
-        <input defaultValue={suggestion.title} name="title" />
-      </Field>
-      <Field label="やること">
-        <textarea defaultValue={suggestion.description} name="description" />
-      </Field>
-      <FormGrid>
-        <Field label="優先度">
-          <select defaultValue={suggestion.priority} name="priority">
-            {priorityOptions.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="状態">
-          <select defaultValue={suggestion.adoptionStatus} name="adoptionStatus">
-            {adoptionOptions.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </Field>
-      </FormGrid>
-      <FormGrid>
-        <Field label="売上影響">
-          <select
-            defaultValue={suggestion.expectedRevenueImpact}
-            name="expectedRevenueImpact"
-          >
-            {impactLevelOptions.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="利益影響">
-          <select
-            defaultValue={suggestion.expectedProfitImpact}
-            name="expectedProfitImpact"
-          >
-            {impactLevelOptions.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </Field>
-      </FormGrid>
-      <FormGrid>
-        <Field label="費用">
-          <select defaultValue={suggestion.costLevel} name="costLevel">
-            {costLevelOptions.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="工数">
-          <select defaultValue={suggestion.effortLevel} name="effortLevel">
-            {costLevelOptions.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </Field>
-      </FormGrid>
-      <FormGrid>
-        <Field label="時期">
-          <select defaultValue={suggestion.timeToImpact} name="timeToImpact">
-            {timeToImpactOptions.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="確度">
-          <select defaultValue={suggestion.confidenceStatus} name="confidenceStatus">
-            {confidenceOptions.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </Field>
-      </FormGrid>
-      <Field label="インパクトスコア">
-        <input
-          defaultValue={suggestion.impactScore}
-          max={100}
-          min={0}
-          name="impactScore"
-          type="number"
-        />
-      </Field>
-      <Field label="判断理由">
-        <textarea defaultValue={suggestion.rationale ?? ""} name="rationale" />
-      </Field>
-      <Field label="根拠">
-        <textarea defaultValue={suggestion.evidence ?? ""} name="evidence" />
-      </Field>
-      <Field label="メモ">
-        <textarea defaultValue={suggestion.memo ?? ""} name="memo" />
-      </Field>
-      <SuggestionSources suggestion={suggestion} workspace={workspace} />
-      <button className="primary-button" type="submit">
-        保存
-      </button>
-    </form>
-  );
-}
-
-function SuggestionSources({
-  suggestion,
-  workspace,
-}: {
-  suggestion: SuggestionRow;
-  workspace: ProjectWorkspace;
-}) {
-  const relatedNodeIds = parseRelatedNodeIds(suggestion.relatedNodeIdsJson);
-  const relatedNodes = workspace.nodes.filter((node) =>
-    relatedNodeIds.includes(node.id),
-  );
-  const relatedItems = workspace.extractedItems.filter((item) =>
-    relatedNodes.some((node) => node.extractedItemId === item.id),
-  );
-  const sources = relatedItems.flatMap((item) => item.sources);
-
-  return (
-    <div className="source-list">
-      <span>根拠ノード・source</span>
-      {relatedNodes.length === 0 ? <small>関連ノード未設定</small> : null}
-      {relatedNodes.map((node) => (
-        <small key={node.id}>{node.label}</small>
-      ))}
-      {sources.map((source) => (
-        <small key={source.id}>
-          {source.sourceFileName ?? "source"}
-          {source.pageNumber ? ` p.${source.pageNumber}` : ""}
-          {source.rowStart ? ` row ${source.rowStart}` : ""}
-        </small>
-      ))}
-    </div>
-  );
-}
-
-function ItemForm({
-  item,
-  onSubmit,
-}: {
-  item: ExtractedItemRow;
-  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
-}) {
-  return (
-    <form className="inspector-form" key={item.id} onSubmit={onSubmit}>
-      <Field label="名前">
-        <input defaultValue={item.name} name="name" />
-      </Field>
-      <Field label="分類">
-        <select defaultValue={item.itemType} name="itemType">
-          {categoryOptions.map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
-      </Field>
-      <Field label="説明">
-        <textarea defaultValue={item.description ?? ""} name="description" />
-      </Field>
-      <FormGrid>
-        <Field label="確度">
-          <select defaultValue={item.confidenceStatus} name="confidenceStatus">
-            {confidenceOptions.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="影響力">
-          <input
-            defaultValue={item.impactScore}
-            max={3}
-            min={1}
-            name="impactScore"
-            type="number"
-          />
-        </Field>
-      </FormGrid>
-      <FormGrid>
-        <Field label="主観重要度">
-          <input
-            defaultValue={item.subjectiveImportance}
-            max={3}
-            min={1}
-            name="subjectiveImportance"
-            type="number"
-          />
-        </Field>
-        <Field label="状態">
-          <select defaultValue={item.adoptionStatus} name="adoptionStatus">
-            {adoptionOptions.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </Field>
-      </FormGrid>
-      <Field label="メモ">
-        <textarea defaultValue={item.memo ?? ""} name="memo" />
-      </Field>
-      <SourceList item={item} />
-      <button className="primary-button" type="submit">
-        保存
-      </button>
-    </form>
-  );
-}
-
-function NodeForm({
-  node,
-  onSubmit,
-}: {
-  node: MapNodeRow;
-  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
-}) {
-  return (
-    <form className="inspector-form" key={node.id} onSubmit={onSubmit}>
-      <Field label="名前">
-        <input defaultValue={node.label} name="label" />
-      </Field>
-      <Field label="分類">
-        <select defaultValue={node.nodeType} name="nodeType">
-          {categoryOptions.map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
-      </Field>
-      <Field label="説明">
-        <textarea defaultValue={node.description ?? ""} name="description" />
-      </Field>
-      <FormGrid>
-        <Field label="確度">
-          <select
-            defaultValue={node.confidenceStatus ?? "estimated"}
-            name="confidenceStatus"
-          >
-            {confidenceOptions.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="影響力">
-          <input
-            defaultValue={node.influenceLevel ?? "2"}
-            max={3}
-            min={1}
-            name="influenceLevel"
-            type="number"
-          />
-        </Field>
-      </FormGrid>
-      <FormGrid>
-        <Field label="情報充実度">
-          <input
-            defaultValue={node.informationRichness ?? "50"}
-            max={100}
-            min={0}
-            name="informationRichness"
-            type="number"
-          />
-        </Field>
-        <Field label="状態">
-          <select defaultValue={node.adoptionStatus} name="adoptionStatus">
-            {adoptionOptions.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </Field>
-      </FormGrid>
-      <Field label="メモ">
-        <textarea defaultValue={node.memo ?? ""} name="memo" />
-      </Field>
-      <button className="primary-button" type="submit">
-        保存
-      </button>
-    </form>
-  );
-}
-
-function EdgeForm({
-  edge,
-  onHide,
-  onSubmit,
-}: {
-  edge: MapEdgeRow;
-  onHide: () => void;
-  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
-}) {
-  return (
-    <form className="inspector-form" key={edge.id} onSubmit={onSubmit}>
-      <Field label="ラベル">
-        <input defaultValue={edge.label ?? ""} name="label" />
-      </Field>
-      <FormGrid>
-        <Field label="線の状態">
-          <select defaultValue={edge.edgeType} name="edgeType">
-            <option value="strong">強い導線</option>
-            <option value="normal">通常</option>
-            <option value="weak">弱い導線</option>
-            <option value="bottleneck">詰まり</option>
-            <option value="data_reference">データ根拠</option>
-          </select>
-        </Field>
-        <Field label="強さ">
-          <select defaultValue={edge.strength ?? "normal"} name="strength">
-            <option value="strong">strong</option>
-            <option value="normal">normal</option>
-            <option value="weak">weak</option>
-          </select>
-        </Field>
-      </FormGrid>
-      <FormGrid>
-        <Field label="流れ">
-          <select defaultValue={edge.flowType ?? "inquiry"} name="flowType">
-            <option value="awareness">認知</option>
-            <option value="inquiry">問い合わせ</option>
-            <option value="proposal">提案</option>
-            <option value="purchase">購入</option>
-            <option value="retention">継続</option>
-            <option value="referral">紹介</option>
-            <option value="data_reference">データ連携</option>
-          </select>
-        </Field>
-        <Field label="確度">
-          <select
-            defaultValue={edge.confidenceStatus ?? "estimated"}
-            name="confidenceStatus"
-          >
-            {confidenceOptions.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </Field>
-      </FormGrid>
-      <Field label="状態">
-        <select defaultValue={edge.adoptionStatus} name="adoptionStatus">
-          {adoptionOptions.map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
-      </Field>
-      <Field label="メモ">
-        <textarea defaultValue={edge.note ?? ""} name="note" />
-      </Field>
-      <div className="form-actions">
-        <button className="ghost-button danger-button" onClick={onHide} type="button">
-          <Trash2 size={14} aria-hidden="true" />
-          非表示
-        </button>
-        <button className="primary-button" type="submit">
-          保存
-        </button>
-      </div>
-    </form>
-  );
-}
-
-function SourceList({ item }: { item: ExtractedItemRow }) {
-  return (
-    <div className="source-list">
-      <span>出典</span>
-      {item.sources.length === 0 ? <small>出典なし</small> : null}
-      {item.sources.map((source) => (
-        <small key={source.id}>
-          {source.sourceFileName ?? "source"}
-          {source.pageNumber ? ` p.${source.pageNumber}` : ""}
-          {source.rowStart ? ` row ${source.rowStart}` : ""}
-        </small>
-      ))}
-    </div>
   );
 }
 

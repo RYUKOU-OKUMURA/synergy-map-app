@@ -31,7 +31,7 @@ MVP-1は、見やすい売上マップが出ることを最低ラインにする
   - [x] トースト / 通知
   - [x] ローディング状態
   - [x] エラー表示
-- [ ] Tauri commandの呼び出しラッパーを作る。
+- [x] Tauri commandの呼び出しラッパーを作る。
 - [ ] TanStack Queryのquery key設計を決める。
 - [ ] Zustandで選択中project、選択中view、編集中状態を管理する。
 
